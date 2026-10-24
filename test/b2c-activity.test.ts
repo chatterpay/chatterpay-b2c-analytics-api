@@ -1,7 +1,12 @@
 import { Long, ObjectId } from 'mongodb';
 import { describe, expect, it } from 'vitest';
 import { COINGECKO_SIMPLE_PRICE_URL, coingeckoPriceProvider } from '../src/ingest/coingecko.js';
-import { toIngestedTransaction, toIngestedUser } from '../src/store/b2c-activity.js';
+import {
+  countryOfPhone,
+  toIngestedTransaction,
+  toIngestedUser,
+  UNKNOWN_COUNTRY
+} from '../src/store/b2c-activity.js';
 
 describe('B2C activity mapping', () => {
   it('copies a transaction with a Long chain id', () => {
@@ -41,13 +46,14 @@ describe('B2C activity mapping', () => {
     expect(toIngestedTransaction({ _id: new ObjectId(), type: 'transfer' })).toBeNull();
   });
 
-  it('copies the id, signup date and wallets of a user only', () => {
+  it('copies the id, signup date and wallets of a user, and only the country of its phone', () => {
     const id = new ObjectId();
 
     expect(
       toIngestedUser({
         _id: id,
         creationDate: new Date('2026-10-11T23:41:07.615Z'),
+        phone_number: '5491151234567',
         wallets: [
           { chain_id: 84532, wallet_proxy: '0x12b4' },
           { chain_id: Long.fromString('900000000001'), wallet_proxy: 'addr_test1q' },
@@ -57,12 +63,24 @@ describe('B2C activity mapping', () => {
     ).toEqual({
       id: id.toHexString(),
       createdAt: new Date('2026-10-11T23:41:07.615Z'),
+      country: 'AR',
       wallets: [
         { chainId: '84532', address: '0x12b4' },
         { chainId: '900000000001', address: 'addr_test1q' }
       ]
     });
     expect(toIngestedUser({ _id: id }).createdAt).toBeNull();
+  });
+
+  it('estimates the country from the calling code, or Unknown', () => {
+    expect(countryOfPhone('5491151234567')).toBe('AR');
+    expect(countryOfPhone('+52 1 55 1234 5678')).toBe('MX');
+    expect(countryOfPhone('14165551234')).toBe('CA');
+    expect(countryOfPhone('12025550123')).toBe('US');
+    expect(countryOfPhone('5511987654321')).toBe('BR');
+    expect(countryOfPhone('999123456789')).toBe(UNKNOWN_COUNTRY);
+    expect(countryOfPhone('123')).toBe(UNKNOWN_COUNTRY);
+    expect(countryOfPhone(undefined)).toBe(UNKNOWN_COUNTRY);
   });
 });
 
