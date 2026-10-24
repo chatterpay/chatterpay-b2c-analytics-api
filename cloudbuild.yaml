@@ -1,42 +1,16 @@
 steps:
-  #
-  # Writes the trigger substitutions to .env so the Build step can turn them into build arguments.
-  # Only non-secret settings belong here; secrets are injected by Cloud Run (see Build).
-  #
-  - name: "gcr.io/cloud-builders/npm"
-    id: CreateEnv
-    args: ["run", "create-env"]
-    env:
-      - LOG_LEVEL=${_LOG_LEVEL}
-      - BODY_LIMIT_BYTES=${_BODY_LIMIT_BYTES}
-      - REQUEST_TIMEOUT_MS=${_REQUEST_TIMEOUT_MS}
-      - JWT_KEY_ID=${_JWT_KEY_ID}
-      - JWT_ISSUER=${_JWT_ISSUER}
-      - JWT_AUDIENCE=${_JWT_AUDIENCE}
-      - SESSION_TTL_MINUTES=${_SESSION_TTL_MINUTES}
-      - CHALLENGE_TTL_MINUTES=${_CHALLENGE_TTL_MINUTES}
-      - MONGO_DB_NAME=${_MONGO_DB_NAME}
-
   - name: "gcr.io/cloud-builders/docker"
     id: Build
-    # The --build-arg list is assembled in bash from the .env that CreateEnv left behind, and the
-    # names come from the Dockerfile's own ARG lines, so a new variable only has to be declared in
-    # CreateEnv and in the Dockerfile. An empty value counts as unset and the API applies its default.
-    #
-    # Secrets are skipped. Cloud Run injects them into the service through secretKeyRef and that
-    # value overrides the image's ENV; baking them in would leave the access code, the JWT signing
-    # key and the database credentials in clear inside the registry. A new secret goes on the Cloud
-    # Run service and on this list, never into CreateEnv.
-    entrypoint: bash
+    # The image carries no environment settings. Every server variable, secret or not, is defined
+    # on the Cloud Run service YAML; secrets come from Secret Manager through secretKeyRef.
     args:
-      - "-c"
-      - |
-        set -euo pipefail
-        secrets=' DEMO_ACCESS_CODE JWT_PRIVATE_KEY MONGO_URI '
-        build_args=()
-        for name in $$(awk '/^ARG /{print $$2}' Dockerfile); do case "$$secrets" in *" $$name "*) continue;; esac; build_args+=(--build-arg "$$name=$$(sed -n "s/^$$name=//p" .env | head -n 1)"); done
-        echo "assembled $$(( $${#build_args[@]} / 2 )) build args"
-        docker build --no-cache -f Dockerfile "$${build_args[@]}" -t '$_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA' .
+      - "build"
+      - "--no-cache"
+      - "-f"
+      - "Dockerfile"
+      - "-t"
+      - "$_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA"
+      - "."
 
   - name: "gcr.io/cloud-builders/docker"
     id: Push
@@ -54,6 +28,9 @@ steps:
     # roles/run.invoker, which only the site's service account holds. The token audience is the API
     # domain, declared as a custom audience on the service, because the site reaches the API
     # through the load balancer.
+    #
+    # The deploy sets only the image, labels and network, so the variables defined on the service
+    # are carried over to the new revision.
     entrypoint: bash
     args:
       - "-c"
