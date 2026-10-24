@@ -2,65 +2,18 @@ openapi: 3.1.0
 info:
   title: ChatterPay Analytics API
   version: 0.1.0
-  description: >-
-    Private API behind the ChatterPay Analytics site BFF. It is not reachable from browsers:
-    Cloud Run requires an IAM identity token from the site service account. Every metric it
-    serves in V0 is synthetic and labelled with dataStatus "mock".
-servers:
-  - url: http://127.0.0.1:4001
-    description: Local development
-paths:
-  /healthz:
-    get:
-      operationId: getHealth
-      summary: Liveness probe
-      tags: [infrastructure]
-      responses:
-        "200":
-          description: Process is alive.
-          headers:
-            X-Request-Id:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/HealthBody"
-  /readyz:
-    get:
-      operationId: getReadiness
-      summary: Readiness probe
-      tags: [infrastructure]
-      responses:
-        "200":
-          description: Process can serve requests.
-          headers:
-            X-Request-Id:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/HealthBody"
-        "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+  description: Private API behind the ChatterPay Analytics site BFF. Cloud Run
+    only admits callers with an IAM identity token of the site service account.
+    Every metric is synthetic and carries dataStatus "mock".
 components:
-  headers:
-    XRequestId:
-      description: Correlation id; echoes a valid incoming x-request-id or a generated UUID.
-      schema:
-        type: string
   schemas:
-    HealthBody:
-      type: object
-      additionalProperties: false
-      required: [status]
-      properties:
-        status:
-          type: string
-          enum: [ok]
     ApiError:
       type: object
       additionalProperties: false
-      required: [code, message, requestId]
+      required:
+        - code
+        - message
+        - requestId
       properties:
         code:
           type: string
@@ -78,10 +31,1062 @@ components:
           description: Caller-safe description; never contains secrets, codes or PII.
         requestId:
           type: string
-  responses:
-    ServiceUnavailable:
-      description: A required dependency is unavailable.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ApiError"
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      tags:
+        - infrastructure
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - status
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - ok
+  /readyz:
+    get:
+      operationId: getReadiness
+      summary: Readiness probe
+      tags:
+        - infrastructure
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - status
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - ok
+  /v1/metrics/overview:
+    get:
+      operationId: getOverviewMetrics
+      summary: "Overview dataset: volume, transactions, fees and users by network"
+      tags:
+        - metrics
+      parameters:
+        - schema:
+            type: string
+            enum:
+              - all
+              - base
+              - cardano
+            default: all
+          in: query
+          name: network
+          required: false
+        - schema:
+            type: string
+            enum:
+              - today
+              - week
+              - month
+              - year
+              - ytd
+              - all
+            default: month
+          in: query
+          name: range
+          required: false
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - meta
+                  - tiles
+                  - series
+                  - byNetwork
+                properties:
+                  meta:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - datasetVersion
+                      - dataStatus
+                      - generatedAt
+                      - currency
+                      - network
+                      - range
+                      - period
+                      - previousPeriod
+                      - bucket
+                    properties:
+                      datasetVersion:
+                        type: string
+                      dataStatus:
+                        type: string
+                        enum:
+                          - mock
+                      generatedAt:
+                        type: string
+                        format: date-time
+                      currency:
+                        type: string
+                        enum:
+                          - USD
+                      network:
+                        type: string
+                        enum:
+                          - all
+                          - base
+                          - cardano
+                      range:
+                        type: string
+                        enum:
+                          - today
+                          - week
+                          - month
+                          - year
+                          - ytd
+                          - all
+                      period:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - start
+                          - end
+                        properties:
+                          start:
+                            type: string
+                            format: date-time
+                          end:
+                            type: string
+                            format: date-time
+                      previousPeriod:
+                        anyOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - start
+                              - end
+                            properties:
+                              start:
+                                type: string
+                                format: date-time
+                              end:
+                                type: string
+                                format: date-time
+                          - type: "null"
+                      bucket:
+                        type: string
+                        enum:
+                          - hour
+                          - day
+                          - month
+                          - year
+                  tiles:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - volumeUsd
+                      - transactions
+                      - feesUsd
+                      - activeUsers
+                      - newUsers
+                    properties:
+                      volumeUsd:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: string
+                            pattern: ^-?\d+\.\d+$
+                          previous:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      transactions:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: integer
+                            minimum: 0
+                          previous:
+                            type:
+                              - "null"
+                              - integer
+                            minimum: 0
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      feesUsd:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: string
+                            pattern: ^-?\d+\.\d+$
+                          previous:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      activeUsers:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: integer
+                            minimum: 0
+                          previous:
+                            type:
+                              - "null"
+                              - integer
+                            minimum: 0
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      newUsers:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: integer
+                            minimum: 0
+                          previous:
+                            type:
+                              - "null"
+                              - integer
+                            minimum: 0
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                  series:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - start
+                        - end
+                        - volumeUsd
+                        - transactions
+                        - byNetwork
+                      properties:
+                        start:
+                          type: string
+                          format: date-time
+                        end:
+                          type: string
+                          format: date-time
+                        volumeUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                        transactions:
+                          type: integer
+                        byNetwork:
+                          type: array
+                          items:
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - network
+                              - volumeUsd
+                              - transactions
+                            properties:
+                              network:
+                                type: string
+                                enum:
+                                  - base
+                                  - cardano
+                              volumeUsd:
+                                type: string
+                                pattern: ^-?\d+\.\d+$
+                              transactions:
+                                type: integer
+                  byNetwork:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - network
+                        - label
+                        - volumeUsd
+                        - transactions
+                        - feesUsd
+                        - activeUsers
+                        - newUsers
+                      properties:
+                        network:
+                          type: string
+                          enum:
+                            - base
+                            - cardano
+                        label:
+                          type: string
+                        volumeUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                        transactions:
+                          type: integer
+                        feesUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                        activeUsers:
+                          type: integer
+                        newUsers:
+                          type: integer
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/metrics/users:
+    get:
+      operationId: getUsersMetrics
+      summary: "Users dataset: active users, new users, retention cohorts"
+      tags:
+        - metrics
+      parameters:
+        - schema:
+            type: string
+            enum:
+              - all
+              - base
+              - cardano
+            default: all
+          in: query
+          name: network
+          required: false
+        - schema:
+            type: string
+            enum:
+              - daily
+              - monthly
+              - yearly
+            default: daily
+          in: query
+          name: granularity
+          required: false
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - meta
+                  - tiles
+                  - series
+                  - retention
+                  - byNetwork
+                properties:
+                  meta:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - datasetVersion
+                      - dataStatus
+                      - generatedAt
+                      - currency
+                      - network
+                      - granularity
+                      - period
+                      - previousPeriod
+                      - bucket
+                    properties:
+                      datasetVersion:
+                        type: string
+                      dataStatus:
+                        type: string
+                        enum:
+                          - mock
+                      generatedAt:
+                        type: string
+                        format: date-time
+                      currency:
+                        type: string
+                        enum:
+                          - USD
+                      network:
+                        type: string
+                        enum:
+                          - all
+                          - base
+                          - cardano
+                      granularity:
+                        type: string
+                        enum:
+                          - daily
+                          - monthly
+                          - yearly
+                      period:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - start
+                          - end
+                        properties:
+                          start:
+                            type: string
+                            format: date-time
+                          end:
+                            type: string
+                            format: date-time
+                      previousPeriod:
+                        anyOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - start
+                              - end
+                            properties:
+                              start:
+                                type: string
+                                format: date-time
+                              end:
+                                type: string
+                                format: date-time
+                          - type: "null"
+                      bucket:
+                        type: string
+                        enum:
+                          - hour
+                          - day
+                          - month
+                          - year
+                  tiles:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - dailyActiveUsers
+                      - monthlyActiveUsers
+                      - yearlyActiveUsers
+                      - newUsers
+                      - totalUsers
+                    properties:
+                      dailyActiveUsers:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: integer
+                            minimum: 0
+                          previous:
+                            type:
+                              - "null"
+                              - integer
+                            minimum: 0
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      monthlyActiveUsers:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: integer
+                            minimum: 0
+                          previous:
+                            type:
+                              - "null"
+                              - integer
+                            minimum: 0
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      yearlyActiveUsers:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: integer
+                            minimum: 0
+                          previous:
+                            type:
+                              - "null"
+                              - integer
+                            minimum: 0
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      newUsers:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: integer
+                            minimum: 0
+                          previous:
+                            type:
+                              - "null"
+                              - integer
+                            minimum: 0
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      totalUsers:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: integer
+                            minimum: 0
+                          previous:
+                            type:
+                              - "null"
+                              - integer
+                            minimum: 0
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                  series:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - start
+                        - end
+                        - activeUsers
+                        - newUsers
+                        - byNetwork
+                      properties:
+                        start:
+                          type: string
+                          format: date-time
+                        end:
+                          type: string
+                          format: date-time
+                        activeUsers:
+                          type: integer
+                        newUsers:
+                          type: integer
+                        byNetwork:
+                          type: array
+                          items:
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - network
+                              - activeUsers
+                              - newUsers
+                            properties:
+                              network:
+                                type: string
+                                enum:
+                                  - base
+                                  - cardano
+                              activeUsers:
+                                type: integer
+                              newUsers:
+                                type: integer
+                  retention:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - cohort
+                        - size
+                        - retained
+                      properties:
+                        cohort:
+                          type: string
+                          pattern: ^\d{4}-\d{2}$
+                        size:
+                          type: integer
+                        retained:
+                          type: array
+                          items:
+                            type: integer
+                  byNetwork:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - network
+                        - label
+                        - activeUsers
+                        - totalUsers
+                      properties:
+                        network:
+                          type: string
+                          enum:
+                            - base
+                            - cardano
+                        label:
+                          type: string
+                        activeUsers:
+                          type: integer
+                        totalUsers:
+                          type: integer
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/metrics/revenue:
+    get:
+      operationId: getRevenueMetrics
+      summary: "Revenue dataset: synthetic fees and volume by network and asset"
+      tags:
+        - metrics
+      parameters:
+        - schema:
+            type: string
+            enum:
+              - all
+              - base
+              - cardano
+            default: all
+          in: query
+          name: network
+          required: false
+        - schema:
+            type: string
+            enum:
+              - today
+              - week
+              - month
+              - year
+              - ytd
+              - all
+            default: month
+          in: query
+          name: range
+          required: false
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - meta
+                  - tiles
+                  - series
+                  - byNetwork
+                  - byAsset
+                properties:
+                  meta:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - datasetVersion
+                      - dataStatus
+                      - generatedAt
+                      - currency
+                      - network
+                      - range
+                      - period
+                      - previousPeriod
+                      - bucket
+                    properties:
+                      datasetVersion:
+                        type: string
+                      dataStatus:
+                        type: string
+                        enum:
+                          - mock
+                      generatedAt:
+                        type: string
+                        format: date-time
+                      currency:
+                        type: string
+                        enum:
+                          - USD
+                      network:
+                        type: string
+                        enum:
+                          - all
+                          - base
+                          - cardano
+                      range:
+                        type: string
+                        enum:
+                          - today
+                          - week
+                          - month
+                          - year
+                          - ytd
+                          - all
+                      period:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - start
+                          - end
+                        properties:
+                          start:
+                            type: string
+                            format: date-time
+                          end:
+                            type: string
+                            format: date-time
+                      previousPeriod:
+                        anyOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - start
+                              - end
+                            properties:
+                              start:
+                                type: string
+                                format: date-time
+                              end:
+                                type: string
+                                format: date-time
+                          - type: "null"
+                      bucket:
+                        type: string
+                        enum:
+                          - hour
+                          - day
+                          - month
+                          - year
+                  tiles:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - feesUsd
+                      - transferFeesUsd
+                      - swapFeesUsd
+                      - volumeUsd
+                    properties:
+                      feesUsd:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: string
+                            pattern: ^-?\d+\.\d+$
+                          previous:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      transferFeesUsd:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: string
+                            pattern: ^-?\d+\.\d+$
+                          previous:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      swapFeesUsd:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: string
+                            pattern: ^-?\d+\.\d+$
+                          previous:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      volumeUsd:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: string
+                            pattern: ^-?\d+\.\d+$
+                          previous:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                  series:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - start
+                        - end
+                        - feesUsd
+                        - transferFeesUsd
+                        - swapFeesUsd
+                      properties:
+                        start:
+                          type: string
+                          format: date-time
+                        end:
+                          type: string
+                          format: date-time
+                        feesUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                        transferFeesUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                        swapFeesUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                  byNetwork:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - network
+                        - label
+                        - feesUsd
+                        - transferFeesUsd
+                        - swapFeesUsd
+                        - volumeUsd
+                      properties:
+                        network:
+                          type: string
+                          enum:
+                            - base
+                            - cardano
+                        label:
+                          type: string
+                        feesUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                        transferFeesUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                        swapFeesUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                        volumeUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                  byAsset:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - network
+                        - asset
+                        - volumeUsd
+                        - feesUsd
+                      properties:
+                        network:
+                          type: string
+                          enum:
+                            - base
+                            - cardano
+                        asset:
+                          type: string
+                        volumeUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+                        feesUsd:
+                          type: string
+                          pattern: ^-?\d+\.\d+$
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+servers:
+  - url: http://127.0.0.1:4001
+    description: Local development
