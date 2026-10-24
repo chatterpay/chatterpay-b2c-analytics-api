@@ -1,12 +1,20 @@
-import { dayHourOf, periodOf, type TimeWindow } from './calendar.js';
+import { dayHourOf, hourIndexOf, periodOf, type TimeWindow } from './calendar.js';
 import { type NetworkFilter, type NetworkId, networkProfile, networksFor } from './catalog.js';
 import { type Facts, feesCents, volumeCents } from './facts.js';
 import { centsToUsd, countMetric, moneyMetric } from './format.js';
+import { buildTopCountries, buildTopTokens, buildTvl } from './holdings.js';
+import { activityTotals, buildVolumeByProduct } from './products.js';
 import { resolveRange } from './ranges.js';
 import { type MetricGroup, provenanceOf, sourceFor } from './sources.js';
 import type { MetricsRange, OverviewResponse, RangeMeta } from './types.js';
 
-const OVERVIEW_GROUPS: readonly MetricGroup[] = ['activity', 'activeUsers', 'signups'];
+const OVERVIEW_GROUPS: readonly MetricGroup[] = [
+  'activity',
+  'activeUsers',
+  'signups',
+  'balances',
+  'countries'
+];
 
 /**
  * Builds the `meta` object of a range response.
@@ -86,6 +94,9 @@ function sumOrNull<T>(items: readonly T[], pick: (item: T) => number | null): nu
  * network, so its user rows can add up to more than the tile. Each group is live or synthetic as
  * set in `LIVE_METRIC_GROUPS`.
  *
+ * TVL and Top Tokens come from the balance snapshots and Top Countries from the country counts of
+ * the last ingestion run; each block states its own availability and the instant it reflects.
+ *
  * @param network - Network filter.
  * @param range - Time range.
  * @param now - Current instant; the dataset ends at its hour.
@@ -159,6 +170,10 @@ export function buildOverview(
       feesUsd: centsToUsd(feesCents(t.facts)),
       activeUsers: t.activeUsers,
       newUsers: t.newUsers
-    }))
+    })),
+    tvl: buildTvl(networks, resolved),
+    topTokens: buildTopTokens(networks, resolved),
+    topCountries: buildTopCountries(network, hourIndexOf(now)),
+    volumeByProduct: buildVolumeByProduct(activityTotals(totals.map((t) => t.facts)))
   };
 }
