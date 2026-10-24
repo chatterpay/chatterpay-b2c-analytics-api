@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(yarn lint:ci)",
+      "Bash(yarn lint:fix)",
+      "Bash(yarn type-check)",
+      "Bash(yarn test)",
+      "Bash(yarn test *)",
+      "Bash(yarn test:coverage)",
+      "Bash(yarn openapi)",
+      "Bash(yarn openapi:check)",
+      "Bash(yarn pre-commit)",
+      "PowerShell(yarn lint:ci)",
+      "PowerShell(yarn lint:fix)",
+      "PowerShell(yarn type-check)",
+      "PowerShell(yarn test)",
+      "PowerShell(yarn test *)",
+      "PowerShell(yarn test:coverage)",
+      "PowerShell(yarn openapi)",
+      "PowerShell(yarn openapi:check)",
+      "PowerShell(yarn pre-commit)"
+    ],
+    "deny": ["Read(./.env)", "Read(./.env.local)", "Read(./.env.*.local)"]
+  }
+}
