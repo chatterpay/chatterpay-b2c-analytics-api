@@ -1,6 +1,7 @@
 import { MongoClient } from 'mongodb';
 import type { NetworkDefinition, NetworkFamily } from '../metrics/catalog.js';
 import { MongoB2cActivityReader } from './b2c-activity.js';
+import { connectOrClose } from './connect-retry.js';
 
 /** Options of {@link B2cNetworkSource.connect}. */
 export interface B2cNetworkSourceOptions {
@@ -94,11 +95,11 @@ export class B2cNetworkSource {
    */
   static async connect(options: B2cNetworkSourceOptions): Promise<B2cNetworkSource> {
     const client = new MongoClient(options.uri, {
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 10_000,
       appName: 'chatterpay-analytics-api',
       readPreference: 'secondaryPreferred'
     });
-    await client.connect();
+    await connectOrClose(client);
     return new B2cNetworkSource(client, options.dbName);
   }
 
