@@ -15,7 +15,8 @@ Instructions for coding agents working in this repository.
 - Request input is validated with schemas; MongoDB queries never take operators from client input.
 - Error responses use `ApiError` / the shared handler: `{ code, message, requestId }`, no stack traces or internal messages for 5xx.
 - Logs never contain JWTs, cookies, access codes, connection strings or emails in clear text.
-- Every new route is declared in `openapi/openapi.yaml` in the same change.
+- Every route declares its querystring and response schemas; run `yarn openapi` in the same change so `openapi/openapi.yaml` matches.
+- Changing the mock generator output requires a new `DATASET_VERSION`.
 
 ## Before committing
 
