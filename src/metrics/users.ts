@@ -76,28 +76,18 @@ function activeMetric(
   const previous = shiftWindow(window, -days);
   const source = sourceFor('activeUsers');
   return countMetric(
-    networks.reduce((sum, id) => sum + source.activeUsers(id, window), 0),
-    networks.reduce((sum, id) => sum + source.activeUsers(id, previous), 0)
+    source.activeUsersAcross(networks, window),
+    source.activeUsersAcross(networks, previous)
   );
 }
 
 function retention(networks: readonly NetworkId[], now: DayHour): UsersResponse['retention'] {
   const cohorts: UsersResponse['retention'] = [];
-  const signups = sourceFor('signups');
   const retention = sourceFor('retention');
   // Only complete months: the most recent cohort is last month, with no later month yet.
   for (let monthsAgo = RETENTION_COHORTS; monthsAgo >= 1; monthsAgo -= 1) {
     const cohortStart = addMonths(now.day, -monthsAgo);
-    const cohortWindow = dayWindow(cohortStart, addMonths(now.day, -monthsAgo + 1) - 1);
-    let size = 0;
-    const retained: number[] = new Array<number>(monthsAgo - 1).fill(0);
-    for (const id of networks) {
-      const networkSize = signups.facts(id, cohortWindow).newUsers;
-      size += networkSize;
-      retention.retained(id, cohortStart, networkSize, monthsAgo - 1).forEach((value, index) => {
-        retained[index] = (retained[index] ?? 0) + value;
-      });
-    }
+    const { size, retained } = retention.cohortAcross(networks, cohortStart, monthsAgo - 1);
     cohorts.push({ cohort: isoMonthOf(cohortStart), size, retained });
   }
   return cohorts;
@@ -108,7 +98,9 @@ function retention(networks: readonly NetworkId[], now: DayHour): UsersResponse[
  *
  * Tiles compare trailing windows with the same span right before: today against the same hours of
  * yesterday, 30 days, 365 days. The series and the network breakdown follow the granularity.
- * Users are counted per network; a person active on two networks counts once on each. Each metric
+ * Tiles, series totals and cohorts count a person once however many of the selected networks they
+ * use; `byNetwork` and the `byNetwork` of each series point count per network, so a person active
+ * on two networks appears in both and those rows can add up to more than the total. Each metric
  * group is live or synthetic as set in `LIVE_METRIC_GROUPS`.
  *
  * @param network - Network filter.
@@ -149,12 +141,12 @@ export function buildUsers(
         365
       ),
       newUsers: countMetric(
-        networks.reduce((sum, id) => sum + signups.facts(id, last30).newUsers, 0),
-        networks.reduce((sum, id) => sum + signups.facts(id, previous30).newUsers, 0)
+        signups.newUsersAcross(networks, last30),
+        signups.newUsersAcross(networks, previous30)
       ),
       totalUsers: countMetric(
-        networks.reduce((sum, id) => sum + signups.totalUsersAt(id, point), 0),
-        networks.reduce((sum, id) => sum + signups.totalUsersAt(id, previous30.end), 0)
+        signups.totalUsersAcross(networks, point),
+        signups.totalUsersAcross(networks, previous30.end)
       )
     },
     series: plan.buckets.map((bucket) => {
@@ -165,8 +157,8 @@ export function buildUsers(
       }));
       return {
         ...periodOf(bucket),
-        activeUsers: byNetwork.reduce((sum, item) => sum + item.activeUsers, 0),
-        newUsers: byNetwork.reduce((sum, item) => sum + item.newUsers, 0),
+        activeUsers: active.activeUsersAcross(networks, bucket),
+        newUsers: signups.newUsersAcross(networks, bucket),
         byNetwork
       };
     }),
