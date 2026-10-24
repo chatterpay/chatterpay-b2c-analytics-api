@@ -4,7 +4,7 @@ Instructions for coding agents working in this repository.
 
 ## Scope
 
-- This repo is the private API of ChatterPay Analytics. The site repo is `chatterpay-b2c-analytics-site`.
+- This repo is the private API of ChatterPay Analytics. The site repo is `chatterpay-analytics-site`.
 - V0 serves synthetic data only. Do not connect to ChatterPay B2C collections, blockchains, RPC providers or signers, and do not copy production data into fixtures.
 - Mock datasets live in this repo, never in the site.
 
