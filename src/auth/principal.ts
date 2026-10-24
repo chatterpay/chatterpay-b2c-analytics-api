@@ -8,6 +8,8 @@ export type Role = 'admin' | 'viewer';
 export interface Principal {
   userId: string;
   role: Role;
+  /** `jti` of the session behind the request; absent for principals not backed by a session. */
+  sessionId?: string;
 }
 
 /**
@@ -23,8 +25,7 @@ declare module 'fastify' {
 }
 
 /**
- * Authenticator used until the session flow exists: every request is anonymous, so protected
- * routes answer 401.
+ * Authenticator that admits nobody: every request is anonymous, so protected routes answer 401.
  *
  * @returns Always `null`.
  */
