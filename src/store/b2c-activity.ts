@@ -1,9 +1,11 @@
+import { parsePhoneNumberFromString } from 'libphonenumber-js/max';
 import { type Db, type Filter, type Document as MongoDocument, ObjectId } from 'mongodb';
 import type {
   B2cActivityReader,
+  B2cUserRecord,
+  ChainEndpoint,
   ChainInfo,
   IngestedTransaction,
-  IngestedUser,
   TokenInfo,
   TransactionCursor
 } from '../ingest/types.js';
@@ -23,12 +25,39 @@ const TRANSACTION_PROJECTION = {
   chain_id: 1
 } as const;
 
-/** Fields of a B2C `users` document that the ingestion copies; nothing that identifies a person. */
+/**
+ * Fields of a B2C `users` document that the ingestion reads. The phone number is read only to
+ * derive the country of its calling code and is dropped right after; nothing else that identifies
+ * a person is read.
+ */
 const USER_PROJECTION = {
   creationDate: 1,
+  phone_number: 1,
   'wallets.chain_id': 1,
   'wallets.wallet_proxy': 1
 } as const;
+
+/** Country category of a phone number without a single country. */
+export const UNKNOWN_COUNTRY = 'Unknown';
+
+/**
+ * Country of the calling code of a phone number. B2C numbers are stored as digits in international
+ * format, mostly without the leading `+`.
+ *
+ * @param phone - Phone number as stored.
+ * @returns ISO 3166-1 alpha-2 code, or {@link UNKNOWN_COUNTRY} when the number gives no single
+ *   country (shared calling codes without a matching range, or an unparsable number).
+ */
+export function countryOfPhone(phone: unknown): string {
+  if (typeof phone !== 'string') {
+    return UNKNOWN_COUNTRY;
+  }
+  const digits = phone.replace(/[^\d]/g, '');
+  if (digits.length < 6) {
+    return UNKNOWN_COUNTRY;
+  }
+  return parsePhoneNumberFromString(`+${digits}`)?.country ?? UNKNOWN_COUNTRY;
+}
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value : '';
@@ -78,16 +107,18 @@ export function toIngestedTransaction(document: MongoDocument): IngestedTransact
 }
 
 /**
- * Maps a B2C `users` document to its ingested copy.
+ * Maps a B2C `users` document to its ingested record.
  *
  * @param document - Document with the fields of the user projection.
- * @returns The copy.
+ * @returns The record: id, signup date, wallets and the country of the phone number, never the
+ *   number itself.
  */
-export function toIngestedUser(document: MongoDocument): IngestedUser {
+export function toIngestedUser(document: MongoDocument): B2cUserRecord {
   const wallets: unknown = document.wallets;
   return {
     id: String(document._id),
     createdAt: document.creationDate instanceof Date ? document.creationDate : null,
+    country: countryOfPhone(document.phone_number),
     wallets: Array.isArray(wallets)
       ? wallets
           .map((wallet: MongoDocument) => ({
@@ -138,7 +169,7 @@ export class MongoB2cActivityReader implements B2cActivityReader {
       .filter((item): item is IngestedTransaction => item !== null);
   }
 
-  async users(): Promise<IngestedUser[]> {
+  async users(): Promise<B2cUserRecord[]> {
     const documents = await this.db
       .collection('users')
       .find({}, { projection: USER_PROJECTION })
@@ -149,13 +180,24 @@ export class MongoB2cActivityReader implements B2cActivityReader {
   async tokens(): Promise<TokenInfo[]> {
     const documents = await this.db
       .collection('tokens')
-      .find({}, { projection: { _id: 0, chain_id: 1, symbol: 1, type: 1 } })
+      .find(
+        {},
+        { projection: { _id: 0, chain_id: 1, symbol: 1, type: 1, address: 1, decimals: 1 } }
+      )
       .toArray();
     return documents
       .map((document) => ({
         chainId: chainIdText(document.chain_id),
         symbol: text(document.symbol),
-        stable: document.type === 'stable'
+        stable: document.type === 'stable',
+        address: text(document.address),
+        decimals:
+          typeof document.decimals === 'number' &&
+          Number.isInteger(document.decimals) &&
+          document.decimals >= 0 &&
+          document.decimals <= 36
+            ? document.decimals
+            : null
       }))
       .filter((token) => token.chainId !== '' && token.symbol !== '');
   }
@@ -194,5 +236,33 @@ export class MongoB2cActivityReader implements B2cActivityReader {
       chains.set(chainId, { chainId, network, name, explorer: text(document.explorer), contracts });
     }
     return [...chains.values()];
+  }
+
+  /**
+   * Balance endpoints of the catalog networks: `rpc` of EVM networks and `providerUrl` of Cardano
+   * ones. The URLs can carry a provider key, so they are only kept in memory for the run.
+   */
+  async endpoints(): Promise<ChainEndpoint[]> {
+    const [chains, documents] = await Promise.all([
+      this.chains(),
+      this.db
+        .collection('blockchains')
+        .find({}, { projection: { _id: 0, family: 1, chainId: 1, rpc: 1, providerUrl: 1 } })
+        .toArray()
+    ]);
+    const accepted = new Set(chains.map((chain) => chain.chainId));
+    const endpoints = new Map<string, ChainEndpoint>();
+    for (const document of documents) {
+      const chainId = chainIdText(document.chainId);
+      if (!accepted.has(chainId) || endpoints.has(chainId)) {
+        continue;
+      }
+      const family = document.family === 'cardano' ? 'cardano' : 'evm';
+      const url = text(family === 'cardano' ? document.providerUrl : document.rpc).trim();
+      if (/^https:\/\//.test(url)) {
+        endpoints.set(chainId, { chainId, family, url });
+      }
+    }
+    return [...endpoints.values()];
   }
 }
