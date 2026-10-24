@@ -1,5 +1,7 @@
 import { createPrivateKey } from 'node:crypto';
 import { z } from 'zod';
+import type { MasterWalletConfig } from '../ingest/snapshot.js';
+import { NETWORK_ID_PATTERN } from '../metrics/catalog.js';
 
 /** Validated runtime configuration of the API process. */
 export interface AppEnv {
@@ -49,6 +51,15 @@ export interface AppEnv {
   PRICES_PROVIDER: 'none' | 'coingecko';
   /** Ceiling on price provider requests per run. */
   PRICES_MAX_CALLS_PER_RUN: number;
+  /**
+   * Reader of the balance snapshots; `rpc` reads through the `rpc` (EVM) and `providerUrl` (Koios,
+   * Cardano) of each network in the B2C `blockchains` collection, `none` takes no snapshot.
+   */
+  BALANCES_PROVIDER: 'none' | 'rpc';
+  /** Ceiling on balance requests (`eth_call` batches and Koios pages) per run. */
+  BALANCES_MAX_CALLS_PER_RUN: number;
+  /** Public addresses of the signers whose balances the snapshots read. */
+  MASTER_WALLETS: MasterWalletConfig[];
   /** Seconds between checks for a newer aggregate build made by another instance. */
   METRICS_REFRESH_SECONDS: number;
 }
@@ -70,6 +81,36 @@ function isEd25519PrivateKey(pem: string): boolean {
     return false;
   }
 }
+
+/**
+ * Public address of an EVM account or a Cardano address. A private key, a seed phrase or an
+ * extended key does not match either shape, so signing material is refused instead of stored.
+ */
+const PUBLIC_ADDRESS = /^(0x[0-9a-fA-F]{40}|addr(_test)?1[02-9ac-hj-np-z]{20,200})$/;
+
+const masterWalletSchema = z
+  .object({
+    network: z.string().regex(new RegExp(NETWORK_ID_PATTERN)).max(64),
+    address: z.string().regex(PUBLIC_ADDRESS),
+    role: z.string().trim().min(1).max(64),
+    nativeSymbol: z
+      .string()
+      .regex(/^[A-Za-z0-9.]{1,12}$/)
+      .optional()
+  })
+  .strict();
+
+const masterWalletsSchema = z
+  .string()
+  .transform((value, context) => {
+    try {
+      return JSON.parse(value) as unknown;
+    } catch {
+      context.addIssue({ code: 'custom', message: 'Not JSON' });
+      return z.NEVER;
+    }
+  })
+  .pipe(z.array(masterWalletSchema).max(20));
 
 const envSchema: z.ZodType<AppEnv> = z
   .object({
@@ -132,6 +173,9 @@ const envSchema: z.ZodType<AppEnv> = z
     INGEST_MAX_RUN_SECONDS: z.coerce.number().int().min(30).max(3000).default(480),
     PRICES_PROVIDER: z.enum(['none', 'coingecko']).default('none'),
     PRICES_MAX_CALLS_PER_RUN: z.coerce.number().int().min(0).max(5).default(1),
+    BALANCES_PROVIDER: z.enum(['none', 'rpc']).default('none'),
+    BALANCES_MAX_CALLS_PER_RUN: z.coerce.number().int().min(0).max(2000).default(100),
+    MASTER_WALLETS: masterWalletsSchema.default([]),
     METRICS_REFRESH_SECONDS: z.coerce.number().int().min(30).max(86_400).default(300)
   })
   .superRefine((env, context) => {
