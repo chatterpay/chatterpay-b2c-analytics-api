@@ -199,6 +199,7 @@ paths:
                     required:
                       - id
                       - email
+                      - name
                       - role
                       - status
                       - createdAt
@@ -208,6 +209,12 @@ paths:
                         type: string
                       email:
                         type: string
+                      name:
+                        type:
+                          - "null"
+                          - string
+                        description: Name recorded for the member by an operator; null when none. Never
+                          derived.
                       role:
                         type: string
                         enum:
@@ -273,6 +280,7 @@ paths:
                     required:
                       - id
                       - email
+                      - name
                       - role
                       - status
                       - createdAt
@@ -282,6 +290,12 @@ paths:
                         type: string
                       email:
                         type: string
+                      name:
+                        type:
+                          - "null"
+                          - string
+                        description: Name recorded for the member by an operator; null when none. Never
+                          derived.
                       role:
                         type: string
                         enum:
@@ -366,15 +380,23 @@ paths:
                       required:
                         - id
                         - email
+                        - name
                         - role
                         - status
                         - createdAt
                         - lastLoginAt
+                        - lastActivityAt
                       properties:
                         id:
                           type: string
                         email:
                           type: string
+                        name:
+                          type:
+                            - "null"
+                            - string
+                          description: Name recorded for the member by an operator; null when none. Never
+                            derived.
                         role:
                           type: string
                           enum:
@@ -392,6 +414,13 @@ paths:
                             - "null"
                             - string
                           format: date-time
+                        lastActivityAt:
+                          type:
+                            - "null"
+                            - string
+                          format: date-time
+                          description: Last event of the activity log the member acted in, of any action;
+                            distinct from lastLoginAt.
         "401":
           description: Default Response
           content:
@@ -910,6 +939,7 @@ paths:
                 required:
                   - id
                   - email
+                  - name
                   - role
                   - status
                   - createdAt
@@ -919,6 +949,12 @@ paths:
                     type: string
                   email:
                     type: string
+                  name:
+                    type:
+                      - "null"
+                      - string
+                    description: Name recorded for the member by an operator; null when none. Never
+                      derived.
                   role:
                     type: string
                     enum:
@@ -1083,7 +1119,8 @@ paths:
   /v1/metrics/overview:
     get:
       operationId: getOverviewMetrics
-      summary: "Overview dataset: volume, transactions, fees and users by network"
+      summary: "Overview dataset: volume, fees, users, TVL, top tokens, countries and
+        products"
       tags:
         - metrics
       parameters:
@@ -1121,6 +1158,10 @@ paths:
                   - tiles
                   - series
                   - byNetwork
+                  - tvl
+                  - topTokens
+                  - topCountries
+                  - volumeByProduct
                 properties:
                   meta:
                     type: object
@@ -1129,6 +1170,7 @@ paths:
                       - datasetVersion
                       - dataStatus
                       - lastUpdatedAt
+                      - ingest
                       - generatedAt
                       - currency
                       - network
@@ -1149,6 +1191,51 @@ paths:
                         anyOf:
                           - type: string
                             format: date-time
+                          - type: "null"
+                      ingest:
+                        anyOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - status
+                              - finishedAt
+                              - sources
+                            properties:
+                              status:
+                                type: string
+                                enum:
+                                  - completed
+                                  - partial
+                              finishedAt:
+                                type: string
+                                format: date-time
+                              sources:
+                                type: object
+                                additionalProperties: false
+                                required:
+                                  - transactions
+                                  - prices
+                                  - balances
+                                properties:
+                                  transactions:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - partial
+                                  prices:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - failed
+                                      - skipped
+                                      - disabled
+                                  balances:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - partial
+                                      - failed
+                                      - disabled
                           - type: "null"
                       generatedAt:
                         type: string
@@ -1394,6 +1481,410 @@ paths:
                           type: integer
                         newUsers:
                           type: integer
+                  tvl:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - value
+                      - firstSnapshotAt
+                      - coverage
+                      - series
+                      - byNetwork
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      value:
+                        anyOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - value
+                              - previous
+                              - changeRatio
+                            properties:
+                              value:
+                                type: string
+                                pattern: ^-?\d+\.\d+$
+                              previous:
+                                type:
+                                  - "null"
+                                  - string
+                                pattern: ^-?\d+\.\d+$
+                              changeRatio:
+                                type:
+                                  - "null"
+                                  - string
+                                pattern: ^-?\d+\.\d+$
+                          - type: "null"
+                      firstSnapshotAt:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      coverage:
+                        anyOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - wallets
+                              - walletsRead
+                              - unpricedAssets
+                            properties:
+                              wallets:
+                                type: integer
+                                minimum: 0
+                              walletsRead:
+                                type: integer
+                                minimum: 0
+                              unpricedAssets:
+                                type: array
+                                items:
+                                  type: object
+                                  additionalProperties: false
+                                  required:
+                                    - network
+                                    - asset
+                                  properties:
+                                    network:
+                                      type: string
+                                      pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                                      maxLength: 64
+                                    asset:
+                                      type: string
+                          - type: "null"
+                      series:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - start
+                            - end
+                            - tvlUsd
+                            - asOf
+                          properties:
+                            start:
+                              type: string
+                              format: date-time
+                            end:
+                              type: string
+                              format: date-time
+                            tvlUsd:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^-?\d+\.\d+$
+                            asOf:
+                              anyOf:
+                                - type: string
+                                  format: date-time
+                                - type: "null"
+                      byNetwork:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - network
+                            - label
+                            - tvlUsd
+                            - share
+                            - status
+                          properties:
+                            network:
+                              type: string
+                              pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                              maxLength: 64
+                            label:
+                              type: string
+                            tvlUsd:
+                              type: string
+                              pattern: ^-?\d+\.\d+$
+                            share:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^\d+\.\d{4}$
+                            status:
+                              type: string
+                              enum:
+                                - complete
+                                - partial
+                                - failed
+                                - unsupported
+                  topTokens:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - items
+                      - totalUsd
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - asset
+                            - amount
+                            - valueUsd
+                            - share
+                          properties:
+                            asset:
+                              type: string
+                            amount:
+                              type: string
+                              pattern: ^\d+(\.\d+)?$
+                            valueUsd:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^-?\d+\.\d+$
+                            share:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^\d+\.\d{4}$
+                      totalUsd:
+                        type:
+                          - "null"
+                          - string
+                        pattern: ^-?\d+\.\d+$
+                  topCountries:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - method
+                      - items
+                      - totalUsers
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      method:
+                        type: string
+                        enum:
+                          - phone_prefix
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - country
+                            - users
+                            - share
+                          properties:
+                            country:
+                              type: string
+                              pattern: ^([A-Z]{2}|Unknown)$
+                            users:
+                              type: integer
+                              minimum: 0
+                            share:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^\d+\.\d{4}$
+                      totalUsers:
+                        type: integer
+                        minimum: 0
+                  volumeByProduct:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - items
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - product
+                            - availability
+                            - reason
+                            - volumeUsd
+                            - transactions
+                            - share
+                          properties:
+                            product:
+                              type: string
+                              enum:
+                                - transfer
+                                - swap
+                                - polymarket
+                            availability:
+                              type: string
+                              enum:
+                                - available
+                                - partial
+                                - unavailable
+                            reason:
+                              type:
+                                - "null"
+                                - string
+                              enum:
+                                - no_snapshot
+                                - snapshots_disabled
+                                - partial_coverage
+                                - unpriced_assets
+                                - unverified_wallets
+                                - not_recorded
+                                - no_transactions
+                                - no_eligible_cohort
+                                - not_configured
+                                - null
+                            volumeUsd:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^-?\d+\.\d+$
+                            transactions:
+                              type:
+                                - "null"
+                                - integer
+                              minimum: 0
+                            share:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^\d+\.\d{4}$
         "400":
           description: Default Response
           content:
@@ -1427,7 +1918,7 @@ paths:
   /v1/metrics/users:
     get:
       operationId: getUsersMetrics
-      summary: "Users dataset: active users, new users, retention cohorts"
+      summary: "Users dataset: active users, new users and wallets, retention cohorts"
       tags:
         - metrics
       parameters:
@@ -1463,6 +1954,8 @@ paths:
                   - series
                   - retention
                   - byNetwork
+                  - newWallets
+                  - retentionSummary
                 properties:
                   meta:
                     type: object
@@ -1471,6 +1964,7 @@ paths:
                       - datasetVersion
                       - dataStatus
                       - lastUpdatedAt
+                      - ingest
                       - generatedAt
                       - currency
                       - network
@@ -1491,6 +1985,51 @@ paths:
                         anyOf:
                           - type: string
                             format: date-time
+                          - type: "null"
+                      ingest:
+                        anyOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - status
+                              - finishedAt
+                              - sources
+                            properties:
+                              status:
+                                type: string
+                                enum:
+                                  - completed
+                                  - partial
+                              finishedAt:
+                                type: string
+                                format: date-time
+                              sources:
+                                type: object
+                                additionalProperties: false
+                                required:
+                                  - transactions
+                                  - prices
+                                  - balances
+                                properties:
+                                  transactions:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - partial
+                                  prices:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - failed
+                                      - skipped
+                                      - disabled
+                                  balances:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - partial
+                                      - failed
+                                      - disabled
                           - type: "null"
                       generatedAt:
                         type: string
@@ -1739,6 +2278,274 @@ paths:
                           type: integer
                         totalUsers:
                           type: integer
+                  newWallets:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - definition
+                      - trackingSince
+                      - tile
+                      - series
+                      - byNetwork
+                      - coverage
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      definition:
+                        type: string
+                        enum:
+                          - first_verifiable_appearance
+                      trackingSince:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      tile:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: integer
+                            minimum: 0
+                          previous:
+                            type:
+                              - "null"
+                              - integer
+                            minimum: 0
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      series:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - start
+                            - end
+                            - newWallets
+                          properties:
+                            start:
+                              type: string
+                              format: date-time
+                            end:
+                              type: string
+                              format: date-time
+                            newWallets:
+                              type: integer
+                              minimum: 0
+                      byNetwork:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - network
+                            - label
+                            - newWallets
+                            - wallets
+                            - verifiedWallets
+                          properties:
+                            network:
+                              type: string
+                              pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                              maxLength: 64
+                            label:
+                              type: string
+                            newWallets:
+                              type: integer
+                              minimum: 0
+                            wallets:
+                              type: integer
+                              minimum: 0
+                            verifiedWallets:
+                              type: integer
+                              minimum: 0
+                      coverage:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - wallets
+                          - verifiedWallets
+                        properties:
+                          wallets:
+                            type: integer
+                            minimum: 0
+                          verifiedWallets:
+                            type: integer
+                            minimum: 0
+                  retentionSummary:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - months
+                      - cohorts
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      months:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - month
+                            - availability
+                            - reason
+                            - eligibleCohorts
+                            - cohortUsers
+                            - retainedUsers
+                            - rate
+                          properties:
+                            month:
+                              type: integer
+                              enum:
+                                - 1
+                                - 3
+                                - 6
+                            availability:
+                              type: string
+                              enum:
+                                - available
+                                - partial
+                                - unavailable
+                            reason:
+                              type:
+                                - "null"
+                                - string
+                              enum:
+                                - no_snapshot
+                                - snapshots_disabled
+                                - partial_coverage
+                                - unpriced_assets
+                                - unverified_wallets
+                                - not_recorded
+                                - no_transactions
+                                - no_eligible_cohort
+                                - not_configured
+                                - null
+                            eligibleCohorts:
+                              type: integer
+                              minimum: 0
+                            cohortUsers:
+                              type: integer
+                              minimum: 0
+                            retainedUsers:
+                              type: integer
+                              minimum: 0
+                            rate:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^\d+\.\d{4}$
+                      cohorts:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - cohort
+                            - size
+                            - retained
+                          properties:
+                            cohort:
+                              type: string
+                              pattern: ^\d{4}-\d{2}$
+                            size:
+                              type: integer
+                              minimum: 0
+                            retained:
+                              type: array
+                              items:
+                                type: object
+                                additionalProperties: false
+                                required:
+                                  - month
+                                  - users
+                                properties:
+                                  month:
+                                    type: integer
+                                    enum:
+                                      - 1
+                                      - 3
+                                      - 6
+                                  users:
+                                    type:
+                                      - "null"
+                                      - integer
+                                    minimum: 0
         "400":
           description: Default Response
           content:
@@ -1772,7 +2579,8 @@ paths:
   /v1/metrics/revenue:
     get:
       operationId: getRevenueMetrics
-      summary: "Revenue dataset: fees and volume by network and asset"
+      summary: "Revenue dataset: fees and volume by network, asset and product; master
+        wallets"
       tags:
         - metrics
       parameters:
@@ -1811,6 +2619,10 @@ paths:
                   - series
                   - byNetwork
                   - byAsset
+                  - avgFeePerTransaction
+                  - polymarketVolume
+                  - feesByProduct
+                  - masterWallets
                 properties:
                   meta:
                     type: object
@@ -1819,6 +2631,7 @@ paths:
                       - datasetVersion
                       - dataStatus
                       - lastUpdatedAt
+                      - ingest
                       - generatedAt
                       - currency
                       - network
@@ -1839,6 +2652,51 @@ paths:
                         anyOf:
                           - type: string
                             format: date-time
+                          - type: "null"
+                      ingest:
+                        anyOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - status
+                              - finishedAt
+                              - sources
+                            properties:
+                              status:
+                                type: string
+                                enum:
+                                  - completed
+                                  - partial
+                              finishedAt:
+                                type: string
+                                format: date-time
+                              sources:
+                                type: object
+                                additionalProperties: false
+                                required:
+                                  - transactions
+                                  - prices
+                                  - balances
+                                properties:
+                                  transactions:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - partial
+                                  prices:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - failed
+                                      - skipped
+                                      - disabled
+                                  balances:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - partial
+                                      - failed
+                                      - disabled
                           - type: "null"
                       generatedAt:
                         type: string
@@ -1903,6 +2761,7 @@ paths:
                       - transferFeesUsd
                       - swapFeesUsd
                       - volumeUsd
+                      - swapVolumeUsd
                     properties:
                       feesUsd:
                         type: object
@@ -1968,6 +2827,27 @@ paths:
                               - string
                             pattern: ^-?\d+\.\d+$
                       volumeUsd:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - value
+                          - previous
+                          - changeRatio
+                        properties:
+                          value:
+                            type: string
+                            pattern: ^-?\d+\.\d+$
+                          previous:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                          changeRatio:
+                            type:
+                              - "null"
+                              - string
+                            pattern: ^-?\d+\.\d+$
+                      swapVolumeUsd:
                         type: object
                         additionalProperties: false
                         required:
@@ -2069,6 +2949,323 @@ paths:
                         feesUsd:
                           type: string
                           pattern: ^-?\d+\.\d+$
+                  avgFeePerTransaction:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - valueUsd
+                      - previousUsd
+                      - changeRatio
+                      - transactions
+                      - previousTransactions
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      valueUsd:
+                        type:
+                          - "null"
+                          - string
+                        pattern: ^-?\d+\.\d+$
+                      previousUsd:
+                        type:
+                          - "null"
+                          - string
+                        pattern: ^-?\d+\.\d+$
+                      changeRatio:
+                        type:
+                          - "null"
+                          - string
+                        pattern: ^-?\d+\.\d+$
+                      transactions:
+                        type: integer
+                        minimum: 0
+                      previousTransactions:
+                        type:
+                          - "null"
+                          - integer
+                        minimum: 0
+                  polymarketVolume:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - valueUsd
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      valueUsd:
+                        type:
+                          - "null"
+                          - string
+                        pattern: ^-?\d+\.\d+$
+                  feesByProduct:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - items
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - product
+                            - availability
+                            - reason
+                            - feesUsd
+                            - share
+                          properties:
+                            product:
+                              type: string
+                              enum:
+                                - transfer
+                                - swap
+                                - polymarket
+                            availability:
+                              type: string
+                              enum:
+                                - available
+                                - partial
+                                - unavailable
+                            reason:
+                              type:
+                                - "null"
+                                - string
+                              enum:
+                                - no_snapshot
+                                - snapshots_disabled
+                                - partial_coverage
+                                - unpriced_assets
+                                - unverified_wallets
+                                - not_recorded
+                                - no_transactions
+                                - no_eligible_cohort
+                                - not_configured
+                                - null
+                            feesUsd:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^-?\d+\.\d+$
+                            share:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^\d+\.\d{4}$
+                  masterWallets:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - items
+                      - totalUsd
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - network
+                            - label
+                            - role
+                            - address
+                            - explorerUrl
+                            - status
+                            - balances
+                            - valueUsd
+                            - share
+                          properties:
+                            network:
+                              type: string
+                              pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                              maxLength: 64
+                            label:
+                              type: string
+                            role:
+                              type: string
+                            address:
+                              type: string
+                            explorerUrl:
+                              type:
+                                - "null"
+                                - string
+                            status:
+                              type: string
+                              enum:
+                                - complete
+                                - failed
+                                - unsupported
+                            balances:
+                              type: array
+                              items:
+                                type: object
+                                additionalProperties: false
+                                required:
+                                  - asset
+                                  - amount
+                                  - valueUsd
+                                properties:
+                                  asset:
+                                    type: string
+                                  amount:
+                                    type: string
+                                    pattern: ^\d+(\.\d+)?$
+                                  valueUsd:
+                                    type:
+                                      - "null"
+                                      - string
+                                    pattern: ^-?\d+\.\d+$
+                            valueUsd:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^-?\d+\.\d+$
+                            share:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^\d+\.\d{4}$
+                      totalUsd:
+                        type:
+                          - "null"
+                          - string
+                        pattern: ^-?\d+\.\d+$
         "400":
           description: Default Response
           content:
@@ -2141,6 +3338,7 @@ paths:
                       - users
                       - catalog
                       - prices
+                      - balances
                     properties:
                       transactions:
                         type: object
@@ -2165,8 +3363,16 @@ paths:
                         additionalProperties: false
                         required:
                           - read
+                          - newWallets
+                          - countedInCountries
                         properties:
                           read:
+                            type: integer
+                            minimum: 0
+                          newWallets:
+                            type: integer
+                            minimum: 0
+                          countedInCountries:
                             type: integer
                             minimum: 0
                       catalog:
@@ -2203,6 +3409,58 @@ paths:
                             minimum: 0
                           failed:
                             type: boolean
+                      balances:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - status
+                          - calls
+                          - failedCalls
+                          - networks
+                          - masterWallets
+                        properties:
+                          status:
+                            type: string
+                            enum:
+                              - complete
+                              - partial
+                              - failed
+                              - disabled
+                          calls:
+                            type: integer
+                            minimum: 0
+                          failedCalls:
+                            type: integer
+                            minimum: 0
+                          networks:
+                            type: array
+                            items:
+                              type: object
+                              additionalProperties: false
+                              required:
+                                - network
+                                - status
+                                - wallets
+                                - walletsRead
+                              properties:
+                                network:
+                                  type: string
+                                status:
+                                  type: string
+                                  enum:
+                                    - complete
+                                    - partial
+                                    - failed
+                                    - unsupported
+                                wallets:
+                                  type: integer
+                                  minimum: 0
+                                walletsRead:
+                                  type: integer
+                                  minimum: 0
+                          masterWallets:
+                            type: integer
+                            minimum: 0
                   aggregates:
                     anyOf:
                       - type: object
@@ -2213,6 +3471,8 @@ paths:
                           - unpriced
                           - outsideCatalog
                           - users
+                          - wallets
+                          - verifiedWallets
                           - builtAt
                         properties:
                           transfers:
@@ -2228,6 +3488,12 @@ paths:
                             type: integer
                             minimum: 0
                           users:
+                            type: integer
+                            minimum: 0
+                          wallets:
+                            type: integer
+                            minimum: 0
+                          verifiedWallets:
                             type: integer
                             minimum: 0
                           builtAt:
