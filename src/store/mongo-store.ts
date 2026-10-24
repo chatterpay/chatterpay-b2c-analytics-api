@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { type Collection, type Db, MongoClient, MongoServerError, ObjectId } from 'mongodb';
 import type { Role } from '../auth/principal.js';
+import { connectOrClose } from './connect-retry.js';
 import { assertIndexes, COLLECTIONS } from './mongo-schema.js';
 import type {
   ActivatedMember,
@@ -103,10 +104,10 @@ export class MongoStore implements Store {
    */
   static async connect(options: MongoStoreOptions): Promise<MongoStore> {
     const client = new MongoClient(options.uri, {
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 10_000,
       appName: 'chatterpay-analytics-api'
     });
-    await client.connect();
+    await connectOrClose(client);
     try {
       const db = client.db(options.dbName);
       await assertIndexes(db);
