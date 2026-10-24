@@ -1,6 +1,6 @@
-# chatterpay-b2c-analytics-api
+# chatterpay-analytics-api
 
-Private backend of ChatterPay Analytics. It serves the analytics datasets, the demo login and the team management to the BFF of the site (`chatterpay-b2c-analytics-site`). Browsers never call it directly.
+Private backend of ChatterPay Analytics. It serves the analytics datasets, the demo login and the team management to the BFF of the site (`chatterpay-analytics-site`). Browsers never call it directly.
 
 In V0 every metric is synthetic: responses carry `dataStatus: "mock"` and the site labels them `DEMO DATA`. The API does not read ChatterPay B2C collections, blockchains or providers.
 
