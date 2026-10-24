@@ -13,6 +13,18 @@ interface BlockchainDocument {
 }
 
 /**
+ * Database named in the path of a MongoDB connection string.
+ *
+ * @param uri - Connection string, such as `mongodb+srv://user:pass@host/chatterpay-dev?w=majority`.
+ * @returns The database name; `null` when the path is empty.
+ */
+export function databaseFromUri(uri: string): string | null {
+  const match = /^mongodb(?:\+srv)?:\/\/(?:[^@/]*@)?[^/?]*\/([^?]*)/.exec(uri);
+  const name = match?.[1] === undefined ? '' : decodeURIComponent(match[1]);
+  return name === '' ? null : name;
+}
+
+/**
  * Slug of a network name, used as its id in the API and in the site URLs.
  *
  * @param name - Name in the `blockchains` collection, such as `Base Sepolia`.
