@@ -9,6 +9,7 @@ import { listNetworks, setNetworks } from './metrics/catalog.js';
 import { resetFactsCaches } from './metrics/facts.js';
 import type { IngestionHandle } from './routes/ingest.js';
 import { B2cNetworkSource, databaseFromUri } from './store/b2c-networks.js';
+import { type ConnectAttempt, connectWithRetry } from './store/connect-retry.js';
 import { MongoIngestRepository } from './store/ingest-store.js';
 import { MemoryStore } from './store/memory-store.js';
 import { MongoStore } from './store/mongo-store.js';
@@ -19,6 +20,27 @@ const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM'] as const;
 const NETWORKS_REFRESH_MS = 5 * 60 * 1000;
 /** Margin between the run deadline and the lock expiry, so a slow last batch keeps the lock. */
 const LOCK_MARGIN_MS = 5 * 60 * 1000;
+/**
+ * Time the startup has to open its MongoDB connections. Direct VPC egress may take a minute or more
+ * to route traffic after an instance starts; the startup probe of the Cloud Run service has to
+ * allow longer than this.
+ */
+const STARTUP_CONNECT_MS = 120 * 1000;
+
+/**
+ * Writes a connection attempt as a structured line before the Fastify logger exists. Cloud Logging
+ * reads `severity` and `message`; the line carries no connection string.
+ */
+function logConnectAttempt(attempt: ConnectAttempt): void {
+  const line = {
+    severity: attempt.outcome === 'connected' ? 'INFO' : 'WARNING',
+    message: `mongodb ${attempt.database} connection attempt ${attempt.attempt} ${attempt.outcome}`,
+    time: new Date().toISOString(),
+    ...attempt
+  };
+  process.stdout.write(`${JSON.stringify(line)}
+`);
+}
 
 function ingestionHandle(
   env: AppEnv,
@@ -63,8 +85,9 @@ function ingestionHandle(
  * B2C database, starts listening and closes gracefully on SIGINT/SIGTERM (Cloud Run sends SIGTERM
  * before stopping an instance).
  *
- * With Mongo configured, the first read of the networks must succeed or the process does not
- * start. Later reads that fail keep the previous catalog.
+ * With Mongo configured, the analytics and B2C connections and the first read of the networks must
+ * succeed or the process does not start. The connections are retried until `STARTUP_CONNECT_MS`
+ * after startup. Later reads of the networks that fail keep the previous catalog.
  *
  * Live metrics are the last aggregate build of the analytics database, loaded at startup, after
  * each ingestion run of this instance and every `METRICS_REFRESH_SECONDS` (another instance may
@@ -72,25 +95,44 @@ function ingestionHandle(
  */
 async function main(): Promise<void> {
   const env = loadEnv();
+  const deadline = Date.now() + STARTUP_CONNECT_MS;
+  const mongoUri = env.MONGO_URI;
   const store: Store =
-    env.MONGO_URI === null
+    mongoUri === null
       ? new MemoryStore()
-      : await MongoStore.connect({ uri: env.MONGO_URI, dbName: env.MONGO_DB_NAME });
+      : await connectWithRetry({
+          database: 'analytics',
+          connect: () => MongoStore.connect({ uri: mongoUri, dbName: env.MONGO_DB_NAME }),
+          deadline,
+          log: logConnectAttempt
+        });
   const b2cUri = env.B2C_MONGO_URI ?? env.MONGO_URI;
   const networks =
     b2cUri === null
       ? null
-      : await B2cNetworkSource.connect({
-          uri: b2cUri,
-          dbName: databaseFromUri(b2cUri) ?? env.B2C_MONGO_DB_NAME
+      : await connectWithRetry({
+          database: 'b2c',
+          connect: () =>
+            B2cNetworkSource.connect({
+              uri: b2cUri,
+              dbName: databaseFromUri(b2cUri) ?? env.B2C_MONGO_DB_NAME
+            }),
+          deadline,
+          log: logConnectAttempt
         });
   if (networks !== null) {
     setNetworks(await networks.load());
   }
   const ingest =
-    env.MONGO_URI === null || networks === null
+    mongoUri === null || networks === null
       ? null
-      : await MongoIngestRepository.connect({ uri: env.MONGO_URI, dbName: env.MONGO_DB_NAME });
+      : await connectWithRetry({
+          database: 'analytics-ingest',
+          connect: () =>
+            MongoIngestRepository.connect({ uri: mongoUri, dbName: env.MONGO_DB_NAME }),
+          deadline,
+          log: logConnectAttempt
+        });
 
   let loadedAt: Date | null = null;
   const refreshLive = async (): Promise<void> => {
