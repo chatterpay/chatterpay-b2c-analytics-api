@@ -10,7 +10,7 @@ In V0 every metric is synthetic: responses carry `dataStatus: "mock"` and the si
 - Fastify 5 with JSON Schema validation and `@fastify/helmet`.
 - Biome for lint and format, Vitest for tests, Yarn 1 with a frozen lockfile.
 - `jose` for the session JWTs (EdDSA, Ed25519).
-- Persistence behind a store interface (`src/store/types.ts`). The in-memory implementation is the only one available; a MongoDB implementation (analytics-only database) follows.
+- Persistence behind a store interface (`src/store/types.ts`): MongoDB on an analytics-only database (`src/store/mongo-store.ts`), and an in-memory implementation for tests and local runs without MongoDB.
 
 ## Local development
 
@@ -39,7 +39,7 @@ The contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml) (OpenAPI 3.
 | Route | Access | Purpose |
 |---|---|---|
 | `GET /healthz` | infrastructure | Liveness, no internal details |
-| `GET /readyz` | infrastructure | Readiness; will check MongoDB once persistence is added |
+| `GET /readyz` | infrastructure | Readiness; 503 when the store does not answer |
 | `GET /v1/metrics/overview?network&range` | admin, viewer | Volume, transactions, fees, active and new users; series and network breakdown |
 | `GET /v1/metrics/users?network&granularity` | admin, viewer | Daily/monthly/yearly active users, new and total users, retention cohorts |
 | `GET /v1/metrics/revenue?network&range` | admin, viewer | Transfer and swap fees, volume, network and asset breakdowns |
@@ -90,12 +90,25 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 | `JWT_ISSUER` / `JWT_AUDIENCE` | `chatterpay-analytics-api` / `chatterpay-analytics-site` | |
 | `SESSION_TTL_MINUTES` | `120` | 5-1440 |
 | `CHALLENGE_TTL_MINUTES` | `10` | 1-60 |
-| `BOOTSTRAP_ADMIN_EMAILS` / `BOOTSTRAP_VIEWER_EMAILS` | empty | Comma-separated; created at startup when no active member has the email |
-| `ALLOW_IN_MEMORY_STORE` | `false` | Production refuses to start with the in-memory store unless `true` |
+| `MONGO_URI` | unset | `mongodb://` or `mongodb+srv://`. Required in production; unset uses the in-memory store |
+| `MONGO_DB_NAME` | `chatterpay_analytics_dev` | Analytics-only database |
 
-## In-memory store
+## Persistence
 
-`buildApp` takes the store through its options and defaults to the in-memory store, which logs a warning at startup. Its state lives in the process: members created by invites, sessions, invites and activity are lost on restart, and two instances do not share them, so it fits local runs, tests and a single-instance demo (Cloud Run with at most one instance and `ALLOW_IN_MEMORY_STORE=true`). The bootstrap variables recreate the initial members on every start. Invariant checks (last active admin, pending invites, challenge attempts) run atomically inside each store method.
+| Collection | Content | Indexes |
+|---|---|---|
+| `users` | Members; removed members keep their record | `email_active_unique` (unique `email` where `status` is `active`), `status_role` |
+| `sessions` | Issued session JWTs by `jti` | `user_id`, `expires_at_ttl` |
+| `login_challenges` | Login challenges; never the code | `expires_at_ttl` |
+| `invites` | Simulated invites | `email_pending_unique` (unique `email` where `status` is `simulated`), `mutation_id_unique`, `created_at` |
+| `activity` | Login and team events | `at` |
+| `rate_limits` | Fixed-window counters | `reset_at_ttl` |
+
+- The API does not create indexes. `REQUIRED_INDEXES` in `src/store/mongo-schema.ts` lists them, and startup fails naming the missing ones.
+- Members exist only in the database. The first admin of a new database is inserted by an operator; the rest join through invites.
+- Invariants hold without multi-document transactions: unique indexes for one active member and one pending invite per email and one invite per `mutationId`, conditional single-document updates for challenges and invite transitions, and a compensating update for the last active admin (two concurrent changes that would each remove it can both be undone).
+- The in-memory store is refused in production and logs a warning elsewhere.
+- `MONGO_TEST_URI=mongodb://127.0.0.1:27017 yarn test` runs the route suites on MongoDB, each test on a throwaway database that is dropped afterwards.
 
 ## Mock dataset
 
@@ -114,13 +127,12 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 |---|---|
 | `_SERVICE_NAME` | `chatterpay-analytics-api-develop` or `chatterpay-analytics-api-main` |
 | `_DEPLOY_REGION` / `_AR_HOSTNAME` / `_TRIGGER_ID` | Region, Artifact Registry host, trigger id |
-| `_LOG_LEVEL`, `_BODY_LIMIT_BYTES`, `_REQUEST_TIMEOUT_MS`, `_JWT_KEY_ID`, `_JWT_ISSUER`, `_JWT_AUDIENCE`, `_SESSION_TTL_MINUTES`, `_CHALLENGE_TTL_MINUTES`, `_ALLOW_IN_MEMORY_STORE` | Non-secret settings; empty applies the default |
+| `_LOG_LEVEL`, `_BODY_LIMIT_BYTES`, `_REQUEST_TIMEOUT_MS`, `_JWT_KEY_ID`, `_JWT_ISSUER`, `_JWT_AUDIENCE`, `_SESSION_TTL_MINUTES`, `_CHALLENGE_TTL_MINUTES`, `_MONGO_DB_NAME` | Non-secret settings; empty applies the default |
 
 - A new non-secret variable is added to `CreateEnv` and as `ARG`/`ENV` in the `Dockerfile`.
-- Secrets never enter the image: `DEMO_ACCESS_CODE` and `JWT_PRIVATE_KEY` come from Secret Manager through `secretKeyRef` in the Cloud Run service YAML. `BOOTSTRAP_ADMIN_EMAILS` and `BOOTSTRAP_VIEWER_EMAILS` are set there as plain variables. The `Build` step skips these names if they are ever declared as `ARG`.
+- Secrets never enter the image: `DEMO_ACCESS_CODE`, `JWT_PRIVATE_KEY` and `MONGO_URI` come from Secret Manager through `secretKeyRef` in the Cloud Run service YAML. The `Build` step skips these names if they are ever declared as `ARG`.
 - The service name selects the VPC: `*-develop` deploys on `chatterpay-dev-vpc` / `chatterpay-dev-run`, `*-main` on `chatterpay-main-vpc` / `chatterpay-main-run`; any other name stops the build.
-- The deploy uses `--no-allow-unauthenticated`: only the service account of the site has `roles/run.invoker`. There is no public custom domain; the BFF calls the `*.run.app` URL with a Google-signed ID token whose audience is that URL.
-- The deploy uses `--max-instances 1` while the in-memory store is in use, together with `ALLOW_IN_MEMORY_STORE=true`.
+- The service sits behind the HTTPS load balancer on `dev.analytics-api.chatterpay.net` and `analytics-api.chatterpay.net`, with ingress `internal-and-cloud-load-balancing`. The deploy uses `--no-allow-unauthenticated`: only the service account of the site has `roles/run.invoker`. The BFF sends a Google-signed ID token whose audience is the API domain, declared on the service as a custom audience (`run.googleapis.com/custom-audiences`).
 - The container listens on `0.0.0.0:8080` as the non-root `node` user.
 
-Public domains belong to the site: `dev.analytics.chatterpay.net` and `analytics.chatterpay.net`.
+The site is served on `dev.analytics.chatterpay.net` and `analytics.chatterpay.net`.
