@@ -54,13 +54,15 @@ describe('metrics routes', () => {
   it('applies the query filters', async () => {
     const response = await app.inject({
       method: 'GET',
-      url: '/v1/metrics/overview?network=cardano&range=week',
+      url: '/v1/metrics/overview?network=cardano-preprod&range=week',
       headers: { 'x-test-role': 'admin' }
     });
 
     const body = response.json();
     expect(body.meta.range).toBe('week');
-    expect(body.byNetwork.map((item: { network: string }) => item.network)).toEqual(['cardano']);
+    expect(body.byNetwork.map((item: { network: string }) => item.network)).toEqual([
+      'cardano-preprod'
+    ]);
     expect(body.series).toHaveLength(7);
   });
 
