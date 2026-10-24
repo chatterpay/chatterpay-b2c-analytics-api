@@ -1,15 +1,12 @@
 import { dayHourOf, periodOf, type TimeWindow } from './calendar.js';
-import {
-  DATASET_VERSION,
-  type NetworkFilter,
-  type NetworkId,
-  networkProfile,
-  networksFor
-} from './catalog.js';
-import { activeUsersInWindow, type Facts, factsInWindow, feesCents, volumeCents } from './facts.js';
+import { type NetworkFilter, type NetworkId, networkProfile, networksFor } from './catalog.js';
+import { type Facts, feesCents, volumeCents } from './facts.js';
 import { centsToUsd, countMetric, moneyMetric } from './format.js';
 import { resolveRange } from './ranges.js';
+import { type MetricGroup, provenanceOf, sourceFor } from './sources.js';
 import type { MetricsRange, OverviewResponse, RangeMeta } from './types.js';
+
+const OVERVIEW_GROUPS: readonly MetricGroup[] = ['activity', 'activeUsers', 'signups'];
 
 /**
  * Builds the `meta` object of a range response.
@@ -17,13 +14,18 @@ import type { MetricsRange, OverviewResponse, RangeMeta } from './types.js';
  * @param network - Requested network filter.
  * @param range - Requested range.
  * @param now - Generation instant.
+ * @param groups - Metric groups of the response, which set its provenance.
  * @returns The meta object.
  */
-export function rangeMeta(network: NetworkFilter, range: MetricsRange, now: Date): RangeMeta {
+export function rangeMeta(
+  network: NetworkFilter,
+  range: MetricsRange,
+  now: Date,
+  groups: readonly MetricGroup[]
+): RangeMeta {
   const resolved = resolveRange(range, dayHourOf(now));
   return {
-    datasetVersion: DATASET_VERSION,
-    dataStatus: 'mock',
+    ...provenanceOf(groups),
     generatedAt: now.toISOString(),
     currency: 'USD',
     network,
@@ -40,6 +42,8 @@ interface NetworkTotals {
   previous: Facts | null;
   activeUsers: number;
   previousActiveUsers: number | null;
+  newUsers: number;
+  previousNewUsers: number | null;
 }
 
 function totalsFor(
@@ -47,12 +51,17 @@ function totalsFor(
   current: TimeWindow,
   previous: TimeWindow | null
 ): NetworkTotals {
+  const activity = sourceFor('activity');
+  const active = sourceFor('activeUsers');
+  const signups = sourceFor('signups');
   return {
     network,
-    facts: factsInWindow(network, current),
-    previous: previous === null ? null : factsInWindow(network, previous),
-    activeUsers: activeUsersInWindow(network, current),
-    previousActiveUsers: previous === null ? null : activeUsersInWindow(network, previous)
+    facts: activity.facts(network, current),
+    previous: previous === null ? null : activity.facts(network, previous),
+    activeUsers: active.activeUsers(network, current),
+    previousActiveUsers: previous === null ? null : active.activeUsers(network, previous),
+    newUsers: signups.facts(network, current).newUsers,
+    previousNewUsers: previous === null ? null : signups.facts(network, previous).newUsers
   };
 }
 
@@ -75,8 +84,9 @@ function sumOrNull<T>(items: readonly T[], pick: (item: T) => number | null): nu
 /**
  * Builds the Overview dataset.
  *
- * Totals, series points and the network breakdown come from the same facts, so tiles equal the sum
- * of the breakdown and of the series.
+ * Totals, series points and the network breakdown of a metric group come from the same source, so
+ * tiles equal the sum of the breakdown and of the series. Each group is live or synthetic as set in
+ * `LIVE_METRIC_GROUPS`.
  *
  * @param network - Network filter.
  * @param range - Time range.
@@ -92,9 +102,10 @@ export function buildOverview(
   const networks = networksFor(network);
   const totals = networks.map((id) => totalsFor(id, resolved.current, resolved.previous));
 
+  const activity = sourceFor('activity');
   const series = resolved.buckets.map((bucket) => {
     const byNetwork = networks.map((id) => {
-      const facts = factsInWindow(id, bucket);
+      const facts = activity.facts(id, bucket);
       return {
         network: id,
         volume: volumeCents(facts),
@@ -114,7 +125,7 @@ export function buildOverview(
   });
 
   return {
-    meta: rangeMeta(network, range, now),
+    meta: rangeMeta(network, range, now, OVERVIEW_GROUPS),
     tiles: {
       volumeUsd: moneyMetric(
         sum(totals, (t) => volumeCents(t.facts)),
@@ -135,8 +146,8 @@ export function buildOverview(
         sumOrNull(totals, (t) => t.previousActiveUsers)
       ),
       newUsers: countMetric(
-        sum(totals, (t) => t.facts.newUsers),
-        sumOrNull(totals, (t) => (t.previous === null ? null : t.previous.newUsers))
+        sum(totals, (t) => t.newUsers),
+        sumOrNull(totals, (t) => t.previousNewUsers)
       )
     },
     series,
@@ -147,7 +158,7 @@ export function buildOverview(
       transactions: t.facts.transfers + t.facts.swaps,
       feesUsd: centsToUsd(feesCents(t.facts)),
       activeUsers: t.activeUsers,
-      newUsers: t.facts.newUsers
+      newUsers: t.newUsers
     }))
   };
 }
