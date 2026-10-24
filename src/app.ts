@@ -12,7 +12,6 @@ import { healthRoutes } from './routes/health.js';
 import { metricsRoutes } from './routes/metrics.js';
 import { registerSharedSchemas } from './routes/schemas.js';
 import { teamRoutes } from './routes/team.js';
-import { bootstrapMembers } from './store/bootstrap.js';
 import { MemoryStore } from './store/memory-store.js';
 import type { Store } from './store/types.js';
 
@@ -24,7 +23,7 @@ export interface AppOptions {
   authenticate?: Authenticator;
   /** Source of the current instant for sessions, challenges, invites and the mock datasets. */
   clock?: () => Date;
-  /** Persistence; a new in-memory store by default. */
+  /** Persistence; a new in-memory store by default, refused in production. */
   store?: Store;
 }
 
@@ -33,19 +32,19 @@ export interface AppOptions {
  *
  * The incoming `x-request-id` is reused only when it matches a safe pattern; otherwise a UUID is
  * generated. Logs redact credentials and session headers. Query strings and bodies with unknown
- * properties are rejected instead of stripped. The members of the bootstrap variables are created
- * in the store.
+ * properties are rejected instead of stripped. Members live in the store; the first admin of a
+ * new database is inserted by an operator.
  *
  * @param env - Validated configuration.
  * @param options - Replaceable dependencies.
  * @returns The configured, not yet listening, application.
- * @throws {Error} When the in-memory store is used in production without `ALLOW_IN_MEMORY_STORE`.
+ * @throws {Error} When the in-memory store is used in production.
  */
 export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<FastifyInstance> {
   const clock = options.clock ?? ((): Date => new Date());
   const store = options.store ?? new MemoryStore();
-  if (store.kind === 'memory' && env.NODE_ENV === 'production' && !env.ALLOW_IN_MEMORY_STORE) {
-    throw new Error('The in-memory store requires ALLOW_IN_MEMORY_STORE=true in production');
+  if (store.kind === 'memory' && env.NODE_ENV === 'production') {
+    throw new Error('Production requires the MongoDB store');
   }
   const keys = loadSigningKeys(env);
   const authenticate = options.authenticate ?? createJwtAuthenticator({ env, keys, store, clock });
@@ -78,14 +77,11 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
   });
 
   if (store.kind === 'memory') {
-    app.log.warn(
-      'using the in-memory store: single instance only, members and sessions are lost on restart'
-    );
+    app.log.warn('using the in-memory store: MONGO_URI is unset, data is lost on restart');
   }
   if (keys.ephemeral) {
     app.log.warn('JWT_PRIVATE_KEY is unset: using an ephemeral key, sessions end on restart');
   }
-  await bootstrapMembers(store, env, clock());
 
   await app.register(swagger, {
     openapi: {
@@ -94,7 +90,7 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
         title: 'ChatterPay Analytics API',
         version: '0.1.0',
         description:
-          'Private API behind the ChatterPay Analytics site BFF. Cloud Run only admits callers with an IAM identity token of the site service account. Every metric is synthetic and carries dataStatus "mock".'
+          'Private API behind the ChatterPay Analytics site BFF. Cloud Run only admits callers with an IAM identity token of the site service account, whose audience is the API domain. Every metric is synthetic and carries dataStatus "mock".'
       },
       servers: [{ url: 'http://127.0.0.1:4001', description: 'Local development' }]
     },
@@ -124,7 +120,7 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
 
   registerErrorHandling(app);
   registerSharedSchemas(app);
-  await app.register(healthRoutes);
+  await app.register(healthRoutes, { store });
   await app.register(authRoutes, { prefix: '/v1/auth', env, store, keys, clock });
   await app.register(teamRoutes, { prefix: '/v1/team', store, clock });
   await app.register(metricsRoutes, { prefix: '/v1/metrics', clock });
