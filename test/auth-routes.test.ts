@@ -409,19 +409,16 @@ describe('auth configuration', () => {
     await app.close();
   });
 
-  it('refuses the in-memory store in production unless allowed', async () => {
+  it('refuses the in-memory store in production', async () => {
     const { privateKey } = generateKeyPairSync('ed25519');
-    const production = {
+    const production = loadEnv({
       NODE_ENV: 'production',
       LOG_LEVEL: 'silent',
       DEMO_ACCESS_CODE: ACCESS_CODE,
-      JWT_PRIVATE_KEY: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
-    };
+      JWT_PRIVATE_KEY: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+      MONGO_URI: 'mongodb://127.0.0.1:27017'
+    });
 
-    await expect(buildApp(loadEnv(production))).rejects.toThrowError(/ALLOW_IN_MEMORY_STORE/);
-
-    const app = await buildApp(loadEnv({ ...production, ALLOW_IN_MEMORY_STORE: 'true' }));
-    await app.ready();
-    await app.close();
+    await expect(buildApp(production)).rejects.toThrowError(/MongoDB store/);
   });
 });
