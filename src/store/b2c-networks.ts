@@ -1,5 +1,6 @@
 import { MongoClient } from 'mongodb';
 import type { NetworkDefinition, NetworkFamily } from '../metrics/catalog.js';
+import { MongoB2cActivityReader } from './b2c-activity.js';
 
 /** Options of {@link B2cNetworkSource.connect}. */
 export interface B2cNetworkSourceOptions {
@@ -76,7 +77,8 @@ export function toNetworkDefinitions(
 
 /**
  * Read-only access to the `blockchains` collection of the ChatterPay B2C database, the source of
- * the networks that the metrics endpoints offer. Only `name` and `family` are read.
+ * the networks that the metrics endpoints offer. Only `name` and `family` are read here;
+ * {@link B2cNetworkSource.activity} reads the collections the ingestion copies.
  */
 export class B2cNetworkSource {
   private constructor(
@@ -112,6 +114,15 @@ export class B2cNetworkSource {
       .find({}, { projection: { _id: 0, name: 1, family: 1 } })
       .toArray();
     return toNetworkDefinitions(documents);
+  }
+
+  /**
+   * Reader of the B2C activity collections over the same connection.
+   *
+   * @returns The reader.
+   */
+  activity(): MongoB2cActivityReader {
+    return new MongoB2cActivityReader(this.client.db(this.dbName));
   }
 
   async close(): Promise<void> {
