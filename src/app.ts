@@ -2,37 +2,53 @@ import { randomUUID } from 'node:crypto';
 import helmet from '@fastify/helmet';
 import swagger from '@fastify/swagger';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { type Authenticator, denyAllAuthenticator } from './auth/principal.js';
+import { createJwtAuthenticator } from './auth/jwt-authenticator.js';
+import type { Authenticator } from './auth/principal.js';
+import { loadSigningKeys } from './auth/session-token.js';
 import type { AppEnv } from './config/env.js';
 import { registerErrorHandling } from './plugins/error-handler.js';
+import { authRoutes } from './routes/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { metricsRoutes } from './routes/metrics.js';
 import { registerSharedSchemas } from './routes/schemas.js';
+import { teamRoutes } from './routes/team.js';
+import { bootstrapMembers } from './store/bootstrap.js';
+import { MemoryStore } from './store/memory-store.js';
+import type { Store } from './store/types.js';
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{8,64}$/;
 
 /** Dependencies that tests replace. */
 export interface AppOptions {
-  /** Resolves the session principal; every request is anonymous by default. */
+  /** Resolves the session principal; the session JWT authenticator by default. */
   authenticate?: Authenticator;
-  /** Source of the current instant for the mock datasets. */
+  /** Source of the current instant for sessions, challenges, invites and the mock datasets. */
   clock?: () => Date;
+  /** Persistence; a new in-memory store by default. */
+  store?: Store;
 }
 
 /**
  * Builds the Fastify application without binding a port, so tests can use `inject`.
  *
  * The incoming `x-request-id` is reused only when it matches a safe pattern; otherwise a UUID is
- * generated. Logs redact credentials and session headers. Query strings with unknown parameters
- * are rejected instead of stripped.
+ * generated. Logs redact credentials and session headers. Query strings and bodies with unknown
+ * properties are rejected instead of stripped. The members of the bootstrap variables are created
+ * in the store.
  *
  * @param env - Validated configuration.
  * @param options - Replaceable dependencies.
  * @returns The configured, not yet listening, application.
+ * @throws {Error} When the in-memory store is used in production without `ALLOW_IN_MEMORY_STORE`.
  */
 export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<FastifyInstance> {
-  const authenticate = options.authenticate ?? denyAllAuthenticator;
   const clock = options.clock ?? ((): Date => new Date());
+  const store = options.store ?? new MemoryStore();
+  if (store.kind === 'memory' && env.NODE_ENV === 'production' && !env.ALLOW_IN_MEMORY_STORE) {
+    throw new Error('The in-memory store requires ALLOW_IN_MEMORY_STORE=true in production');
+  }
+  const keys = loadSigningKeys(env);
+  const authenticate = options.authenticate ?? createJwtAuthenticator({ env, keys, store, clock });
 
   const app = Fastify({
     logger: {
@@ -41,7 +57,8 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
         paths: [
           'req.headers.authorization',
           'req.headers["x-serverless-authorization"]',
-          'req.headers.cookie'
+          'req.headers.cookie',
+          'req.headers["x-client-ip"]'
         ],
         censor: '[redacted]'
       }
@@ -59,6 +76,16 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
     return503OnClosing: true,
     ajv: { customOptions: { removeAdditional: false } }
   });
+
+  if (store.kind === 'memory') {
+    app.log.warn(
+      'using the in-memory store: single instance only, members and sessions are lost on restart'
+    );
+  }
+  if (keys.ephemeral) {
+    app.log.warn('JWT_PRIVATE_KEY is unset: using an ephemeral key, sessions end on restart');
+  }
+  await bootstrapMembers(store, env, clock());
 
   await app.register(swagger, {
     openapi: {
@@ -98,6 +125,8 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
   registerErrorHandling(app);
   registerSharedSchemas(app);
   await app.register(healthRoutes);
+  await app.register(authRoutes, { prefix: '/v1/auth', env, store, keys, clock });
+  await app.register(teamRoutes, { prefix: '/v1/team', store, clock });
   await app.register(metricsRoutes, { prefix: '/v1/metrics', clock });
 
   return app;
