@@ -154,6 +154,7 @@ Valuation and counting (`src/metrics/live.ts`):
 - Stable tokens (`type: 'stable'`) are 1 USD. Other tokens take the swap-implied price of the day, or the provider snapshot; a day without a price takes the closest earlier day, then the closest later one. Operations without any price are valued at zero and counted as `unpriced` in the summary.
 - Fees are the `fee` field of the operation, in its token, as the backend computed it; they are not reconciled against charges.
 - Active users are the senders of counted operations (B2C user id, or the address when it belongs to no user). New and total users come from `users.creationDate` on each network of the user's wallets; wallets have no date of their own. Users without `creationDate` count in totals from the start.
+- User tiles, series totals and retention cohorts count a user id once across the selected networks; the `byNetwork` rows count per network, so a user with wallets on Base and Cardano appears in both rows and the rows can add up to more than the tile.
 
 `LIVE_METRIC_GROUPS` in `src/metrics/sources.ts` lists which metric groups (`activity`, `activeUsers`, `signups`, `retention`) are served from the aggregates once a build exists; the rest stay synthetic.
 
@@ -165,7 +166,7 @@ Valuation and counting (`src/metrics/live.ts`):
 - `today`, `week`, `month` and `year` are rolling windows of 1, 7, 30 and 365 days; `ytd` starts on January 1; `all` starts at the dataset start and has no comparison. The previous period ends at the same hour, so partial days are compared like for like.
 - Every total equals the sum of its series, network breakdown and asset breakdown. Volume counts transfers plus the input side of swaps. Cardano networks have no swaps. Every network of a family uses the same activity template; after the first one, user counts are scaled by a factor derived from the id.
 - Amounts are USD decimal strings with 2 places, computed in integer cents. `changeRatio` is a decimal string with 4 places, `null` when the previous value is zero or absent.
-- Users are counted per network: a person active on Base and Cardano counts once on each. Distinct active users of a window come from a synthetic model bounded by the users that joined until then.
+- The synthetic model has no user identities: each network is its own population, so user totals over several networks are the sums of the networks. Distinct active users of a window come from that model, bounded by the users that joined until then.
 
 ## Deployment
 
