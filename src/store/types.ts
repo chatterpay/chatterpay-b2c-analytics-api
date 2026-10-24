@@ -8,6 +8,11 @@ export interface User {
   id: string;
   /** Normalized (trimmed, lowercase) email. */
   email: string;
+  /**
+   * Name of the person, as an operator recorded it in the member document; `null` when none was
+   * recorded. The API never derives it from the email.
+   */
+  name: string | null;
   role: Role;
   status: UserStatus;
   createdAt: Date;
@@ -175,6 +180,12 @@ export interface Store {
   appendActivity(event: Omit<ActivityEvent, 'id'>): Promise<ActivityEvent>;
   /** Most recent events first. */
   listActivity(limit: number): Promise<ActivityEvent[]>;
+  /**
+   * Instant of the last event each user acted in, of any action and outcome.
+   *
+   * @returns Map from user id to that instant; users without events are absent.
+   */
+  lastActivityOf(userIds: readonly string[]): Promise<Map<string, Date>>;
 
   /** Fixed-window counter: counts one hit on `key` and reports whether it is within `limit`. */
   hit(key: string, limit: number, windowMs: number, now: Date): Promise<RateLimitResult>;
