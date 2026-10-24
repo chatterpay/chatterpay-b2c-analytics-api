@@ -9,7 +9,7 @@ Task arguments: $ARGUMENTS
 
 Read the ChatterPay workflows reference first. Prefer `<repo-root>/.claude/docs/chatterpay-workflows-reference.md`; otherwise `~/.claude/docs/chatterpay-workflows-reference.md`. Apply `<repo-root>/.claude/rules/chatterpay-workflows.md`. If no reference is available, request it rather than inventing details.
 
-Identify the current Git repo (`chatterpay/chatterpay-b2c-analytics-api`) and ask the user to confirm it. Ask for the task/issue ID unless given or confirmed absent; issue numbers of the site repo do not apply here. Inspect `git status`, staged and unstaged diffs, and the content of untracked files. The commit format comes from `AGENTS.md` (`[type] :gitmoji: message`) and the types and icons from the catalog in the reference.
+Identify the current Git repo (`chatterpay/chatterpay-analytics-api`) and ask the user to confirm it. Ask for the task/issue ID unless given or confirmed absent; issue numbers of the site repo do not apply here. Inspect `git status`, staged and unstaged diffs, and the content of untracked files. The commit format comes from `AGENTS.md` (`[type] :gitmoji: message`) and the types and icons from the catalog in the reference.
 
 Run `yarn lint:ci`, `yarn type-check`, `yarn test` and `yarn openapi:check`. Report any failure next to the commands. Warn when routes or schemas changed without a regenerated `openapi/openapi.yaml`, or when the mock generator output changed without a new `DATASET_VERSION`. Do not run `yarn pre-commit`, `yarn lint:fix` or `yarn openapi`: they rewrite files.
 
