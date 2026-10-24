@@ -1,4 +1,5 @@
 import { liveSourceFrom } from '../metrics/live.js';
+import { liveSnapshots } from '../metrics/snapshot-source.js';
 import { setLiveSource } from '../metrics/sources.js';
 import type { IngestRepository } from './types.js';
 
@@ -22,6 +23,9 @@ export async function refreshLiveMetrics(
   if (stored === null) {
     return loadedAt;
   }
-  setLiveSource(liveSourceFrom(stored), stored.builtAt);
+  setLiveSource(liveSourceFrom(stored, stored.walletsTrackingSince), stored.builtAt, {
+    snapshots: liveSnapshots(stored.snapshots, stored.run?.sources.balances ?? null),
+    ingest: stored.run
+  });
   return stored.builtAt;
 }
