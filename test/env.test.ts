@@ -72,9 +72,9 @@ describe('loadEnv', () => {
     expect(() => loadEnv({ CHALLENGE_TTL_MINUTES: '61' })).toThrowError(/CHALLENGE_TTL_MINUTES/);
   });
 
-  it('requires the access code, the signing key and MongoDB in production', () => {
+  it('requires the access code, the signing key and both MongoDB connections in production', () => {
     expect(() => loadEnv({ NODE_ENV: 'production' })).toThrowError(
-      /^Invalid environment variables: DEMO_ACCESS_CODE, JWT_PRIVATE_KEY, MONGO_URI$/
+      /^Invalid environment variables: DEMO_ACCESS_CODE, JWT_PRIVATE_KEY, MONGO_URI, B2C_MONGO_URI$/
     );
   });
 });
