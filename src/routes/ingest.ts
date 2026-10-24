@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { IngestCallerVerifier } from '../auth/scheduler-identity.js';
 import { ApiError } from '../errors/api-error.js';
 import type { IngestionReport } from '../ingest/run.js';
-import { errorResponsesFor, object } from './schemas.js';
+import { arrayOf, errorResponsesFor, object } from './schemas.js';
 
 /** Ingestion wired by the server; absent without MongoDB. */
 export interface IngestionHandle {
@@ -28,13 +28,27 @@ const reportSchema = object({
   durationMs: count,
   sources: object({
     transactions: object({ read: count, revisited: count, lastId: nullableString }),
-    users: object({ read: count }),
+    users: object({ read: count, newWallets: count, countedInCountries: count }),
     catalog: object({ tokens: count, networks: count }),
     prices: object({
       provider: nullableString,
       calls: count,
       prices: count,
       failed: { type: 'boolean' }
+    }),
+    balances: object({
+      status: { type: 'string', enum: ['complete', 'partial', 'failed', 'disabled'] },
+      calls: count,
+      failedCalls: count,
+      networks: arrayOf(
+        object({
+          network: { type: 'string' },
+          status: { type: 'string', enum: ['complete', 'partial', 'failed', 'unsupported'] },
+          wallets: count,
+          walletsRead: count
+        })
+      ),
+      masterWallets: count
     })
   }),
   aggregates: {
@@ -45,6 +59,8 @@ const reportSchema = object({
         unpriced: count,
         outsideCatalog: count,
         users: count,
+        wallets: count,
+        verifiedWallets: count,
         builtAt: { type: 'string', format: 'date-time' }
       }),
       { type: 'null' }
