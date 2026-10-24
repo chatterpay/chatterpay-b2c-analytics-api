@@ -1,0 +1,13 @@
+.git
+.github
+.vscode
+.claude
+node_modules
+dist
+coverage
+test
+openapi
+*.md
+.env
+.env.*
+!.env.example
