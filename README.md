@@ -91,7 +91,7 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 | `SESSION_TTL_MINUTES` | `120` | 5-1440 |
 | `CHALLENGE_TTL_MINUTES` | `10` | 1-60 |
 | `MONGO_URI` | unset | `mongodb://` or `mongodb+srv://`. Required in production; unset uses the in-memory store |
-| `MONGO_DB_NAME` | `chatterpay_analytics_dev` | Analytics-only database |
+| `MONGO_DB_NAME` | `chatterpay-analytics-dev` | Analytics-only database |
 
 ## Persistence
 
