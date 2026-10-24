@@ -1010,6 +1010,74 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /v1/metrics/networks:
+    get:
+      operationId: getMetricsNetworks
+      summary: Networks of the environment, from the ChatterPay B2C database
+      tags:
+        - metrics
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - networks
+                properties:
+                  networks:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - id
+                        - label
+                        - family
+                      properties:
+                        id:
+                          type: string
+                          pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                          maxLength: 64
+                        label:
+                          type: string
+                        family:
+                          type: string
+                          enum:
+                            - evm
+                            - cardano
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /v1/metrics/overview:
     get:
       operationId: getOverviewMetrics
@@ -1019,10 +1087,8 @@ paths:
       parameters:
         - schema:
             type: string
-            enum:
-              - all
-              - base
-              - cardano
+            pattern: ^all$|^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+            maxLength: 64
             default: all
           in: query
           name: network
@@ -1083,10 +1149,8 @@ paths:
                           - USD
                       network:
                         type: string
-                        enum:
-                          - all
-                          - base
-                          - cardano
+                        pattern: ^all$|^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                        maxLength: 64
                       range:
                         type: string
                         enum:
@@ -1281,9 +1345,8 @@ paths:
                             properties:
                               network:
                                 type: string
-                                enum:
-                                  - base
-                                  - cardano
+                                pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                                maxLength: 64
                               volumeUsd:
                                 type: string
                                 pattern: ^-?\d+\.\d+$
@@ -1305,9 +1368,8 @@ paths:
                       properties:
                         network:
                           type: string
-                          enum:
-                            - base
-                            - cardano
+                          pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                          maxLength: 64
                         label:
                           type: string
                         volumeUsd:
@@ -1361,10 +1423,8 @@ paths:
       parameters:
         - schema:
             type: string
-            enum:
-              - all
-              - base
-              - cardano
+            pattern: ^all$|^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+            maxLength: 64
             default: all
           in: query
           name: network
@@ -1423,10 +1483,8 @@ paths:
                           - USD
                       network:
                         type: string
-                        enum:
-                          - all
-                          - base
-                          - cardano
+                        pattern: ^all$|^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                        maxLength: 64
                       granularity:
                         type: string
                         enum:
@@ -1617,9 +1675,8 @@ paths:
                             properties:
                               network:
                                 type: string
-                                enum:
-                                  - base
-                                  - cardano
+                                pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                                maxLength: 64
                               activeUsers:
                                 type: integer
                               newUsers:
@@ -1656,9 +1713,8 @@ paths:
                       properties:
                         network:
                           type: string
-                          enum:
-                            - base
-                            - cardano
+                          pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                          maxLength: 64
                         label:
                           type: string
                         activeUsers:
@@ -1704,10 +1760,8 @@ paths:
       parameters:
         - schema:
             type: string
-            enum:
-              - all
-              - base
-              - cardano
+            pattern: ^all$|^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+            maxLength: 64
             default: all
           in: query
           name: network
@@ -1769,10 +1823,8 @@ paths:
                           - USD
                       network:
                         type: string
-                        enum:
-                          - all
-                          - base
-                          - cardano
+                        pattern: ^all$|^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                        maxLength: 64
                       range:
                         type: string
                         enum:
@@ -1952,9 +2004,8 @@ paths:
                       properties:
                         network:
                           type: string
-                          enum:
-                            - base
-                            - cardano
+                          pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                          maxLength: 64
                         label:
                           type: string
                         feesUsd:
@@ -1982,9 +2033,8 @@ paths:
                       properties:
                         network:
                           type: string
-                          enum:
-                            - base
-                            - cardano
+                          pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                          maxLength: 64
                         asset:
                           type: string
                         volumeUsd:
