@@ -75,7 +75,7 @@ const envSchema: z.ZodType<AppEnv> = z
     MONGO_DB_NAME: z
       .string()
       .regex(/^[A-Za-z0-9_-]{1,63}$/)
-      .default('chatterpay_analytics_dev')
+      .default('chatterpay-analytics-dev')
   })
   .superRefine((env, context) => {
     if (env.NODE_ENV !== 'production') {
