@@ -1,8 +1,15 @@
+import { randomUUID } from 'node:crypto';
 import { buildApp } from './app.js';
-import { loadEnv } from './config/env.js';
+import { googleServiceAccountVerifier } from './auth/scheduler-identity.js';
+import { type AppEnv, loadEnv } from './config/env.js';
+import { coingeckoPriceProvider } from './ingest/coingecko.js';
+import { refreshLiveMetrics } from './ingest/live-loader.js';
+import { runIngestion } from './ingest/run.js';
 import { listNetworks, setNetworks } from './metrics/catalog.js';
 import { resetFactsCaches } from './metrics/facts.js';
+import type { IngestionHandle } from './routes/ingest.js';
 import { B2cNetworkSource, databaseFromUri } from './store/b2c-networks.js';
+import { MongoIngestRepository } from './store/ingest-store.js';
 import { MemoryStore } from './store/memory-store.js';
 import { MongoStore } from './store/mongo-store.js';
 import type { Store } from './store/types.js';
@@ -10,6 +17,46 @@ import type { Store } from './store/types.js';
 const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM'] as const;
 /** Interval between reads of the B2C networks, so a network added there shows up without a deploy. */
 const NETWORKS_REFRESH_MS = 5 * 60 * 1000;
+/** Margin between the run deadline and the lock expiry, so a slow last batch keeps the lock. */
+const LOCK_MARGIN_MS = 5 * 60 * 1000;
+
+function ingestionHandle(
+  env: AppEnv,
+  networks: B2cNetworkSource,
+  repository: MongoIngestRepository,
+  afterRun: () => Promise<void>
+): IngestionHandle {
+  const maxRunMs = env.INGEST_MAX_RUN_SECONDS * 1000;
+  return {
+    run: async () => {
+      const report = await runIngestion({
+        reader: networks.activity(),
+        repository,
+        prices: env.PRICES_PROVIDER === 'coingecko' ? coingeckoPriceProvider() : null,
+        clock: () => new Date(),
+        options: {
+          batchSize: env.INGEST_BATCH_SIZE,
+          maxTransactionsPerRun: env.INGEST_MAX_TRANSACTIONS_PER_RUN,
+          revisitHours: env.INGEST_REVISIT_HOURS,
+          maxProviderCallsPerRun: env.PRICES_MAX_CALLS_PER_RUN,
+          maxRunMs,
+          lockTtlMs: maxRunMs + LOCK_MARGIN_MS
+        },
+        owner: randomUUID()
+      });
+      await afterRun();
+      return report;
+    },
+    verifyCaller:
+      env.INGEST_SCHEDULER_SA_EMAIL === null || env.INGEST_OIDC_AUDIENCE === null
+        ? null
+        : googleServiceAccountVerifier({
+            audience: env.INGEST_OIDC_AUDIENCE,
+            serviceAccountEmail: env.INGEST_SCHEDULER_SA_EMAIL
+          }),
+    devTrigger: env.INGEST_DEV_TRIGGER
+  };
+}
 
 /**
  * Process entry point: validates the environment, connects the store, loads the networks of the
@@ -18,6 +65,10 @@ const NETWORKS_REFRESH_MS = 5 * 60 * 1000;
  *
  * With Mongo configured, the first read of the networks must succeed or the process does not
  * start. Later reads that fail keep the previous catalog.
+ *
+ * Live metrics are the last aggregate build of the analytics database, loaded at startup, after
+ * each ingestion run of this instance and every `METRICS_REFRESH_SECONDS` (another instance may
+ * have run it). The ingestion itself only runs through `POST /v1/internal/ingest`.
  */
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -36,9 +87,42 @@ async function main(): Promise<void> {
   if (networks !== null) {
     setNetworks(await networks.load());
   }
+  const ingest =
+    env.MONGO_URI === null || networks === null
+      ? null
+      : await MongoIngestRepository.connect({ uri: env.MONGO_URI, dbName: env.MONGO_DB_NAME });
 
-  const app = await buildApp(env, { store });
+  let loadedAt: Date | null = null;
+  const refreshLive = async (): Promise<void> => {
+    if (ingest !== null) {
+      const previous = loadedAt;
+      loadedAt = await refreshLiveMetrics(ingest, loadedAt);
+      if (loadedAt !== previous) {
+        app.log.info({ builtAt: loadedAt?.toISOString() ?? null }, 'live metrics loaded');
+      }
+    }
+  };
+
+  const app = await buildApp(env, {
+    store,
+    ingestion:
+      ingest === null || networks === null
+        ? null
+        : ingestionHandle(env, networks, ingest, refreshLive)
+  });
   app.log.info({ networks: listNetworks().map((network) => network.id) }, 'network catalog');
+  await refreshLive().catch((error: unknown) => {
+    app.log.warn({ err: error }, 'live metrics load failed; serving synthetic metrics');
+  });
+  const liveRefresh =
+    ingest === null
+      ? null
+      : setInterval(() => {
+          refreshLive().catch((error: unknown) => {
+            app.log.warn({ err: error }, 'live metrics refresh failed');
+          });
+        }, env.METRICS_REFRESH_SECONDS * 1000);
+  liveRefresh?.unref();
 
   const refresh =
     networks === null
@@ -67,6 +151,10 @@ async function main(): Promise<void> {
     if (refresh !== null) {
       clearInterval(refresh);
     }
+    if (liveRefresh !== null) {
+      clearInterval(liveRefresh);
+    }
+    await ingest?.close();
     await networks?.close();
     await store.close();
   });
