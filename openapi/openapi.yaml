@@ -1,0 +1,87 @@
+openapi: 3.1.0
+info:
+  title: ChatterPay Analytics API
+  version: 0.1.0
+  description: >-
+    Private API behind the ChatterPay Analytics site BFF. It is not reachable from browsers:
+    Cloud Run requires an IAM identity token from the site service account. Every metric it
+    serves in V0 is synthetic and labelled with dataStatus "mock".
+servers:
+  - url: http://127.0.0.1:4001
+    description: Local development
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      tags: [infrastructure]
+      responses:
+        "200":
+          description: Process is alive.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthBody"
+  /readyz:
+    get:
+      operationId: getReadiness
+      summary: Readiness probe
+      tags: [infrastructure]
+      responses:
+        "200":
+          description: Process can serve requests.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+components:
+  headers:
+    XRequestId:
+      description: Correlation id; echoes a valid incoming x-request-id or a generated UUID.
+      schema:
+        type: string
+  schemas:
+    HealthBody:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    ApiError:
+      type: object
+      additionalProperties: false
+      required: [code, message, requestId]
+      properties:
+        code:
+          type: string
+          enum:
+            - BAD_REQUEST
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - NOT_FOUND
+            - PAYLOAD_TOO_LARGE
+            - RATE_LIMITED
+            - SERVICE_UNAVAILABLE
+            - INTERNAL_ERROR
+        message:
+          type: string
+          description: Caller-safe description; never contains secrets, codes or PII.
+        requestId:
+          type: string
+  responses:
+    ServiceUnavailable:
+      description: A required dependency is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
