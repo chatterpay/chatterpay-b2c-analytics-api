@@ -2,7 +2,7 @@
 
 Private backend of ChatterPay Analytics. It serves the analytics datasets, the demo login and the team management to the BFF of the site (`chatterpay-analytics-site`). Browsers never call it directly.
 
-In V0 every metric is synthetic: responses carry `dataStatus: "mock"` and the site labels them `DEMO DATA`. The API does not read ChatterPay B2C collections, blockchains or providers.
+Metrics come from aggregates of the analytics database. A daily ingestion, started by Cloud Scheduler through `POST /v1/internal/ingest`, copies the ChatterPay B2C activity into that database and rebuilds the aggregates. Metric groups without live data yet stay synthetic; `meta.dataStatus` (`live`, `mixed` or `mock`) and `meta.lastUpdatedAt` tell them apart. Request handlers never read the B2C database or a provider.
 
 ## Stack
 
@@ -32,6 +32,8 @@ The server listens on `http://127.0.0.1:4001`. `yarn dev` loads `.env` when it e
 | `yarn openapi` / `yarn openapi:check` | Regenerate `openapi/openapi.yaml` from the route schemas / fail when it is out of date |
 | `yarn pre-commit` | `lint:fix`, `type-check` and `test` |
 
+To run an ingestion locally, set `INGEST_DEV_TRIGGER=true` in `.env` and call `curl -X POST http://127.0.0.1:4001/v1/internal/ingest`. It reads the B2C database read-only and writes only to the analytics database; keep `PRICES_PROVIDER=none` unless the provider snapshot is under test.
+
 ## Endpoints
 
 The contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml) (OpenAPI 3.1), generated from the route schemas with `yarn openapi`; CI fails when the committed file is out of date. The site generates its client from that file.
@@ -44,6 +46,7 @@ The contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml) (OpenAPI 3.
 | `GET /v1/metrics/overview?network&range` | admin, viewer | Volume, transactions, fees, active and new users; series and network breakdown |
 | `GET /v1/metrics/users?network&granularity` | admin, viewer | Daily/monthly/yearly active users, new and total users, retention cohorts |
 | `GET /v1/metrics/revenue?network&range` | admin, viewer | Transfer and swap fees, volume, network and asset breakdowns |
+| `POST /v1/internal/ingest` | scheduler service account | One ingestion run; returns its summary. 503 when not configured, 401 for any other caller |
 | `POST /v1/auth/request-code` | public (BFF) | Opens a login challenge for an email; 202 `{ challengeId, expiresAt }` |
 | `POST /v1/auth/verify-code` | public (BFF) | Exchanges challenge, email and access code for `{ token, expiresAt, user }` |
 | `GET /v1/auth/me` | admin, viewer | Member and session expiry behind the bearer token |
@@ -95,6 +98,16 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 | `MONGO_DB_NAME` | `chatterpay-analytics-dev` | Analytics-only database |
 | `B2C_MONGO_URI` | unset | Connection string of the ChatterPay B2C database, with the database in its path; its `blockchains` collection lists the networks of the environment. Required in production; unset reuses `MONGO_URI` |
 | `B2C_MONGO_DB_NAME` | `chatterpay-dev` | B2C database used when `B2C_MONGO_URI` has no database in its path |
+| `INGEST_SCHEDULER_SA_EMAIL` | unset | Service account whose Google ID token may call the ingestion endpoint. Unset keeps the endpoint closed (503) unless `INGEST_DEV_TRIGGER` is on |
+| `INGEST_OIDC_AUDIENCE` | unset | `aud` of that token, the audience of the scheduler job. Set together with `INGEST_SCHEDULER_SA_EMAIL` |
+| `INGEST_DEV_TRIGGER` | `false` | `true` opens the ingestion endpoint to any caller, for local runs. Refused in production |
+| `INGEST_BATCH_SIZE` | `1000` | B2C transaction rows per batch, 100-10000 |
+| `INGEST_MAX_TRANSACTIONS_PER_RUN` | `50000` | Ceiling on B2C transaction rows read per run |
+| `INGEST_REVISIT_HOURS` | `72` | Rows inserted this many hours before a run are read again for status changes; 0 disables |
+| `INGEST_MAX_RUN_SECONDS` | `480` | No batch starts after this; below the Cloud Run request timeout and the scheduler attempt deadline |
+| `PRICES_PROVIDER` | `none` | `coingecko` takes one daily USD snapshot of the non-stable tokens; `none` values them with swap-implied prices only |
+| `PRICES_MAX_CALLS_PER_RUN` | `1` | Ceiling on price provider requests per run, 0-5 |
+| `METRICS_REFRESH_SECONDS` | `300` | How often an instance looks for a newer aggregate build |
 
 ## Persistence
 
@@ -106,12 +119,43 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 | `invites` | Simulated invites | `email_pending_unique` (unique `email` where `status` is `simulated`), `mutation_id_unique`, `created_at` |
 | `activity` | Login and team events | `at` |
 | `rate_limits` | Fixed-window counters | `reset_at_ttl` |
+| `ingest_state` | Ingestion checkpoints (`checkpoints`), run lock (`lock`) and last aggregate build (`aggregates`) | default |
+| `b2c_transactions` | Copy of the B2C `transactions` rows, keyed by the B2C `_id` | default |
+| `b2c_users` | Id, `creationDate` and wallets (chain id, address) of the B2C users; no phone, name or email | default |
+| `b2c_tokens` / `b2c_networks` | Copies of the B2C token list and of the networks with their public contract addresses | default |
+| `token_prices` | USD price per symbol and day from the provider | default |
+| `agg_hourly` / `agg_user_activity` / `agg_user_signups` | Aggregates of the last build: facts per network and hour, active hours per user, signups | default |
 
 - The API does not create indexes. `REQUIRED_INDEXES` in `src/store/mongo-schema.ts` lists them, and startup fails naming the missing ones.
 - Members exist only in the database. The first admin of a new database is inserted by an operator; the rest join through invites.
 - Invariants hold without multi-document transactions: unique indexes for one active member and one pending invite per email and one invite per `mutationId`, conditional single-document updates for challenges and invite transitions, and a compensating update for the last active admin (two concurrent changes that would each remove it can both be undone).
 - The in-memory store is refused in production and logs a warning elsewhere.
 - `MONGO_TEST_URI=mongodb://127.0.0.1:27017 yarn test` runs the route suites on MongoDB, each test on a throwaway database that is dropped afterwards.
+
+## Ingestion
+
+`POST /v1/internal/ingest` runs `runIngestion` (`src/ingest/run.ts`):
+
+1. Takes the lock in `ingest_state`; a run that finds it taken answers 200 with `status: locked`. The lock expires `INGEST_MAX_RUN_SECONDS` plus 5 minutes after it is taken.
+2. Copies B2C `transactions` rows with an `_id` above the checkpoint, in batches, saving the checkpoint after each batch. Copies are keyed by the B2C `_id`, so a repeated read replaces instead of duplicating.
+3. Reads again the rows inserted in the last `INGEST_REVISIT_HOURS`, for rows whose status changes after insertion (Polymarket orders).
+4. Replaces the copies of `users`, `tokens` and `blockchains`.
+5. With `PRICES_PROVIDER=coingecko`, requests one USD snapshot per UTC day; the day is marked before the request, so a failing provider is asked once a day at most.
+6. Rebuilds every aggregate from the copies and records the build instant.
+
+Steps 2 and 3 stop starting batches at `INGEST_MAX_TRANSACTIONS_PER_RUN` rows or `INGEST_MAX_RUN_SECONDS`; the run answers `status: partial` and the next run continues from the checkpoint. The instance that ran the ingestion loads the new aggregates at once; the others within `METRICS_REFRESH_SECONDS`.
+
+Admitted callers: the Google-signed ID token in `Authorization: Bearer` is verified against Google's keys, with `iss` `https://accounts.google.com`, `aud` equal to `INGEST_OIDC_AUDIENCE`, `email` equal to `INGEST_SCHEDULER_SA_EMAIL` and `email_verified`. Cloud Run IAM admits the site service account too, which is why the API checks the identity itself; the site sends its identity in `X-Serverless-Authorization` and a session JWT in `Authorization`, so it never passes. Locally, `INGEST_DEV_TRIGGER=true` admits any caller.
+
+Valuation and counting (`src/metrics/live.ts`):
+
+- Counted operations: completed `transfer` rows and completed swaps, one per transaction hash and chain. Deposits and Polymarket rows are copied but not counted. Rows of chains outside the catalog are not counted.
+- A swap is valued and attributed on its input leg. Its USD value is the stable leg when either leg is stable; otherwise the input amount times the price of the day.
+- Stable tokens (`type: 'stable'`) are 1 USD. Other tokens take the swap-implied price of the day, or the provider snapshot; a day without a price takes the closest earlier day, then the closest later one. Operations without any price are valued at zero and counted as `unpriced` in the summary.
+- Fees are the `fee` field of the operation, in its token, as the backend computed it; they are not reconciled against charges.
+- Active users are the senders of counted operations (B2C user id, or the address when it belongs to no user). New and total users come from `users.creationDate` on each network of the user's wallets; wallets have no date of their own. Users without `creationDate` count in totals from the start.
+
+`LIVE_METRIC_GROUPS` in `src/metrics/sources.ts` lists which metric groups (`activity`, `activeUsers`, `signups`, `retention`) are served from the aggregates once a build exists; the rest stay synthetic.
 
 ## Mock dataset
 
@@ -132,10 +176,11 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 | `_SERVICE_NAME` | `chatterpay-analytics-back-develop` or `chatterpay-analytics-back-main` |
 | `_DEPLOY_REGION` / `_AR_HOSTNAME` / `_TRIGGER_ID` | Region, Artifact Registry host, trigger id |
 
-- Server variables (`LOG_LEVEL`, `BODY_LIMIT_BYTES`, `REQUEST_TIMEOUT_MS`, `JWT_KEY_ID`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SESSION_TTL_MINUTES`, `CHALLENGE_TTL_MINUTES`, `MONGO_DB_NAME`) are defined in the Cloud Run service YAML. The image only sets `NODE_ENV`, `HOST` and `PORT`; the deploy keeps the variables already defined on the service.
+- Server variables (`LOG_LEVEL`, `BODY_LIMIT_BYTES`, `REQUEST_TIMEOUT_MS`, `JWT_KEY_ID`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SESSION_TTL_MINUTES`, `CHALLENGE_TTL_MINUTES`, `MONGO_DB_NAME` and the `INGEST_*`, `PRICES_*` and `METRICS_*` variables) are defined in the Cloud Run service YAML. The image only sets `NODE_ENV`, `HOST` and `PORT`; the deploy keeps the variables already defined on the service.
 - Secrets never enter the image: `DEMO_ACCESS_CODE`, `JWT_PRIVATE_KEY` and `MONGO_URI` come from Secret Manager through `secretKeyRef` in the Cloud Run service YAML. `MONGO_URI` reads `ANALYTICS_BACKEND_MONGO_CONN_STRING_DEV` / `_MAIN`: the connection string of a database user whose only role is `readWrite` on the analytics database of the same Atlas cluster as the backend.
 - The service name selects the VPC: `*-develop` deploys on `chatterpay-dev-vpc` / `chatterpay-dev-run`, `*-main` on `chatterpay-main-vpc` / `chatterpay-main-run`; any other name stops the build.
 - The service sits behind the HTTPS load balancer on `dev.back.analytics.chatterpay.net` and `back.analytics.chatterpay.net`, with ingress `internal-and-cloud-load-balancing`. The deploy uses `--no-allow-unauthenticated`: only the service account of the site has `roles/run.invoker`. The BFF sends a Google-signed ID token whose audience is the API domain, declared on the service as a custom audience (`run.googleapis.com/custom-audiences`).
 - The container listens on `0.0.0.0:8080` as the non-root `node` user.
+- The ingestion is started by a Cloud Scheduler HTTP job: `POST https://<API domain>/v1/internal/ingest`, OIDC token of a dedicated scheduler service account with `roles/run.invoker` on the service, audience equal to the API domain (the same custom audience the site uses), attempt deadline above `INGEST_MAX_RUN_SECONDS`. The Cloud Run request timeout must also exceed `INGEST_MAX_RUN_SECONDS`.
 
 The site is served on `dev.analytics.chatterpay.net` and `analytics.chatterpay.net`.
