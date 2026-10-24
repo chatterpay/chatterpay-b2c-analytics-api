@@ -38,6 +38,8 @@ describe('loadEnv', () => {
     expect(env.CHALLENGE_TTL_MINUTES).toBe(10);
     expect(env.MONGO_URI).toBeNull();
     expect(env.MONGO_DB_NAME).toBe('chatterpay-analytics-dev');
+    expect(env.B2C_MONGO_DB_NAME).toBe('chatterpay-dev');
+    expect(env.B2C_MONGO_URI).toBeNull();
   });
 
   it('accepts MongoDB connection strings and safe database names only', () => {
