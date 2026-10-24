@@ -16,6 +16,7 @@ const OPTIONS: IngestionOptions = {
   maxTransactionsPerRun: 1000,
   revisitHours: 72,
   maxProviderCallsPerRun: 1,
+  maxBalanceCallsPerRun: 0,
   maxRunMs: 60_000,
   lockTtlMs: 120_000
 };
@@ -35,6 +36,8 @@ function run(
     reader,
     repository,
     prices,
+    balances: null,
+    masterWallets: [],
     clock,
     options: { ...OPTIONS, ...overrides },
     owner: 'test-run'
