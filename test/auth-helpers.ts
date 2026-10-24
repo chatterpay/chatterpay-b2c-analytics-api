@@ -48,7 +48,7 @@ async function createStore(): Promise<{ store: Store; dispose: () => Promise<voi
   if (MONGO_TEST_URI === '') {
     return { store: new MemoryStore(), dispose: async () => {} };
   }
-  const dbName = `analytics_test_${randomUUID().replace(/-/g, '')}`;
+  const dbName = `analytics-test-${randomUUID()}`;
   const admin = new MongoClient(MONGO_TEST_URI);
   await admin.connect();
   await createRequiredIndexes(admin.db(dbName));
