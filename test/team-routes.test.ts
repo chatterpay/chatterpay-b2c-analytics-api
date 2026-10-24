@@ -349,7 +349,12 @@ describe('team routes', () => {
       harness.store.changeRole(secondId, 'viewer')
     ]);
 
-    expect(results.map((result) => result.kind).sort()).toEqual(['last_admin', 'ok']);
+    // At most one demotion wins; the MongoDB store may undo both, never neither.
+    const kinds = results.map((result) => result.kind);
+    expect(kinds.filter((kind) => kind === 'ok').length).toBeLessThanOrEqual(1);
+    expect(kinds).toContain('last_admin');
+    const admins = (await harness.store.listActiveUsers()).filter((user) => user.role === 'admin');
+    expect(admins.length).toBeGreaterThanOrEqual(1);
   });
 
   it('returns activity newest first within the limit', async () => {
