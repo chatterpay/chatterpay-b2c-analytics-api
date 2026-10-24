@@ -77,4 +77,38 @@ describe('loadEnv', () => {
       /^Invalid environment variables: DEMO_ACCESS_CODE, JWT_PRIVATE_KEY, MONGO_URI, B2C_MONGO_URI$/
     );
   });
+
+  it('applies the ingestion defaults', () => {
+    const env = loadEnv({});
+
+    expect(env.INGEST_SCHEDULER_SA_EMAIL).toBeNull();
+    expect(env.INGEST_OIDC_AUDIENCE).toBeNull();
+    expect(env.INGEST_DEV_TRIGGER).toBe(false);
+    expect(env.INGEST_BATCH_SIZE).toBe(1000);
+    expect(env.INGEST_MAX_TRANSACTIONS_PER_RUN).toBe(50_000);
+    expect(env.INGEST_REVISIT_HOURS).toBe(72);
+    expect(env.INGEST_MAX_RUN_SECONDS).toBe(480);
+    expect(env.PRICES_PROVIDER).toBe('none');
+    expect(env.PRICES_MAX_CALLS_PER_RUN).toBe(1);
+    expect(env.METRICS_REFRESH_SECONDS).toBe(300);
+  });
+
+  it('requires the scheduler account and its audience together', () => {
+    expect(() =>
+      loadEnv({ INGEST_SCHEDULER_SA_EMAIL: 'scheduler@p.iam.gserviceaccount.com' })
+    ).toThrowError(/INGEST_OIDC_AUDIENCE/);
+    expect(
+      loadEnv({
+        INGEST_SCHEDULER_SA_EMAIL: 'scheduler@p.iam.gserviceaccount.com',
+        INGEST_OIDC_AUDIENCE: 'https://api.example'
+      }).INGEST_OIDC_AUDIENCE
+    ).toBe('https://api.example');
+  });
+
+  it('refuses the development ingestion trigger in production', () => {
+    expect(loadEnv({ INGEST_DEV_TRIGGER: 'true' }).INGEST_DEV_TRIGGER).toBe(true);
+    expect(() => loadEnv({ NODE_ENV: 'production', INGEST_DEV_TRIGGER: 'true' })).toThrowError(
+      /INGEST_DEV_TRIGGER/
+    );
+  });
 });
