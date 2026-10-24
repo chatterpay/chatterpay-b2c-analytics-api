@@ -416,7 +416,8 @@ describe('auth configuration', () => {
       LOG_LEVEL: 'silent',
       DEMO_ACCESS_CODE: ACCESS_CODE,
       JWT_PRIVATE_KEY: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
-      MONGO_URI: 'mongodb://127.0.0.1:27017'
+      MONGO_URI: 'mongodb://127.0.0.1:27017',
+      B2C_MONGO_URI: 'mongodb://127.0.0.1:27017/chatterpay-dev'
     });
 
     await expect(buildApp(production)).rejects.toThrowError(/MongoDB store/);
