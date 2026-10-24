@@ -1,6 +1,6 @@
-# chatterpay-analytics-api
+# chatterpay-b2c-analytics-api
 
-Private backend of ChatterPay Analytics. It serves the analytics datasets, the demo login and the team management to the BFF of the site (`chatterpay-analytics-site`). Browsers never call it directly.
+Private backend of ChatterPay Analytics. It serves the analytics datasets, the demo login and the team management to the BFF of the site (`chatterpay-b2c-analytics-site`). Browsers never call it directly.
 
 Metrics come from aggregates of the analytics database. A daily ingestion, started by Cloud Scheduler through `POST /v1/internal/ingest`, copies the ChatterPay B2C activity into that database and rebuilds the aggregates. Metric groups without live data yet stay synthetic; `meta.dataStatus` (`live`, `mixed` or `mock`) and `meta.lastUpdatedAt` tell them apart. Request handlers never read the B2C database or a provider.
 
