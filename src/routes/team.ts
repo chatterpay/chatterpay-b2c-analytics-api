@@ -16,9 +16,11 @@ import {
   inviteSchema,
   memberSchema,
   roleSchema,
+  teamMemberSchema,
   toActivityEventBody,
   toInviteBody,
-  toMemberBody
+  toMemberBody,
+  toTeamMemberBody
 } from './representations.js';
 import { arrayOf, errorResponsesFor, object } from './schemas.js';
 
@@ -30,7 +32,7 @@ export interface TeamRoutesOptions {
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-const membersResponse = object({ items: arrayOf(memberSchema) });
+const membersResponse = object({ items: arrayOf(teamMemberSchema) });
 const invitesResponse = object({ items: arrayOf(inviteSchema) });
 const activityResponse = object({ items: arrayOf(activityEventSchema) });
 
@@ -103,7 +105,11 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
         response: { 200: membersResponse, ...errorResponsesFor([401, 403]) }
       }
     },
-    async () => ({ items: (await store.listActiveUsers()).map(toMemberBody) })
+    async () => {
+      const users = await store.listActiveUsers();
+      const last = await store.lastActivityOf(users.map((user) => user.id));
+      return { items: users.map((user) => toTeamMemberBody(user, last.get(user.id) ?? null)) };
+    }
   );
 
   app.get(
