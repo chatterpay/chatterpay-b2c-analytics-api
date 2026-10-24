@@ -21,6 +21,7 @@ jobs:
       - run: yarn install --frozen-lockfile --non-interactive
       - run: yarn lint:ci
       - run: yarn type-check
+      - run: yarn openapi:check
       - run: yarn test:coverage
       - run: yarn build
       - run: yarn audit --groups dependencies --level high
