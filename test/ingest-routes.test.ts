@@ -25,9 +25,10 @@ const REPORT: IngestionReport = {
   durationMs: 12,
   sources: {
     transactions: { read: 3, revisited: 0, lastId: '000000000000000000000003' },
-    users: { read: 2 },
+    users: { read: 2, newWallets: 2, countedInCountries: 2 },
     catalog: { tokens: 6, networks: 2 },
-    prices: { provider: null, calls: 0, prices: 0, failed: false }
+    prices: { provider: null, calls: 0, prices: 0, failed: false },
+    balances: { status: 'disabled', calls: 0, failedCalls: 0, networks: [], masterWallets: 0 }
   },
   aggregates: {
     transfers: 3,
@@ -35,6 +36,8 @@ const REPORT: IngestionReport = {
     unpriced: 0,
     outsideCatalog: 0,
     users: 2,
+    wallets: 2,
+    verifiedWallets: 1,
     builtAt: NOW.toISOString()
   }
 };
@@ -192,7 +195,7 @@ describe('metrics with live aggregates', () => {
       expect(response.headers['x-data-status']).toBe('live');
       const body = response.json();
       expect(body.meta.dataStatus).toBe('live');
-      expect(body.meta.datasetVersion).toBe('live-v1');
+      expect(body.meta.datasetVersion).toBe('live-v2');
       expect(body.meta.lastUpdatedAt).toBe(builtAt.toISOString());
       if (view === 'overview') {
         expect(body.tiles.transactions.value).toBe(1);
