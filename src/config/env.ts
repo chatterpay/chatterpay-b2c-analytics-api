@@ -18,11 +18,9 @@ export interface AppEnv {
   JWT_AUDIENCE: string;
   SESSION_TTL_MINUTES: number;
   CHALLENGE_TTL_MINUTES: number;
-  /** Normalized emails of the admins created at startup. */
-  BOOTSTRAP_ADMIN_EMAILS: string[];
-  /** Normalized emails of the viewers created at startup. */
-  BOOTSTRAP_VIEWER_EMAILS: string[];
-  ALLOW_IN_MEMORY_STORE: boolean;
+  /** MongoDB connection string; `null` uses the in-memory store, outside production only. */
+  MONGO_URI: string | null;
+  MONGO_DB_NAME: string;
 }
 
 /**
@@ -42,17 +40,6 @@ function isEd25519PrivateKey(pem: string): boolean {
     return false;
   }
 }
-
-const emailList = z
-  .string()
-  .optional()
-  .transform((value) =>
-    (value ?? '')
-      .split(',')
-      .map(normalizeEmail)
-      .filter((email) => email !== '')
-  )
-  .pipe(z.array(z.email().max(254)));
 
 const envSchema: z.ZodType<AppEnv> = z
   .object({
@@ -80,18 +67,21 @@ const envSchema: z.ZodType<AppEnv> = z
     JWT_AUDIENCE: z.string().min(1).default('chatterpay-analytics-site'),
     SESSION_TTL_MINUTES: z.coerce.number().int().min(5).max(1440).default(120),
     CHALLENGE_TTL_MINUTES: z.coerce.number().int().min(1).max(60).default(10),
-    BOOTSTRAP_ADMIN_EMAILS: emailList,
-    BOOTSTRAP_VIEWER_EMAILS: emailList,
-    ALLOW_IN_MEMORY_STORE: z
-      .enum(['true', 'false'])
-      .default('false')
-      .transform((value) => value === 'true')
+    MONGO_URI: z
+      .string()
+      .regex(/^mongodb(\+srv)?:\/\//)
+      .nullable()
+      .default(null),
+    MONGO_DB_NAME: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{1,63}$/)
+      .default('chatterpay_analytics_dev')
   })
   .superRefine((env, context) => {
     if (env.NODE_ENV !== 'production') {
       return;
     }
-    for (const name of ['DEMO_ACCESS_CODE', 'JWT_PRIVATE_KEY'] as const) {
+    for (const name of ['DEMO_ACCESS_CODE', 'JWT_PRIVATE_KEY', 'MONGO_URI'] as const) {
       if (env[name] === null) {
         context.addIssue({ code: 'custom', path: [name], message: 'Required in production' });
       }
@@ -104,7 +94,7 @@ const envSchema: z.ZodType<AppEnv> = z
  * Fails fast at startup so a misconfigured revision never starts serving requests.
  * The error lists the offending variable names only, never their values. Empty values count as
  * unset, so a `.env` copied from `.env.example` falls back to the defaults. Production requires
- * `DEMO_ACCESS_CODE` and `JWT_PRIVATE_KEY`.
+ * `DEMO_ACCESS_CODE`, `JWT_PRIVATE_KEY` and `MONGO_URI`.
  *
  * @param source - Environment map to read, `process.env` by default.
  * @returns The validated configuration with defaults applied.
