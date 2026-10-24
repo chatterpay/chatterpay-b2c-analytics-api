@@ -1,8 +1,13 @@
+import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { type CryptoKey, exportPKCS8, generateKeyPair } from 'jose';
+import { MongoClient } from 'mongodb';
 import { buildApp } from '../src/app.js';
 import { type AppEnv, loadEnv } from '../src/config/env.js';
 import { MemoryStore } from '../src/store/memory-store.js';
+import { createRequiredIndexes } from '../src/store/mongo-schema.js';
+import { MongoStore } from '../src/store/mongo-store.js';
+import type { Store } from '../src/store/types.js';
 
 /** Test-only access code; never a real secret. */
 export const ACCESS_CODE = 'test-only-access-code-0001';
@@ -14,7 +19,7 @@ export const START = new Date('2026-10-24T15:30:00.000Z');
 /** Application under test with its store, signing key and controllable clock. */
 export interface Harness {
   app: FastifyInstance;
-  store: MemoryStore;
+  store: Store;
   env: AppEnv;
   privateKey: CryptoKey;
   /** Every response seen through {@link Harness.call}, to search for leaked secrets. */
@@ -34,7 +39,33 @@ export interface CallOptions {
 }
 
 /**
- * Builds an app with a fixed environment, a key generated for the test and an in-memory store.
+ * MongoDB server for the route suites. When set, each harness runs on its own throwaway database,
+ * created with the required indexes and dropped when the app closes.
+ */
+const MONGO_TEST_URI = process.env.MONGO_TEST_URI ?? '';
+
+async function createStore(): Promise<{ store: Store; dispose: () => Promise<void> }> {
+  if (MONGO_TEST_URI === '') {
+    return { store: new MemoryStore(), dispose: async () => {} };
+  }
+  const dbName = `analytics_test_${randomUUID().replace(/-/g, '')}`;
+  const admin = new MongoClient(MONGO_TEST_URI);
+  await admin.connect();
+  await createRequiredIndexes(admin.db(dbName));
+  const store = await MongoStore.connect({ uri: MONGO_TEST_URI, dbName });
+  return {
+    store,
+    dispose: async () => {
+      await store.close();
+      await admin.db(dbName).dropDatabase();
+      await admin.close();
+    }
+  };
+}
+
+/**
+ * Builds an app with a fixed environment, a key generated for the test and a store: in memory, or
+ * MongoDB when `MONGO_TEST_URI` is set.
  *
  * @param overrides - Extra environment values.
  * @returns The harness.
@@ -47,13 +78,16 @@ export async function createHarness(overrides: NodeJS.ProcessEnv = {}): Promise<
     DEMO_ACCESS_CODE: ACCESS_CODE,
     JWT_PRIVATE_KEY: await exportPKCS8(privateKey),
     JWT_KEY_ID: 'test-key',
-    BOOTSTRAP_ADMIN_EMAILS: ` ${ADMIN_EMAIL.toUpperCase()} ,${SECOND_ADMIN_EMAIL}`,
-    BOOTSTRAP_VIEWER_EMAILS: VIEWER_EMAIL,
     ...overrides
   });
   let current = START;
-  const store = new MemoryStore();
+  const { store, dispose } = await createStore();
+  // Members that an operator would insert in a new database.
+  await store.ensureUser(ADMIN_EMAIL, 'admin', START);
+  await store.ensureUser(SECOND_ADMIN_EMAIL, 'admin', START);
+  await store.ensureUser(VIEWER_EMAIL, 'viewer', START);
   const app = await buildApp(env, { store, clock: () => current });
+  app.addHook('onClose', dispose);
   await app.ready();
   const bodies: string[] = [];
 
