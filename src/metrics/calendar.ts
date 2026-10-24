@@ -65,6 +65,16 @@ export function dayHourOf(now: Date): DayHour {
 }
 
 /**
+ * Converts an instant to its hour index.
+ *
+ * @param date - Instant to convert.
+ * @returns Hours since 1970-01-01T00:00Z.
+ */
+export function hourIndexOf(date: Date): number {
+  return Math.floor(date.getTime() / HOUR_MS);
+}
+
+/**
  * Builds the window of whole days `[startDay, endDay]`, cut at `endHour` on the last day.
  *
  * @param startDay - First day.
