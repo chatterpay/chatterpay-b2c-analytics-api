@@ -1,5 +1,11 @@
-import { addMonths, type DayHour, dayWindow, type TimeWindow } from './calendar.js';
-import { DATASET_VERSION, type NetworkId } from './catalog.js';
+import {
+  addMonths,
+  type DayHour,
+  dayNumberFromIso,
+  dayWindow,
+  type TimeWindow
+} from './calendar.js';
+import { DATASET_START_DAY, DATASET_VERSION, type NetworkId } from './catalog.js';
 import {
   activeUsersInWindow,
   type Facts,
@@ -7,12 +13,20 @@ import {
   retainedUsers,
   totalUsersAt
 } from './facts.js';
+import { EMPTY_LIVE_SNAPSHOTS, MOCK_SNAPSHOTS, type SnapshotSource } from './snapshot-source.js';
+import type { IngestRunStatus } from './types.js';
 
 /** Version of the live dataset; changing how B2C rows become metrics requires a new value. */
-export const LIVE_DATASET_VERSION = 'live-v1';
+export const LIVE_DATASET_VERSION = 'live-v2';
 
 /** Where the values of a response come from. */
 export type DataStatus = 'mock' | 'mixed' | 'live';
+
+/** Wallets of a network and how many of them have a verifiable first appearance. */
+export interface WalletCoverage {
+  wallets: number;
+  verified: number;
+}
 
 /** Data the metrics of one group are computed from. */
 export interface MetricsSource {
@@ -52,6 +66,10 @@ export interface MetricsSource {
     cohortStartDay: number,
     months: number
   ): { size: number; retained: number[] };
+  /** Wallets of a network through `point` and how many have a verifiable first appearance. */
+  walletCoverage(network: NetworkId, point: DayHour): WalletCoverage;
+  /** First ingestion run that observed the wallets; `null` before any. */
+  walletsTrackingSince(): Date | null;
 }
 
 /** Users that joined a network inside a window, per the synthetic model. */
@@ -59,9 +77,12 @@ function mockNewUsers(network: NetworkId, window: TimeWindow): number {
   return factsInWindow(network, window).newUsers;
 }
 
+const MOCK_START_DAY = dayNumberFromIso(DATASET_START_DAY);
+
 /**
  * Synthetic dataset of `facts.ts`. It has no user identities: each network is modelled as its own
- * population, so the totals over several networks are the sums of the networks.
+ * population, so the totals over several networks are the sums of the networks. Every synthetic
+ * wallet has a first appearance, so the synthetic coverage is complete.
  */
 export const MOCK_SOURCE: MetricsSource = {
   kind: 'mock',
@@ -87,24 +108,46 @@ export const MOCK_SOURCE: MetricsSource = {
       });
     }
     return { size, retained };
-  }
+  },
+  walletCoverage: (network, point) => {
+    if (point.day < MOCK_START_DAY) {
+      return { wallets: 0, verified: 0 };
+    }
+    const wallets = factsInWindow(
+      network,
+      dayWindow(MOCK_START_DAY, point.day, point.hour)
+    ).newWallets;
+    return { wallets, verified: wallets };
+  },
+  walletsTrackingSince: () => new Date(MOCK_START_DAY * 86_400_000)
 };
 
 /**
  * Groups of metrics. Every metric of a group comes from the same source, so totals, breakdowns and
  * series of a group stay consistent with each other.
  *
- * - `activity`: volume, transaction counts and fees, overall, per network and per asset.
+ * - `activity`: volume, transaction counts and fees, overall, per network, per asset and product.
  * - `activeUsers`: distinct users that started an operation.
  * - `signups`: new users and total users.
  * - `retention`: monthly cohorts and the users retained after each month.
+ * - `wallets`: first verifiable appearance of each wallet per network.
+ * - `balances`: balance snapshots of user and master wallets (TVL, top tokens, master wallets).
+ * - `countries`: users per country of their phone number, at the last ingestion run.
  */
-export type MetricGroup = 'activity' | 'activeUsers' | 'signups' | 'retention';
+export type MetricGroup =
+  | 'activity'
+  | 'activeUsers'
+  | 'signups'
+  | 'retention'
+  | 'wallets'
+  | 'balances'
+  | 'countries';
 
 /**
  * Groups served from the B2C data once a live dataset is loaded; a group set to `false` keeps the
  * synthetic values. Without a live dataset (no MongoDB, ingestion disabled or not run yet) every
- * group is synthetic.
+ * group is synthetic. Once a live dataset is loaded, a live group without data (no snapshot yet)
+ * answers `unavailable`; it never falls back to the synthetic values.
  *
  * - `activity`: completed `transfer` and `swap` rows of the B2C `transactions` collection. A swap
  *   counts once, valued on its stable leg when it has one; fees are the `fee` field. Deposits and
@@ -113,18 +156,36 @@ export type MetricGroup = 'activity' | 'activeUsers' | 'signups' | 'retention';
  * - `signups`: `users.creationDate`, per network of the user's wallets. Wallets carry no date of
  *   their own, so a wallet added later counts from the user's signup.
  * - `retention`: cohorts by `creationDate`, retained by later counted operations.
+ * - `wallets`: earliest completed B2C operation that sent from or paid to the wallet, or the first
+ *   ingestion run that saw the wallet when the run before did not.
+ * - `balances`: on-chain balances read by the ingestion, one snapshot per run.
+ * - `countries`: calling code of `users.phone_number`, counted during the ingestion; the numbers
+ *   are not stored.
  */
 export const LIVE_METRIC_GROUPS: Readonly<Record<MetricGroup, boolean>> = {
   activity: true,
   activeUsers: true,
   signups: true,
-  retention: true
+  retention: true,
+  wallets: true,
+  balances: true,
+  countries: true
 };
 
 interface LiveState {
   source: MetricsSource;
+  snapshots: SnapshotSource;
   /** End of the ingestion run the dataset was built from. */
   asOf: Date;
+  ingest: IngestRunStatus | null;
+}
+
+/** Parts of a live dataset besides the aggregates. */
+export interface LiveExtras {
+  /** Balance and country snapshots; none when omitted, so those groups answer `unavailable`. */
+  snapshots?: SnapshotSource;
+  /** Per-source status of the run that built the dataset. */
+  ingest?: IngestRunStatus | null;
 }
 
 let live: LiveState | null = null;
@@ -134,9 +195,22 @@ let live: LiveState | null = null;
  *
  * @param source - Live source; `null` returns every group to the synthetic dataset.
  * @param asOf - Instant the live data reflects.
+ * @param extras - Snapshots and run status of the same build.
  */
-export function setLiveSource(source: MetricsSource | null, asOf: Date = new Date()): void {
-  live = source === null ? null : { source, asOf };
+export function setLiveSource(
+  source: MetricsSource | null,
+  asOf: Date = new Date(),
+  extras: LiveExtras = {}
+): void {
+  live =
+    source === null
+      ? null
+      : {
+          source,
+          snapshots: extras.snapshots ?? EMPTY_LIVE_SNAPSHOTS,
+          asOf,
+          ingest: extras.ingest ?? null
+        };
 }
 
 /**
@@ -149,12 +223,35 @@ export function sourceFor(group: MetricGroup): MetricsSource {
   return live !== null && LIVE_METRIC_GROUPS[group] ? live.source : MOCK_SOURCE;
 }
 
+/**
+ * Snapshot source of a metric group.
+ *
+ * @param group - `balances` or `countries`.
+ * @returns The live snapshots when the group is enabled and a live dataset is loaded; else the
+ *   synthetic ones.
+ */
+export function snapshotsFor(group: 'balances' | 'countries'): SnapshotSource {
+  return live !== null && LIVE_METRIC_GROUPS[group] ? live.snapshots : MOCK_SNAPSHOTS;
+}
+
+/**
+ * Instant a group's live values reflect.
+ *
+ * @param group - Metric group.
+ * @returns The end of the run behind the live dataset; `null` when the group is synthetic.
+ */
+export function liveAsOf(group: MetricGroup): string | null {
+  return live !== null && LIVE_METRIC_GROUPS[group] ? live.asOf.toISOString() : null;
+}
+
 /** Provenance fields of the `meta` object of a response. */
 export interface Provenance {
   datasetVersion: string;
   dataStatus: DataStatus;
   /** End of the ingestion run the live values come from; `null` when every value is synthetic. */
   lastUpdatedAt: string | null;
+  /** Status of that run per source; `null` when every value is synthetic. */
+  ingest: IngestRunStatus | null;
 }
 
 /**
@@ -167,6 +264,7 @@ export function provenanceOf(groups: readonly MetricGroup[]): Provenance {
   const liveCount = groups.filter((group) => sourceFor(group).kind === 'live').length;
   const dataStatus: DataStatus =
     liveCount === 0 ? 'mock' : liveCount === groups.length ? 'live' : 'mixed';
+  const anyLive = dataStatus !== 'mock' && live !== null;
   return {
     datasetVersion:
       dataStatus === 'mock'
@@ -175,6 +273,7 @@ export function provenanceOf(groups: readonly MetricGroup[]): Provenance {
           ? LIVE_DATASET_VERSION
           : `${LIVE_DATASET_VERSION}+${DATASET_VERSION}`,
     dataStatus,
-    lastUpdatedAt: dataStatus === 'mock' || live === null ? null : live.asOf.toISOString()
+    lastUpdatedAt: anyLive && live !== null ? live.asOf.toISOString() : null,
+    ingest: anyLive && live !== null ? live.ingest : null
   };
 }
