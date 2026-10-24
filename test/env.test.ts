@@ -36,17 +36,18 @@ describe('loadEnv', () => {
     expect(env.JWT_AUDIENCE).toBe('chatterpay-analytics-site');
     expect(env.SESSION_TTL_MINUTES).toBe(120);
     expect(env.CHALLENGE_TTL_MINUTES).toBe(10);
-    expect(env.BOOTSTRAP_ADMIN_EMAILS).toEqual([]);
-    expect(env.ALLOW_IN_MEMORY_STORE).toBe(false);
+    expect(env.MONGO_URI).toBeNull();
+    expect(env.MONGO_DB_NAME).toBe('chatterpay_analytics_dev');
   });
 
-  it('normalizes the bootstrap email lists', () => {
-    const env = loadEnv({ BOOTSTRAP_ADMIN_EMAILS: ' One@Example.com,,two@example.com ' });
-
-    expect(env.BOOTSTRAP_ADMIN_EMAILS).toEqual(['one@example.com', 'two@example.com']);
-    expect(() => loadEnv({ BOOTSTRAP_VIEWER_EMAILS: 'not-an-email' })).toThrowError(
-      /^Invalid environment variables: BOOTSTRAP_VIEWER_EMAILS$/
+  it('accepts MongoDB connection strings and safe database names only', () => {
+    expect(loadEnv({ MONGO_URI: 'mongodb+srv://cluster.example.net' }).MONGO_URI).toBe(
+      'mongodb+srv://cluster.example.net'
     );
+    expect(() => loadEnv({ MONGO_URI: 'https://cluster.example.net' })).toThrowError(
+      /^Invalid environment variables: MONGO_URI$/
+    );
+    expect(() => loadEnv({ MONGO_DB_NAME: 'analytics.dev' })).toThrowError(/MONGO_DB_NAME/);
   });
 
   it('accepts an Ed25519 PKCS8 key with escaped newlines and rejects other keys', () => {
@@ -67,12 +68,11 @@ describe('loadEnv', () => {
     expect(() => loadEnv({ DEMO_ACCESS_CODE: 'short' })).toThrowError(/DEMO_ACCESS_CODE/);
     expect(() => loadEnv({ SESSION_TTL_MINUTES: '4' })).toThrowError(/SESSION_TTL_MINUTES/);
     expect(() => loadEnv({ CHALLENGE_TTL_MINUTES: '61' })).toThrowError(/CHALLENGE_TTL_MINUTES/);
-    expect(() => loadEnv({ ALLOW_IN_MEMORY_STORE: 'yes' })).toThrowError(/ALLOW_IN_MEMORY_STORE/);
   });
 
-  it('requires the access code and the signing key in production', () => {
+  it('requires the access code, the signing key and MongoDB in production', () => {
     expect(() => loadEnv({ NODE_ENV: 'production' })).toThrowError(
-      /^Invalid environment variables: DEMO_ACCESS_CODE, JWT_PRIVATE_KEY$/
+      /^Invalid environment variables: DEMO_ACCESS_CODE, JWT_PRIVATE_KEY, MONGO_URI$/
     );
   });
 });
