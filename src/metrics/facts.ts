@@ -12,6 +12,8 @@ import { seededUnit } from './random.js';
  */
 export interface Facts {
   newUsers: number;
+  /** Wallets whose first verifiable appearance falls in the span. */
+  newWallets: number;
   activeUserDays: number;
   transfers: number;
   swaps: number;
@@ -23,10 +25,16 @@ export interface Facts {
   swapFees: Record<string, number>;
 }
 
-type CountKey = 'newUsers' | 'activeUserDays' | 'transfers' | 'swaps';
+type CountKey = 'newUsers' | 'newWallets' | 'activeUserDays' | 'transfers' | 'swaps';
 type MoneyKey = 'transferVolume' | 'swapVolume' | 'transferFees' | 'swapFees';
 
-const COUNT_KEYS: readonly CountKey[] = ['newUsers', 'activeUserDays', 'transfers', 'swaps'];
+const COUNT_KEYS: readonly CountKey[] = [
+  'newUsers',
+  'newWallets',
+  'activeUserDays',
+  'transfers',
+  'swaps'
+];
 const MONEY_KEYS: readonly MoneyKey[] = [
   'transferVolume',
   'swapVolume',
@@ -56,6 +64,7 @@ export function emptyFacts(network: NetworkId): Facts {
     Object.fromEntries(networkProfile(network).assets.map((asset) => [asset.symbol, 0]));
   return {
     newUsers: 0,
+    newWallets: 0,
     activeUserDays: 0,
     transfers: 0,
     swaps: 0,
@@ -84,6 +93,8 @@ function generateDay(network: NetworkId, day: number): Facts {
 
   facts.activeUserDays = Math.round(profile.activeUsersPerDay * level * n('active'));
   facts.newUsers = Math.round(profile.newUsersPerDay * level * n('new'));
+  // Every new user brings a wallet; some existing users add one on the network later.
+  facts.newWallets = facts.newUsers + Math.round(facts.newUsers * 0.15 * n('wallets'));
   facts.transfers = Math.round(
     facts.activeUserDays * profile.transfersPerActiveUser * n('transfers')
   );
