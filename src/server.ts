@@ -1,15 +1,25 @@
 import { buildApp } from './app.js';
 import { loadEnv } from './config/env.js';
+import { MemoryStore } from './store/memory-store.js';
+import { MongoStore } from './store/mongo-store.js';
+import type { Store } from './store/types.js';
 
 const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM'] as const;
 
 /**
- * Process entry point: validates the environment, starts listening and closes gracefully on
- * SIGINT/SIGTERM (Cloud Run sends SIGTERM before stopping an instance).
+ * Process entry point: validates the environment, connects the store, starts listening and closes
+ * gracefully on SIGINT/SIGTERM (Cloud Run sends SIGTERM before stopping an instance).
  */
 async function main(): Promise<void> {
   const env = loadEnv();
-  const app = await buildApp(env);
+  const store: Store =
+    env.MONGO_URI === null
+      ? new MemoryStore()
+      : await MongoStore.connect({ uri: env.MONGO_URI, dbName: env.MONGO_DB_NAME });
+  const app = await buildApp(env, { store });
+  app.addHook('onClose', async () => {
+    await store.close();
+  });
 
   for (const signal of SHUTDOWN_SIGNALS) {
     process.once(signal, () => {
