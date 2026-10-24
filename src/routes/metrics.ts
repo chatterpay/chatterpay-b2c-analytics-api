@@ -5,7 +5,7 @@ import { buildOverview } from '../metrics/overview.js';
 import { buildRevenue } from '../metrics/revenue.js';
 import type { MetricsRange, UsersGranularity } from '../metrics/types.js';
 import { buildUsers } from '../metrics/users.js';
-import { errorResponses } from './schemas.js';
+import { arrayOf, errorResponses, object } from './schemas.js';
 
 /** Options of the metrics routes. */
 export interface MetricsRoutesOptions {
@@ -21,15 +21,6 @@ const decimal = { type: 'string', pattern: '^-?\\d+\\.\\d+$' } as const;
 const nullableDecimal = { type: ['string', 'null'], pattern: '^-?\\d+\\.\\d+$' } as const;
 const instant = { type: 'string', format: 'date-time' } as const;
 const network = { type: 'string', enum: ['base', 'cardano'] } as const;
-
-function object(properties: Record<string, unknown>): Record<string, unknown> {
-  return {
-    type: 'object',
-    additionalProperties: false,
-    required: Object.keys(properties),
-    properties
-  };
-}
 
 const period = object({ start: instant, end: instant });
 const countMetric = object({
@@ -55,10 +46,6 @@ function meta(extra: Record<string, unknown>): Record<string, unknown> {
     previousPeriod: { anyOf: [period, { type: 'null' }] },
     bucket: { type: 'string', enum: ['hour', 'day', 'month', 'year'] }
   });
-}
-
-function arrayOf(items: Record<string, unknown>): Record<string, unknown> {
-  return { type: 'array', items };
 }
 
 const rangeQuery = {
