@@ -21,6 +21,13 @@ export interface AppEnv {
   /** MongoDB connection string; `null` uses the in-memory store, outside production only. */
   MONGO_URI: string | null;
   MONGO_DB_NAME: string;
+  /**
+   * Connection string of the ChatterPay B2C database, the source of the networks; `null` reuses
+   * `MONGO_URI`, since both databases live in the same cluster.
+   */
+  B2C_MONGO_URI: string | null;
+  /** Name of the ChatterPay B2C database whose `blockchains` collection lists the networks. */
+  B2C_MONGO_DB_NAME: string;
 }
 
 /**
@@ -75,7 +82,16 @@ const envSchema: z.ZodType<AppEnv> = z
     MONGO_DB_NAME: z
       .string()
       .regex(/^[A-Za-z0-9_-]{1,63}$/)
-      .default('chatterpay-analytics-dev')
+      .default('chatterpay-analytics-dev'),
+    B2C_MONGO_URI: z
+      .string()
+      .regex(/^mongodb(\+srv)?:\/\//)
+      .nullable()
+      .default(null),
+    B2C_MONGO_DB_NAME: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{1,63}$/)
+      .default('chatterpay-dev')
   })
   .superRefine((env, context) => {
     if (env.NODE_ENV !== 'production') {
