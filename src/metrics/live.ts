@@ -376,14 +376,17 @@ interface Signups {
 /**
  * Source over stored aggregates.
  *
- * `activeUserDays` stays at zero: distinct users come from {@link LiveSource.activeUsers}.
+ * `activeUserDays` stays at zero: distinct users come from {@link LiveSource.activeUsers}. A user
+ * with wallets on several networks has a signup and an activity entry on each of them under the
+ * same user id; the `*Across` methods count that id once.
  */
 class LiveSource implements MetricsSource {
   readonly kind = 'live' as const;
   private readonly hourly = new Map<NetworkId, HourlySeries>();
   private readonly activity = new Map<NetworkId, Map<string, number[]>>();
   private readonly signups = new Map<NetworkId, Signups>();
-  private readonly undated = new Map<NetworkId, number>();
+  /** Users without a signup date, per network; they count in totals from the start. */
+  private readonly undated = new Map<NetworkId, string[]>();
 
   constructor(aggregates: LiveAggregates) {
     const hourly = [...aggregates.hourly].sort((left, right) => left.hour - right.hour);
@@ -421,9 +424,36 @@ class LiveSource implements MetricsSource {
     }
     for (const item of aggregates.signups) {
       if (item.hour === null) {
-        this.undated.set(item.network, (this.undated.get(item.network) ?? 0) + 1);
+        const users = this.undated.get(item.network) ?? [];
+        users.push(item.user);
+        this.undated.set(item.network, users);
       }
     }
+  }
+
+  /** Users of a network whose signup hour is inside `[first, last]`. */
+  private signedUpBetween(network: NetworkId, first: number, last: number): string[] {
+    const signups = this.signups.get(network);
+    if (signups === undefined) {
+      return [];
+    }
+    return signups.users.slice(
+      lowerBound(signups.hours, first),
+      lowerBound(signups.hours, last + 1)
+    );
+  }
+
+  /** Whether a user was active on any of `networks` inside `[first, last]`. */
+  private activeOnAny(
+    networks: readonly NetworkId[],
+    user: string,
+    first: number,
+    last: number
+  ): boolean {
+    return networks.some((network) => {
+      const hours = this.activity.get(network)?.get(user);
+      return hours !== undefined && activeIn(hours, first, last);
+    });
   }
 
   facts(network: NetworkId, window: TimeWindow): Facts {
@@ -462,7 +492,9 @@ class LiveSource implements MetricsSource {
 
   totalUsersAt(network: NetworkId, point: DayHour): number {
     const hours = this.signups.get(network)?.hours ?? [];
-    return lowerBound(hours, point.day * 24 + point.hour + 1) + (this.undated.get(network) ?? 0);
+    return (
+      lowerBound(hours, point.day * 24 + point.hour + 1) + (this.undated.get(network)?.length ?? 0)
+    );
   }
 
   retained(
@@ -489,6 +521,59 @@ class LiveSource implements MetricsSource {
       );
     }
     return retained;
+  }
+
+  activeUsersAcross(networks: readonly NetworkId[], window: TimeWindow): number {
+    const { first, last } = windowHours(window);
+    const active = new Set<string>();
+    for (const network of networks) {
+      for (const [user, hours] of this.activity.get(network) ?? []) {
+        if (activeIn(hours, first, last)) {
+          active.add(user);
+        }
+      }
+    }
+    return active.size;
+  }
+
+  newUsersAcross(networks: readonly NetworkId[], window: TimeWindow): number {
+    const { first, last } = windowHours(window);
+    return new Set(networks.flatMap((network) => this.signedUpBetween(network, first, last))).size;
+  }
+
+  totalUsersAcross(networks: readonly NetworkId[], point: DayHour): number {
+    const last = point.day * 24 + point.hour;
+    return new Set(
+      networks.flatMap((network) => [
+        ...this.signedUpBetween(network, Number.NEGATIVE_INFINITY, last),
+        ...(this.undated.get(network) ?? [])
+      ])
+    ).size;
+  }
+
+  cohortAcross(
+    networks: readonly NetworkId[],
+    cohortStartDay: number,
+    months: number
+  ): { size: number; retained: number[] } {
+    const cohort = new Set(
+      networks.flatMap((network) =>
+        this.signedUpBetween(network, cohortStartDay * 24, addMonths(cohortStartDay, 1) * 24 - 1)
+      )
+    );
+    const retained: number[] = [];
+    for (let month = 1; month <= months; month += 1) {
+      const first = addMonths(cohortStartDay, month) * 24;
+      const last = addMonths(cohortStartDay, month + 1) * 24 - 1;
+      let count = 0;
+      for (const user of cohort) {
+        if (this.activeOnAny(networks, user, first, last)) {
+          count += 1;
+        }
+      }
+      retained.push(count);
+    }
+    return { size: cohort.size, retained };
   }
 }
 
