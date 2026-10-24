@@ -9,7 +9,7 @@ Task arguments: $ARGUMENTS
 
 Read the ChatterPay workflows reference first. Prefer `<repo-root>/.claude/docs/chatterpay-workflows-reference.md`; otherwise `~/.claude/docs/chatterpay-workflows-reference.md`. Apply `<repo-root>/.claude/rules/chatterpay-workflows.md`.
 
-Resolve issue IDs and GitHub issue URLs/titles in the repository that owns each task (`chatterpay/chatterpay-b2c-analytics-api` or `chatterpay/chatterpay-b2c-analytics-site`); ask for missing IDs. Inspect real diffs and completed task evidence, and ask whether the note belongs to develop, main or both when unknown.
+Resolve issue IDs and GitHub issue URLs/titles in the repository that owns each task (`chatterpay/chatterpay-analytics-api` or `chatterpay/chatterpay-analytics-site`); ask for missing IDs. Inspect real diffs and completed task evidence, and ask whether the note belongs to develop, main or both when unknown.
 
 The repo does not define where the deploy notes live: take the develop and main notes paths from the arguments or ask the operator. Verify that both files exist and read them completely before writing; never create them and never read or list other files in their folder.
 
