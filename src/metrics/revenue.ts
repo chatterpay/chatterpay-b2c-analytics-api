@@ -1,13 +1,27 @@
 import { dayHourOf, periodOf } from './calendar.js';
 import { type NetworkFilter, networkProfile, networksFor } from './catalog.js';
-import { type Facts, factsInWindow, feesCents, sumAssets, volumeCents } from './facts.js';
+import { type Facts, feesCents, sumAssets, volumeCents } from './facts.js';
 import { centsToUsd, moneyMetric } from './format.js';
 import { rangeMeta } from './overview.js';
 import { resolveRange } from './ranges.js';
+import { sourceFor } from './sources.js';
 import type { MetricsRange, RevenueResponse } from './types.js';
 
+function assetsOf(facts: Facts): string[] {
+  return [
+    ...new Set([
+      ...Object.keys(facts.transferVolume),
+      ...Object.keys(facts.swapVolume),
+      ...Object.keys(facts.transferFees),
+      ...Object.keys(facts.swapFees)
+    ])
+  ];
+}
+
 /**
- * Builds the Revenue dataset: synthetic platform fees, not real charges.
+ * Builds the Revenue dataset from the `activity` metric group: the `fee` recorded on each counted
+ * B2C operation when the group is live, synthetic fees otherwise. A recorded fee is what the
+ * backend computed for the operation, not a reconciled charge.
  *
  * Fee totals equal transfer plus swap fees, and the sums of the network and asset breakdowns and
  * of the series.
@@ -24,13 +38,14 @@ export function buildRevenue(
 ): RevenueResponse {
   const resolved = resolveRange(range, dayHourOf(now));
   const networks = networksFor(network);
+  const activity = sourceFor('activity');
   const current = networks.map((id) => ({
     network: id,
-    facts: factsInWindow(id, resolved.current)
+    facts: activity.facts(id, resolved.current)
   }));
   const previousWindow = resolved.previous;
   const previous =
-    previousWindow === null ? null : networks.map((id) => factsInWindow(id, previousWindow));
+    previousWindow === null ? null : networks.map((id) => activity.facts(id, previousWindow));
 
   const total = (pick: (facts: Facts) => number): number =>
     current.reduce((sum, item) => sum + pick(item.facts), 0);
@@ -42,11 +57,11 @@ export function buildRevenue(
 
   const byAsset = current
     .flatMap(({ network: id, facts }) =>
-      networkProfile(id).assets.map((asset) => ({
+      assetsOf(facts).map((asset) => ({
         network: id,
-        asset: asset.symbol,
-        volume: (facts.transferVolume[asset.symbol] ?? 0) + (facts.swapVolume[asset.symbol] ?? 0),
-        fees: (facts.transferFees[asset.symbol] ?? 0) + (facts.swapFees[asset.symbol] ?? 0)
+        asset,
+        volume: (facts.transferVolume[asset] ?? 0) + (facts.swapVolume[asset] ?? 0),
+        fees: (facts.transferFees[asset] ?? 0) + (facts.swapFees[asset] ?? 0)
       }))
     )
     .sort(
@@ -55,7 +70,7 @@ export function buildRevenue(
     );
 
   return {
-    meta: rangeMeta(network, range, now),
+    meta: rangeMeta(network, range, now, ['activity']),
     tiles: {
       feesUsd: moneyMetric(total(feesCents), previousTotal(feesCents)),
       transferFeesUsd: moneyMetric(total(transferFees), previousTotal(transferFees)),
@@ -63,7 +78,7 @@ export function buildRevenue(
       volumeUsd: moneyMetric(total(volumeCents), previousTotal(volumeCents))
     },
     series: resolved.buckets.map((bucket) => {
-      const facts = networks.map((id) => factsInWindow(id, bucket));
+      const facts = networks.map((id) => activity.facts(id, bucket));
       const transfer = facts.reduce((sum, item) => sum + transferFees(item), 0);
       const swap = facts.reduce((sum, item) => sum + swapFees(item), 0);
       return {
