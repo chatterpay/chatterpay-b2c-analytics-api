@@ -16,11 +16,11 @@ Generar textos en inglés, basados en evidencia de los cambios reales, para: (1)
 - Un cambio de código no prueba que Cloud Run, Cloud Build, IAM, Secret Manager o la base de MongoDB de analytics hayan cambiado.
 - La API sirve datos sintéticos en V0. Los textos no presentan cifras del mock como datos de ChatterPay B2C.
 - Conservar contenido existente, no sobrescribir notas de tareas ajenas, evitar entradas duplicadas. Minimizar cambios y mostrar los archivos modificados.
-- Usar nombres de repos y rutas inferidos de `git rev-parse`, `git remote -v` y evidencia real, no del nombre de la carpeta solamente. La carpeta local es `chatterpay-analytics-api` y el remoto es `chatterpay/chatterpay-b2c-analytics-api`.
+- Usar nombres de repos y rutas inferidos de `git rev-parse`, `git remote -v` y evidencia real, no del nombre de la carpeta solamente. La carpeta local es `chatterpay-analytics-api` y el remoto es `chatterpay/chatterpay-analytics-api`.
 
 ## 1. Resolución de contexto, repositorios e issues
 
-1. Leer argumentos del usuario y contexto reciente disponible. Detectar repos afectados sin expandir a repositorios no trabajados. Los repos de ChatterPay Analytics son el site (`chatterpay/chatterpay-b2c-analytics-site`) y la API (`chatterpay/chatterpay-b2c-analytics-api`).
+1. Leer argumentos del usuario y contexto reciente disponible. Detectar repos afectados sin expandir a repositorios no trabajados. Los repos de ChatterPay Analytics son el site (`chatterpay/chatterpay-analytics-site`) y la API (`chatterpay/chatterpay-analytics-api`).
 2. Si hace falta delimitar repos, presentar las rutas encontradas y **confirmar el repositorio actual**. Para commits esta confirmación se pide siempre, aunque exista un único repo.
 3. Detectar `git rev-parse --show-toplevel`, `git status --porcelain=v1`, rama y remoto. Si hay varios repos, tratar cada repositorio por separado.
 4. Resolver issue/task IDs desde el pedido explícito, historial de la tarea, branch, PR, mensajes o GitHub cuando sea posible. Verificar que el issue esté asociado al repositorio correcto; `#8` en la API no identifica `#8` en el site. Usar `gh issue view <id> --repo <owner/name>` o la URL del issue si GitHub está disponible, **solo lectura**.
@@ -89,7 +89,7 @@ El agente **verifica la longitud de cada mensaje** (solo el contenido entre comi
 ### Ejemplo de formato (no hay que replicar afirmaciones sin probarlas)
 
 ```md
-## [#8: Serve revenue metrics by network and asset](https://github.com/chatterpay/chatterpay-b2c-analytics-api/issues/8)
+## [#8: Serve revenue metrics by network and asset](https://github.com/chatterpay/chatterpay-analytics-api/issues/8)
 
 ### API Changes
 
