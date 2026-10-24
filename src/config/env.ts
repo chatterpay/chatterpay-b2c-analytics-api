@@ -28,6 +28,29 @@ export interface AppEnv {
   B2C_MONGO_URI: string | null;
   /** B2C database used when `B2C_MONGO_URI` has no database in its path. */
   B2C_MONGO_DB_NAME: string;
+  /**
+   * Service account whose Google ID token may call `POST /v1/internal/ingest` (the Cloud Scheduler
+   * job identity); `null` leaves the endpoint closed unless `INGEST_DEV_TRIGGER` is on.
+   */
+  INGEST_SCHEDULER_SA_EMAIL: string | null;
+  /** `aud` of that token, as set on the scheduler job; required with the service account. */
+  INGEST_OIDC_AUDIENCE: string | null;
+  /** Opens the ingestion endpoint to any caller; refused in production. */
+  INGEST_DEV_TRIGGER: boolean;
+  /** B2C transaction rows per batch. */
+  INGEST_BATCH_SIZE: number;
+  /** Ceiling on B2C transaction rows read in one run. */
+  INGEST_MAX_TRANSACTIONS_PER_RUN: number;
+  /** Rows inserted this many hours before a run are read again for status changes. */
+  INGEST_REVISIT_HOURS: number;
+  /** A run starts no new batch after this many seconds; below the Cloud Run request timeout. */
+  INGEST_MAX_RUN_SECONDS: number;
+  /** Price provider of the daily snapshot; `none` values non-stable tokens from swaps only. */
+  PRICES_PROVIDER: 'none' | 'coingecko';
+  /** Ceiling on price provider requests per run. */
+  PRICES_MAX_CALLS_PER_RUN: number;
+  /** Seconds between checks for a newer aggregate build made by another instance. */
+  METRICS_REFRESH_SECONDS: number;
 }
 
 /**
@@ -91,11 +114,39 @@ const envSchema: z.ZodType<AppEnv> = z
     B2C_MONGO_DB_NAME: z
       .string()
       .regex(/^[A-Za-z0-9_-]{1,63}$/)
-      .default('chatterpay-dev')
+      .default('chatterpay-dev'),
+    INGEST_SCHEDULER_SA_EMAIL: z.email().nullable().default(null),
+    INGEST_OIDC_AUDIENCE: z.string().min(1).max(512).nullable().default(null),
+    INGEST_DEV_TRIGGER: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    INGEST_BATCH_SIZE: z.coerce.number().int().min(100).max(10_000).default(1000),
+    INGEST_MAX_TRANSACTIONS_PER_RUN: z.coerce
+      .number()
+      .int()
+      .min(1000)
+      .max(1_000_000)
+      .default(50_000),
+    INGEST_REVISIT_HOURS: z.coerce.number().int().min(0).max(720).default(72),
+    INGEST_MAX_RUN_SECONDS: z.coerce.number().int().min(30).max(3000).default(480),
+    PRICES_PROVIDER: z.enum(['none', 'coingecko']).default('none'),
+    PRICES_MAX_CALLS_PER_RUN: z.coerce.number().int().min(0).max(5).default(1),
+    METRICS_REFRESH_SECONDS: z.coerce.number().int().min(30).max(86_400).default(300)
   })
   .superRefine((env, context) => {
+    if ((env.INGEST_SCHEDULER_SA_EMAIL === null) !== (env.INGEST_OIDC_AUDIENCE === null)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['INGEST_OIDC_AUDIENCE'],
+        message: 'Set together with INGEST_SCHEDULER_SA_EMAIL'
+      });
+    }
     if (env.NODE_ENV !== 'production') {
       return;
+    }
+    if (env.INGEST_DEV_TRIGGER) {
+      context.addIssue({ code: 'custom', path: ['INGEST_DEV_TRIGGER'], message: 'Not allowed' });
     }
     for (const name of [
       'DEMO_ACCESS_CODE',
