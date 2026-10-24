@@ -263,6 +263,21 @@ export class MemoryStore implements Store {
     return { ...stored };
   }
 
+  async lastActivityOf(userIds: readonly string[]): Promise<Map<string, Date>> {
+    const wanted = new Set(userIds);
+    const last = new Map<string, Date>();
+    for (const event of this.activity) {
+      if (event.actorId === null || !wanted.has(event.actorId)) {
+        continue;
+      }
+      const known = last.get(event.actorId);
+      if (known === undefined || event.at.getTime() > known.getTime()) {
+        last.set(event.actorId, event.at);
+      }
+    }
+    return last;
+  }
+
   async listActivity(limit: number): Promise<ActivityEvent[]> {
     // Reversed first so the stable sort keeps the latest insertion first among equal instants.
     return [...this.activity]
@@ -328,6 +343,7 @@ export class MemoryStore implements Store {
     const user: User = {
       id: randomUUID(),
       email,
+      name: null,
       role,
       status: 'active',
       createdAt: now,
