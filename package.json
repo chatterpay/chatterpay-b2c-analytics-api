@@ -19,6 +19,8 @@
     "lint:fix": "biome check . --write",
     "format": "biome format . --write",
     "lint:ci": "biome ci .",
+    "openapi": "tsx scripts/generate-openapi.ts",
+    "openapi:check": "tsx scripts/generate-openapi.ts --check",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -26,6 +28,7 @@
   },
   "dependencies": {
     "@fastify/helmet": "13.2.0",
+    "@fastify/swagger": "9.9.2",
     "fastify": "5.12.7",
     "zod": "4.6.7"
   },
