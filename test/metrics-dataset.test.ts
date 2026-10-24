@@ -77,9 +77,11 @@ describe.each(RANGES)('overview %s', (range) => {
   });
 
   it('a single network matches its share of all networks', () => {
-    const base = buildOverview('base', range, NOW);
+    const base = buildOverview('base-sepolia', range, NOW);
     expect(base.byNetwork).toHaveLength(1);
-    expect(base.byNetwork[0]).toEqual(overview.byNetwork.find((item) => item.network === 'base'));
+    expect(base.byNetwork[0]).toEqual(
+      overview.byNetwork.find((item) => item.network === 'base-sepolia')
+    );
   });
 
   it('is deterministic', () => {
@@ -142,7 +144,7 @@ describe.each(RANGES)('revenue %s', (range) => {
 
 describe('revenue on cardano', () => {
   it('has no swap fees', () => {
-    const revenue = buildRevenue('cardano', 'year', NOW);
+    const revenue = buildRevenue('cardano-preprod', 'year', NOW);
     expect(revenue.tiles.swapFeesUsd.value).toBe('0.00');
     expect(revenue.byAsset.map((item) => item.asset).sort()).toEqual(['ADA', 'USDCx']);
   });
