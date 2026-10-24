@@ -15,7 +15,7 @@ steps:
       - JWT_AUDIENCE=${_JWT_AUDIENCE}
       - SESSION_TTL_MINUTES=${_SESSION_TTL_MINUTES}
       - CHALLENGE_TTL_MINUTES=${_CHALLENGE_TTL_MINUTES}
-      - ALLOW_IN_MEMORY_STORE=${_ALLOW_IN_MEMORY_STORE}
+      - MONGO_DB_NAME=${_MONGO_DB_NAME}
 
   - name: "gcr.io/cloud-builders/docker"
     id: Build
@@ -24,16 +24,15 @@ steps:
     # CreateEnv and in the Dockerfile. An empty value counts as unset and the API applies its default.
     #
     # Secrets are skipped. Cloud Run injects them into the service through secretKeyRef and that
-    # value overrides the image's ENV; baking them in would leave the access code and the JWT
-    # signing key in clear inside the registry. The bootstrap emails are personal data and are set
-    # on the service as well. A new secret goes on the Cloud Run service and on this list, never
-    # into CreateEnv.
+    # value overrides the image's ENV; baking them in would leave the access code, the JWT signing
+    # key and the database credentials in clear inside the registry. A new secret goes on the Cloud
+    # Run service and on this list, never into CreateEnv.
     entrypoint: bash
     args:
       - "-c"
       - |
         set -euo pipefail
-        secrets=' DEMO_ACCESS_CODE JWT_PRIVATE_KEY BOOTSTRAP_ADMIN_EMAILS BOOTSTRAP_VIEWER_EMAILS '
+        secrets=' DEMO_ACCESS_CODE JWT_PRIVATE_KEY MONGO_URI '
         build_args=()
         for name in $$(awk '/^ARG /{print $$2}' Dockerfile); do case "$$secrets" in *" $$name "*) continue;; esac; build_args+=(--build-arg "$$name=$$(sed -n "s/^$$name=//p" .env | head -n 1)"); done
         echo "assembled $$(( $${#build_args[@]} / 2 )) build args"
@@ -52,8 +51,9 @@ steps:
     # develop and main without trigger substitutions; a name outside these patterns stops the build.
     #
     # The API is private: --no-allow-unauthenticated makes Cloud Run require an identity token with
-    # roles/run.invoker, which only the site's service account holds. --max-instances 1 is required
-    # while members and sessions live in the in-memory store; a second instance would not see them.
+    # roles/run.invoker, which only the site's service account holds. The token audience is the API
+    # domain, declared as a custom audience on the service, because the site reaches the API
+    # through the load balancer.
     entrypoint: bash
     args:
       - "-c"
@@ -64,7 +64,7 @@ steps:
           *-develop) network=chatterpay-dev-vpc; subnet=chatterpay-dev-run ;;
           *) echo "no VPC egress mapping for service $_SERVICE_NAME" >&2; exit 1 ;;
         esac
-        gcloud run deploy '$_SERVICE_NAME' --platform managed --region '$_DEPLOY_REGION' --image '$_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA' --labels 'managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$_TRIGGER_ID' --network "$$network" --subnet "$$subnet" --vpc-egress all-traffic --max-instances 1 --quiet --no-allow-unauthenticated
+        gcloud run deploy '$_SERVICE_NAME' --platform managed --region '$_DEPLOY_REGION' --image '$_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA' --labels 'managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$_TRIGGER_ID' --network "$$network" --subnet "$$subnet" --vpc-egress all-traffic --quiet --no-allow-unauthenticated
 
 images:
   - $_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
