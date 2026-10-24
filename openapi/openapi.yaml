@@ -22,6 +22,7 @@ components:
             - UNAUTHORIZED
             - FORBIDDEN
             - NOT_FOUND
+            - CONFLICT
             - PAYLOAD_TOO_LARGE
             - RATE_LIMITED
             - SERVICE_UNAVAILABLE
@@ -74,6 +75,923 @@ paths:
                     type: string
                     enum:
                       - ok
+  /v1/auth/request-code:
+    post:
+      operationId: requestLoginCode
+      summary: Open a login challenge for an email; answers the same for unknown emails
+      tags:
+        - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - email
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+      responses:
+        "202":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - challengeId
+                  - expiresAt
+                properties:
+                  challengeId:
+                    type: string
+                  expiresAt:
+                    type: string
+                    format: date-time
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/auth/verify-code:
+    post:
+      operationId: verifyLoginCode
+      summary: Exchange a challenge and access code for a session token
+      tags:
+        - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - challengeId
+                - email
+                - code
+              properties:
+                challengeId:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                code:
+                  type: string
+                  minLength: 6
+                  maxLength: 64
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - token
+                  - expiresAt
+                  - user
+                properties:
+                  token:
+                    type: string
+                    description: "Session JWT (EdDSA) for `Authorization: Bearer`."
+                  expiresAt:
+                    type: string
+                    format: date-time
+                  user:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - id
+                      - email
+                      - role
+                      - status
+                      - createdAt
+                      - lastLoginAt
+                    properties:
+                      id:
+                        type: string
+                      email:
+                        type: string
+                      role:
+                        type: string
+                        enum:
+                          - admin
+                          - viewer
+                      status:
+                        type: string
+                        enum:
+                          - active
+                      createdAt:
+                        type: string
+                        format: date-time
+                      lastLoginAt:
+                        type:
+                          - "null"
+                          - string
+                        format: date-time
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/auth/me:
+    get:
+      operationId: getCurrentSession
+      summary: Member and session behind the bearer token
+      tags:
+        - auth
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - user
+                  - session
+                properties:
+                  user:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - id
+                      - email
+                      - role
+                      - status
+                      - createdAt
+                      - lastLoginAt
+                    properties:
+                      id:
+                        type: string
+                      email:
+                        type: string
+                      role:
+                        type: string
+                        enum:
+                          - admin
+                          - viewer
+                      status:
+                        type: string
+                        enum:
+                          - active
+                      createdAt:
+                        type: string
+                        format: date-time
+                      lastLoginAt:
+                        type:
+                          - "null"
+                          - string
+                        format: date-time
+                  session:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - expiresAt
+                    properties:
+                      expiresAt:
+                        type: string
+                        format: date-time
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke the session behind the bearer token
+      tags:
+        - auth
+      responses:
+        "204":
+          description: Session revoked
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/team/members:
+    get:
+      operationId: listTeamMembers
+      summary: Active members sorted by email
+      tags:
+        - team
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - items
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - id
+                        - email
+                        - role
+                        - status
+                        - createdAt
+                        - lastLoginAt
+                      properties:
+                        id:
+                          type: string
+                        email:
+                          type: string
+                        role:
+                          type: string
+                          enum:
+                            - admin
+                            - viewer
+                        status:
+                          type: string
+                          enum:
+                            - active
+                        createdAt:
+                          type: string
+                          format: date-time
+                        lastLoginAt:
+                          type:
+                            - "null"
+                            - string
+                          format: date-time
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/team/invites:
+    get:
+      operationId: listTeamInvites
+      summary: Invites, newest first
+      tags:
+        - team
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - items
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - id
+                        - email
+                        - role
+                        - status
+                        - createdAt
+                        - expiresAt
+                        - resendCount
+                        - lastSentAt
+                        - createdBy
+                      properties:
+                        id:
+                          type: string
+                        email:
+                          type: string
+                        role:
+                          type: string
+                          enum:
+                            - admin
+                            - viewer
+                        status:
+                          type: string
+                          enum:
+                            - created
+                            - simulated
+                            - accepted
+                            - revoked
+                            - expired
+                        createdAt:
+                          type: string
+                          format: date-time
+                        expiresAt:
+                          type: string
+                          format: date-time
+                        resendCount:
+                          type: integer
+                          minimum: 0
+                        lastSentAt:
+                          type:
+                            - "null"
+                            - string
+                          format: date-time
+                        createdBy:
+                          type: string
+                          description: Email of the admin that created the invite.
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    post:
+      operationId: createTeamInvite
+      summary: Invite an email with a role; delivery is simulated, idempotent by
+        mutationId
+      tags:
+        - team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - email
+                - role
+                - mutationId
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                role:
+                  type: string
+                  enum:
+                    - admin
+                    - viewer
+                mutationId:
+                  type: string
+                  format: uuid
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - id
+                  - email
+                  - role
+                  - status
+                  - createdAt
+                  - expiresAt
+                  - resendCount
+                  - lastSentAt
+                  - createdBy
+                properties:
+                  id:
+                    type: string
+                  email:
+                    type: string
+                  role:
+                    type: string
+                    enum:
+                      - admin
+                      - viewer
+                  status:
+                    type: string
+                    enum:
+                      - created
+                      - simulated
+                      - accepted
+                      - revoked
+                      - expired
+                  createdAt:
+                    type: string
+                    format: date-time
+                  expiresAt:
+                    type: string
+                    format: date-time
+                  resendCount:
+                    type: integer
+                    minimum: 0
+                  lastSentAt:
+                    type:
+                      - "null"
+                      - string
+                    format: date-time
+                  createdBy:
+                    type: string
+                    description: Email of the admin that created the invite.
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/team/activity:
+    get:
+      operationId: listTeamActivity
+      summary: Login and team management events, newest first
+      tags:
+        - team
+      parameters:
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          in: query
+          name: limit
+          required: false
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - items
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - id
+                        - at
+                        - actor
+                        - action
+                        - target
+                        - outcome
+                      properties:
+                        id:
+                          type: string
+                        at:
+                          type: string
+                          format: date-time
+                        actor:
+                          type:
+                            - "null"
+                            - string
+                          description: Email of the member that acted.
+                        action:
+                          type: string
+                          enum:
+                            - login
+                            - login_failed
+                            - logout
+                            - invite_created
+                            - invite_resent
+                            - invite_revoked
+                            - invite_accepted
+                            - role_changed
+                            - member_removed
+                        target:
+                          type:
+                            - "null"
+                            - string
+                          description: Email the action applies to.
+                        outcome:
+                          type: string
+                          enum:
+                            - success
+                            - failure
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/team/invites/{id}/resend:
+    post:
+      operationId: resendTeamInvite
+      summary: Simulate a new delivery of a pending invite
+      tags:
+        - team
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - id
+                  - email
+                  - role
+                  - status
+                  - createdAt
+                  - expiresAt
+                  - resendCount
+                  - lastSentAt
+                  - createdBy
+                properties:
+                  id:
+                    type: string
+                  email:
+                    type: string
+                  role:
+                    type: string
+                    enum:
+                      - admin
+                      - viewer
+                  status:
+                    type: string
+                    enum:
+                      - created
+                      - simulated
+                      - accepted
+                      - revoked
+                      - expired
+                  createdAt:
+                    type: string
+                    format: date-time
+                  expiresAt:
+                    type: string
+                    format: date-time
+                  resendCount:
+                    type: integer
+                    minimum: 0
+                  lastSentAt:
+                    type:
+                      - "null"
+                      - string
+                    format: date-time
+                  createdBy:
+                    type: string
+                    description: Email of the admin that created the invite.
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/team/invites/{id}/revoke:
+    post:
+      operationId: revokeTeamInvite
+      summary: Revoke a pending invite
+      tags:
+        - team
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - id
+                  - email
+                  - role
+                  - status
+                  - createdAt
+                  - expiresAt
+                  - resendCount
+                  - lastSentAt
+                  - createdBy
+                properties:
+                  id:
+                    type: string
+                  email:
+                    type: string
+                  role:
+                    type: string
+                    enum:
+                      - admin
+                      - viewer
+                  status:
+                    type: string
+                    enum:
+                      - created
+                      - simulated
+                      - accepted
+                      - revoked
+                      - expired
+                  createdAt:
+                    type: string
+                    format: date-time
+                  expiresAt:
+                    type: string
+                    format: date-time
+                  resendCount:
+                    type: integer
+                    minimum: 0
+                  lastSentAt:
+                    type:
+                      - "null"
+                      - string
+                    format: date-time
+                  createdBy:
+                    type: string
+                    description: Email of the admin that created the invite.
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/team/members/{id}:
+    patch:
+      operationId: changeTeamMemberRole
+      summary: Change the role of an active member; keeps at least one active admin
+      tags:
+        - team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - role
+              properties:
+                role:
+                  type: string
+                  enum:
+                    - admin
+                    - viewer
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - id
+                  - email
+                  - role
+                  - status
+                  - createdAt
+                  - lastLoginAt
+                properties:
+                  id:
+                    type: string
+                  email:
+                    type: string
+                  role:
+                    type: string
+                    enum:
+                      - admin
+                      - viewer
+                  status:
+                    type: string
+                    enum:
+                      - active
+                  createdAt:
+                    type: string
+                    format: date-time
+                  lastLoginAt:
+                    type:
+                      - "null"
+                      - string
+                    format: date-time
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    delete:
+      operationId: removeTeamMember
+      summary: Remove an active member and revoke its sessions; keeps at least one
+        active admin
+      tags:
+        - team
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: id
+          required: true
+      responses:
+        "204":
+          description: Member removed
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /v1/metrics/overview:
     get:
       operationId: getOverviewMetrics
