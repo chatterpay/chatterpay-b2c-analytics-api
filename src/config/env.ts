@@ -22,11 +22,11 @@ export interface AppEnv {
   MONGO_URI: string | null;
   MONGO_DB_NAME: string;
   /**
-   * Connection string of the ChatterPay B2C database, the source of the networks; `null` reuses
-   * `MONGO_URI`, since both databases live in the same cluster.
+   * Connection string of the ChatterPay B2C database, the source of the networks, with the database
+   * in its path. Required in production; outside production `null` reuses `MONGO_URI`.
    */
   B2C_MONGO_URI: string | null;
-  /** Name of the ChatterPay B2C database whose `blockchains` collection lists the networks. */
+  /** B2C database used when `B2C_MONGO_URI` has no database in its path. */
   B2C_MONGO_DB_NAME: string;
 }
 
@@ -97,7 +97,12 @@ const envSchema: z.ZodType<AppEnv> = z
     if (env.NODE_ENV !== 'production') {
       return;
     }
-    for (const name of ['DEMO_ACCESS_CODE', 'JWT_PRIVATE_KEY', 'MONGO_URI'] as const) {
+    for (const name of [
+      'DEMO_ACCESS_CODE',
+      'JWT_PRIVATE_KEY',
+      'MONGO_URI',
+      'B2C_MONGO_URI'
+    ] as const) {
       if (env[name] === null) {
         context.addIssue({ code: 'custom', path: [name], message: 'Required in production' });
       }
