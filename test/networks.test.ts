@@ -6,7 +6,7 @@ import { loadEnv } from '../src/config/env.js';
 import { DEFAULT_NETWORKS, listNetworks, setNetworks } from '../src/metrics/catalog.js';
 import { resetFactsCaches } from '../src/metrics/facts.js';
 import { buildOverview } from '../src/metrics/overview.js';
-import { networkSlug, toNetworkDefinitions } from '../src/store/b2c-networks.js';
+import { databaseFromUri, networkSlug, toNetworkDefinitions } from '../src/store/b2c-networks.js';
 
 const NOW = new Date('2026-10-24T15:30:00.000Z');
 const env = loadEnv({ NODE_ENV: 'test', LOG_LEVEL: 'silent' });
@@ -18,6 +18,21 @@ async function viewer(): Promise<Principal> {
 afterEach(() => {
   setNetworks(DEFAULT_NETWORKS);
   resetFactsCaches();
+});
+
+describe('B2C connection string', () => {
+  it.each([
+    [
+      'mongodb+srv://user:p%40ss@cluster.example.net/chatterpay-dev?retryWrites=true',
+      'chatterpay-dev'
+    ],
+    ['mongodb://h1:27017,h2:27017/chatterpay?replicaSet=rs0', 'chatterpay'],
+    ['mongodb://127.0.0.1:27017/chatterpay-dev', 'chatterpay-dev'],
+    ['mongodb+srv://user:pass@cluster.example.net/?retryWrites=true', null],
+    ['mongodb://127.0.0.1:27017', null]
+  ])('reads the database of %s', (uri, database) => {
+    expect(databaseFromUri(uri)).toBe(database);
+  });
 });
 
 describe('B2C blockchains mapping', () => {
