@@ -42,7 +42,7 @@ function readInvite(invite: Invite, now: Date): Invite {
  *
  * Every method does its checks and writes synchronously before the returned promise settles, so
  * concurrent requests of one process cannot interleave inside a method. State is lost on restart
- * and not shared between instances: it fits local runs, tests and single-instance demos only.
+ * and not shared between instances: it fits tests and local runs without MongoDB only.
  */
 export class MemoryStore implements Store {
   readonly kind: 'memory' = 'memory';
@@ -52,6 +52,12 @@ export class MemoryStore implements Store {
   private readonly invites = new Map<string, Invite>();
   private readonly activity: ActivityEvent[] = [];
   private readonly counters = new Map<string, Counter>();
+
+  async ping(): Promise<boolean> {
+    return true;
+  }
+
+  async close(): Promise<void> {}
 
   async ensureUser(email: string, role: Role, now: Date): Promise<User> {
     const existing = this.activeUserByEmail(email);
