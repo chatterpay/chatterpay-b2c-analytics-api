@@ -1,8 +1,15 @@
-import { dayHourOf, periodOf } from './calendar.js';
+import { dayHourOf, hourIndexOf, periodOf } from './calendar.js';
 import { type NetworkFilter, networkProfile, networksFor } from './catalog.js';
 import { type Facts, feesCents, sumAssets, volumeCents } from './facts.js';
 import { centsToUsd, moneyMetric } from './format.js';
+import { buildMasterWallets } from './holdings.js';
 import { rangeMeta } from './overview.js';
+import {
+  activityTotals,
+  buildAverageFee,
+  buildFeesByProduct,
+  buildPolymarketVolume
+} from './products.js';
 import { resolveRange } from './ranges.js';
 import { sourceFor } from './sources.js';
 import type { MetricsRange, RevenueResponse } from './types.js';
@@ -24,7 +31,9 @@ function assetsOf(facts: Facts): string[] {
  * backend computed for the operation, not a reconciled charge.
  *
  * Fee totals equal transfer plus swap fees, and the sums of the network and asset breakdowns and
- * of the series.
+ * of the series. The average fee per transaction divides those fees by the counted transfers and
+ * swaps; Polymarket volume and fees are `unavailable` because the B2C data does not record them
+ * verifiably. Master wallets come from the balance snapshots and are balances, not revenue.
  *
  * @param network - Network filter.
  * @param range - Time range.
@@ -54,6 +63,9 @@ export function buildRevenue(
 
   const transferFees = (facts: Facts): number => sumAssets(facts.transferFees);
   const swapFees = (facts: Facts): number => sumAssets(facts.swapFees);
+  const swapVolume = (facts: Facts): number => sumAssets(facts.swapVolume);
+  const currentTotals = activityTotals(current.map((item) => item.facts));
+  const previousTotals = previous === null ? null : activityTotals(previous);
 
   const byAsset = current
     .flatMap(({ network: id, facts }) =>
@@ -70,12 +82,13 @@ export function buildRevenue(
     );
 
   return {
-    meta: rangeMeta(network, range, now, ['activity']),
+    meta: rangeMeta(network, range, now, ['activity', 'balances']),
     tiles: {
       feesUsd: moneyMetric(total(feesCents), previousTotal(feesCents)),
       transferFeesUsd: moneyMetric(total(transferFees), previousTotal(transferFees)),
       swapFeesUsd: moneyMetric(total(swapFees), previousTotal(swapFees)),
-      volumeUsd: moneyMetric(total(volumeCents), previousTotal(volumeCents))
+      volumeUsd: moneyMetric(total(volumeCents), previousTotal(volumeCents)),
+      swapVolumeUsd: moneyMetric(total(swapVolume), previousTotal(swapVolume))
     },
     series: resolved.buckets.map((bucket) => {
       const facts = networks.map((id) => activity.facts(id, bucket));
@@ -101,6 +114,10 @@ export function buildRevenue(
       asset: item.asset,
       volumeUsd: centsToUsd(item.volume),
       feesUsd: centsToUsd(item.fees)
-    }))
+    })),
+    avgFeePerTransaction: buildAverageFee(currentTotals, previousTotals),
+    polymarketVolume: buildPolymarketVolume(),
+    feesByProduct: buildFeesByProduct(currentTotals),
+    masterWallets: buildMasterWallets(networks, hourIndexOf(now))
   };
 }
