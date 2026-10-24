@@ -4,15 +4,17 @@ import type {
   IngestedTransaction,
   IngestedUser,
   LiveAggregates,
+  NetworkWallets,
   TokenInfo,
   UserActivity,
-  UserSignup
+  UserSignup,
+  WalletObservation
 } from '../ingest/types.js';
 import { addMonths, type DayHour, isoDayOf, type TimeWindow } from './calendar.js';
 import type { NetworkId } from './catalog.js';
 import type { Facts } from './facts.js';
 import { impliedSwapPrices, PriceBook, type StableSwap } from './pricing.js';
-import type { MetricsSource } from './sources.js';
+import type { MetricsSource, WalletCoverage } from './sources.js';
 
 const HOUR_MS = 3_600_000;
 /** Status of a row that moved funds. Other statuses (`failed`, `submitted`, ...) are not counted. */
@@ -27,6 +29,8 @@ export interface AggregationInput {
   chains: ReadonlyMap<string, NetworkId>;
   /** Provider snapshots; swap-implied prices are derived from `transactions`. */
   prices: readonly DailyPrice[];
+  /** First ingestion run that saw each wallet; none when omitted. */
+  observations?: readonly WalletObservation[];
 }
 
 /** Counters of an aggregation. */
@@ -38,6 +42,10 @@ export interface AggregationStats {
   /** Completed transfers and swaps on chains outside the catalog. */
   outsideCatalog: number;
   users: number;
+  /** User wallets on networks of the catalog. */
+  wallets: number;
+  /** Of those, the wallets with a verifiable first appearance. */
+  verifiedWallets: number;
 }
 
 /** Result of {@link aggregateActivity}. */
@@ -64,6 +72,7 @@ interface Operation {
 function blankFacts(): Facts {
   return {
     newUsers: 0,
+    newWallets: 0,
     activeUserDays: 0,
     transfers: 0,
     swaps: 0,
@@ -82,6 +91,7 @@ function addTo(record: Record<string, number>, key: string, value: number): void
 
 function addFacts(target: Facts, item: Facts): void {
   target.newUsers += item.newUsers;
+  target.newWallets += item.newWallets;
   target.activeUserDays += item.activeUserDays;
   target.transfers += item.transfers;
   target.swaps += item.swaps;
@@ -159,6 +169,38 @@ function swapLegs(
   return { input, output };
 }
 
+/** Key of a wallet: chain id and address, the address in lower case unless it is bech32. */
+function walletKey(chainId: string, address: string): string {
+  return `${chainId}|${address.startsWith('0x') ? address.toLowerCase() : address}`;
+}
+
+/**
+ * Earliest completed B2C operation per wallet, as sender or recipient, in milliseconds. A swap
+ * leg counts too: either leg proves the wallet held or received funds at that instant.
+ */
+function firstOperations(rows: readonly IngestedTransaction[]): Map<string, number> {
+  const first = new Map<string, number>();
+  const note = (chainId: string, address: string, at: number): void => {
+    if (address === '') {
+      return;
+    }
+    const key = walletKey(chainId, address);
+    const known = first.get(key);
+    if (known === undefined || at < known) {
+      first.set(key, at);
+    }
+  };
+  for (const row of rows) {
+    if (row.status !== COMPLETED) {
+      continue;
+    }
+    const at = row.date.getTime();
+    note(row.chainId, row.from, at);
+    note(row.chainId, row.to, at);
+  }
+  return first;
+}
+
 /**
  * Aggregates the ingested B2C rows into hourly facts, user activity and signups.
  *
@@ -167,6 +209,12 @@ function swapLegs(
  * USD value is the stable leg when either leg is stable. Other tokens are valued with
  * {@link PriceBook}. Money is rounded to cents per operation. The output depends only on the
  * input, so rebuilding the same day gives the same aggregates.
+ *
+ * The first verifiable appearance of a user wallet on its network is the earliest of two pieces of
+ * evidence: the first completed B2C operation that sent from or paid to it, and the first
+ * ingestion run that saw it after an earlier run had not (`bounded` observations). A wallet with
+ * neither, such as one present since before the first tracking run and without operations, is not
+ * counted as new and lowers the verified coverage.
  *
  * @param input - Ingested rows, tokens, chain map and provider prices.
  * @returns The aggregates and the counters of the build.
@@ -187,7 +235,9 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
     swaps: 0,
     unpriced: 0,
     outsideCatalog: 0,
-    users: input.users.length
+    users: input.users.length,
+    wallets: 0,
+    verifiedWallets: 0
   };
   const operations: Operation[] = [];
   const stableSwaps: StableSwap[] = [];
@@ -282,6 +332,7 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
         network,
         hour,
         newUsers: 0,
+        newWallets: 0,
         transfers: 0,
         swaps: 0,
         transferVolume: {},
@@ -344,6 +395,39 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
     }
   }
 
+  const operationsByWallet = firstOperations(input.transactions);
+  const observed = new Map<string, WalletObservation>();
+  for (const observation of input.observations ?? []) {
+    observed.set(walletKey(observation.chainId, observation.address), observation);
+  }
+  const wallets = new Map<NetworkId, NetworkWallets>();
+  const seen = new Set<string>();
+  for (const user of input.users) {
+    for (const wallet of user.wallets) {
+      const network = input.chains.get(wallet.chainId);
+      const key = walletKey(wallet.chainId, wallet.address);
+      if (network === undefined || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      const coverage = wallets.get(network) ?? { network, wallets: 0, verified: 0 };
+      coverage.wallets += 1;
+      wallets.set(network, coverage);
+      stats.wallets += 1;
+      const observation = observed.get(key);
+      const candidates = [
+        operationsByWallet.get(key),
+        observation?.bounded === true ? observation.firstObservedAt.getTime() : undefined
+      ].filter((value): value is number => value !== undefined);
+      if (candidates.length === 0) {
+        continue;
+      }
+      coverage.verified += 1;
+      stats.verifiedWallets += 1;
+      factsAt(network, Math.floor(Math.min(...candidates) / HOUR_MS)).newWallets += 1;
+    }
+  }
+
   return {
     aggregates: {
       hourly: [...hourly.values()].sort(
@@ -356,7 +440,10 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
           hours: [...entry.hours].sort((left, right) => left - right)
         })
       ),
-      signups
+      signups,
+      wallets: [...wallets.values()].sort((left, right) =>
+        left.network.localeCompare(right.network)
+      )
     },
     stats
   };
@@ -387,14 +474,27 @@ class LiveSource implements MetricsSource {
   private readonly signups = new Map<NetworkId, Signups>();
   /** Users without a signup date, per network; they count in totals from the start. */
   private readonly undated = new Map<NetworkId, string[]>();
+  private readonly wallets = new Map<NetworkId, WalletCoverage>();
 
-  constructor(aggregates: LiveAggregates) {
+  /**
+   * @param aggregates - Stored aggregates.
+   * @param trackingSince - First run that recorded wallet observations.
+   */
+  constructor(
+    aggregates: LiveAggregates,
+    private readonly trackingSince: Date | null = null
+  ) {
+    for (const item of aggregates.wallets ?? []) {
+      this.wallets.set(item.network, { wallets: item.wallets, verified: item.verified });
+    }
     const hourly = [...aggregates.hourly].sort((left, right) => left.hour - right.hour);
     for (const item of hourly) {
       const series = this.hourly.get(item.network) ?? { hours: [], facts: [] };
       series.hours.push(item.hour);
       series.facts.push({
         newUsers: item.newUsers,
+        // Builds stored before wallets were tracked have no such field.
+        newWallets: item.newWallets ?? 0,
         activeUserDays: 0,
         transfers: item.transfers,
         swaps: item.swaps,
@@ -575,14 +675,29 @@ class LiveSource implements MetricsSource {
     }
     return { size: cohort.size, retained };
   }
+
+  walletCoverage(network: NetworkId, _point: DayHour): WalletCoverage {
+    return this.wallets.get(network) ?? { wallets: 0, verified: 0 };
+  }
+
+  walletsTrackingSince(): Date | null {
+    return this.trackingSince;
+  }
 }
 
 /**
  * Builds the metrics source over stored aggregates.
  *
+ * Wallet coverage is the one of the build, the wallets of the user copy at that run, whatever
+ * `point` a caller asks for.
+ *
  * @param aggregates - Aggregates read from the analytics database.
+ * @param trackingSince - First run that recorded wallet observations; `null` when none did.
  * @returns The live source.
  */
-export function liveSourceFrom(aggregates: LiveAggregates): MetricsSource {
-  return new LiveSource(aggregates);
+export function liveSourceFrom(
+  aggregates: LiveAggregates,
+  trackingSince: Date | null = null
+): MetricsSource {
+  return new LiveSource(aggregates, trackingSince);
 }
