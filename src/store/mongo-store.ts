@@ -18,7 +18,8 @@ import type {
   User
 } from './types.js';
 
-type UserDoc = Omit<User, 'id'> & { _id: string };
+/** `name` is optional: the API never writes it, an operator may. */
+type UserDoc = Omit<User, 'id' | 'name'> & { _id: string; name?: string | null };
 type SessionDoc = Omit<Session, 'jti'> & { _id: string };
 type ChallengeDoc = Omit<Challenge, 'id'> & { _id: string };
 type InviteDoc = Omit<Invite, 'id'> & { _id: string };
@@ -36,8 +37,12 @@ function isDuplicateKey(error: unknown): boolean {
   return error instanceof MongoServerError && error.code === DUPLICATE_KEY;
 }
 
-function toUser({ _id, ...rest }: UserDoc): User {
-  return { id: _id, ...rest };
+function toUser({ _id, name, ...rest }: UserDoc): User {
+  return {
+    id: _id,
+    ...rest,
+    name: typeof name === 'string' && name.trim() !== '' ? name.trim() : null
+  };
 }
 
 function toSession({ _id, ...rest }: SessionDoc): Session {
@@ -344,6 +349,21 @@ export class MongoStore implements Store {
   async listActivity(limit: number): Promise<ActivityEvent[]> {
     const events = await this.activity.find({}).sort({ at: -1, _id: -1 }).limit(limit).toArray();
     return events.map(toActivity);
+  }
+
+  async lastActivityOf(userIds: readonly string[]): Promise<Map<string, Date>> {
+    if (userIds.length === 0) {
+      return new Map();
+    }
+    // The activity log holds team events only (logins and team changes), so grouping it without an
+    // index on `actorId` stays cheap; the route that calls this is admin-only.
+    const rows = await this.activity
+      .aggregate<{ _id: string; at: Date }>([
+        { $match: { actorId: { $in: [...userIds] } } },
+        { $group: { _id: '$actorId', at: { $max: '$at' } } }
+      ])
+      .toArray();
+    return new Map(rows.map((row) => [row._id, row.at]));
   }
 
   async hit(key: string, limit: number, windowMs: number, now: Date): Promise<RateLimitResult> {
