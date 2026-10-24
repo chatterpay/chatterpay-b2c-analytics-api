@@ -13,6 +13,7 @@ import type {
   UserActivity,
   UserSignup
 } from '../ingest/types.js';
+import { connectOrClose } from './connect-retry.js';
 
 /**
  * Collections of the ingestion in the analytics database. Copies are keyed by the B2C id and
@@ -89,10 +90,10 @@ export class MongoIngestRepository implements IngestRepository {
    */
   static async connect(options: MongoIngestRepositoryOptions): Promise<MongoIngestRepository> {
     const client = new MongoClient(options.uri, {
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 10_000,
       appName: 'chatterpay-analytics-api'
     });
-    await client.connect();
+    await connectOrClose(client);
     return new MongoIngestRepository(client, client.db(options.dbName));
   }
 
