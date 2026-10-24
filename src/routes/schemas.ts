@@ -16,6 +16,7 @@ const apiErrorSchema = {
         'UNAUTHORIZED',
         'FORBIDDEN',
         'NOT_FOUND',
+        'CONFLICT',
         'PAYLOAD_TOO_LARGE',
         'RATE_LIMITED',
         'SERVICE_UNAVAILABLE',
@@ -40,6 +41,41 @@ export const errorResponses: Record<string, { $ref: string }> = {
   429: errorRef,
   503: errorRef
 };
+
+/**
+ * Builds the error part of a route `response` map for the given statuses.
+ *
+ * @param statuses - HTTP statuses the route can answer with the shared error body.
+ * @returns Map from status to a reference to the shared error schema.
+ */
+export function errorResponsesFor(statuses: readonly number[]): Record<string, { $ref: string }> {
+  return Object.fromEntries(statuses.map((status) => [String(status), errorRef]));
+}
+
+/**
+ * Builds a closed object schema whose properties are all required.
+ *
+ * @param properties - Property schemas.
+ * @returns JSON Schema of the object.
+ */
+export function object(properties: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: Object.keys(properties),
+    properties
+  };
+}
+
+/**
+ * Builds an array schema.
+ *
+ * @param items - Schema of each item.
+ * @returns JSON Schema of the array.
+ */
+export function arrayOf(items: Record<string, unknown>): Record<string, unknown> {
+  return { type: 'array', items };
+}
 
 /**
  * Adds the shared schemas to the instance. Must run before routes that reference them.
