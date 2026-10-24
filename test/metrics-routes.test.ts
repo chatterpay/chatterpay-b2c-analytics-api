@@ -66,6 +66,17 @@ describe('metrics routes', () => {
     expect(body.series).toHaveLength(7);
   });
 
+  it('answers users by month when the granularity is omitted', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/metrics/users',
+      headers: { 'x-test-role': 'viewer' }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().meta.granularity).toBe('monthly');
+  });
+
   it.each([
     '/v1/metrics/overview?network=polygon',
     '/v1/metrics/overview?range=daily',
