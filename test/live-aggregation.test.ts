@@ -129,7 +129,16 @@ describe('aggregateActivity', () => {
   it('counts completed transfers and one swap per hash, on catalog chains only', () => {
     const { stats } = build();
 
-    expect(stats).toEqual({ transfers: 3, swaps: 2, unpriced: 0, outsideCatalog: 1, users: 3 });
+    expect(stats).toEqual({
+      transfers: 3,
+      swaps: 2,
+      unpriced: 0,
+      outsideCatalog: 1,
+      users: 3,
+      // Four wallets; the two that sent a completed operation have a verifiable first appearance.
+      wallets: 4,
+      verifiedWallets: 2
+    });
   });
 
   it('values swaps on the stable leg and transfers with the implied price', () => {
