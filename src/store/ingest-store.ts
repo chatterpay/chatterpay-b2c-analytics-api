@@ -8,17 +8,22 @@ import type {
   IngestedUser,
   IngestRepository,
   LiveAggregates,
+  NetworkWallets,
+  RunSnapshot,
   StoredAggregates,
   TokenInfo,
   UserActivity,
-  UserSignup
+  UserSignup,
+  WalletObservation
 } from '../ingest/types.js';
+import type { IngestRunStatus } from '../metrics/types.js';
 import { connectOrClose } from './connect-retry.js';
 
 /**
  * Collections of the ingestion in the analytics database. Copies are keyed by the B2C id and
- * aggregates by a build stamp; every read is by `_id` or by that stamp over collections that are
- * replaced as a whole, so none needs an index besides the default one.
+ * aggregates by a build stamp; every read is by `_id`, by that stamp over collections that are
+ * replaced as a whole, or a full read of a small collection (one snapshot per run, one observation
+ * per wallet), so none needs an index besides the default one.
  */
 export const INGEST_COLLECTIONS = {
   state: 'ingest_state',
@@ -29,7 +34,9 @@ export const INGEST_COLLECTIONS = {
   prices: 'token_prices',
   hourly: 'agg_hourly',
   activity: 'agg_user_activity',
-  signups: 'agg_user_signups'
+  signups: 'agg_user_signups',
+  snapshots: 'ingest_snapshots',
+  walletObservations: 'wallet_first_seen'
 } as const;
 
 const CHECKPOINTS_ID = 'checkpoints';
@@ -41,9 +48,12 @@ interface StateDoc {
   _id: string;
   transactionsLastId?: string | null;
   pricesLastDay?: string | null;
+  walletsTrackingSince?: Date | null;
   owner?: string | null;
   until?: Date | null;
   builtAt?: Date | null;
+  run?: IngestRunStatus | null;
+  wallets?: NetworkWallets[];
 }
 
 type TransactionDoc = Omit<IngestedTransaction, 'id'> & { _id: string };
@@ -51,6 +61,8 @@ type UserDoc = Omit<IngestedUser, 'id'> & { _id: string; seenAt: Date };
 type TokenDoc = TokenInfo & { _id: string };
 type NetworkDoc = ChainInfo & { _id: string };
 type PriceDoc = DailyPrice & { _id: string };
+type SnapshotDoc = RunSnapshot & { _id: string };
+type ObservationDoc = WalletObservation & { _id: string };
 type Stamped<T> = T & { _id: string; builtAt: Date };
 
 /** Connection settings of {@link MongoIngestRepository.connect}. */
@@ -105,7 +117,8 @@ export class MongoIngestRepository implements IngestRepository {
     const doc = await this.state.findOne({ _id: CHECKPOINTS_ID });
     return {
       transactionsLastId: doc?.transactionsLastId ?? null,
-      pricesLastDay: doc?.pricesLastDay ?? null
+      pricesLastDay: doc?.pricesLastDay ?? null,
+      walletsTrackingSince: doc?.walletsTrackingSince ?? null
     };
   }
 
@@ -152,8 +165,17 @@ export class MongoIngestRepository implements IngestRepository {
     const users = this.collection<UserDoc>(INGEST_COLLECTIONS.users);
     if (items.length > 0) {
       await users.bulkWrite(
-        items.map(({ id, ...rest }) => ({
-          replaceOne: { filter: { _id: id }, replacement: { ...rest, seenAt: now }, upsert: true }
+        // Fields are picked one by one, so nothing else a caller passes is ever stored.
+        items.map(({ id, createdAt, wallets }) => ({
+          replaceOne: {
+            filter: { _id: id },
+            replacement: {
+              createdAt,
+              wallets: wallets.map(({ chainId, address }) => ({ chainId, address })),
+              seenAt: now
+            },
+            upsert: true
+          }
         })),
         { ordered: false }
       );
@@ -217,7 +239,14 @@ export class MongoIngestRepository implements IngestRepository {
 
   async tokens(): Promise<TokenInfo[]> {
     const docs = await this.collection<TokenDoc>(INGEST_COLLECTIONS.tokens).find({}).toArray();
-    return docs.map(({ chainId, symbol, stable }) => ({ chainId, symbol, stable }));
+    return docs.map(({ chainId, symbol, stable, address, decimals }) => ({
+      chainId,
+      symbol,
+      stable,
+      // Copies written before these fields were read have neither.
+      address: address ?? '',
+      decimals: decimals ?? null
+    }));
   }
 
   async chains(): Promise<ChainInfo[]> {
@@ -236,7 +265,48 @@ export class MongoIngestRepository implements IngestRepository {
     return docs.map(({ symbol, day, usd, source }) => ({ symbol, day, usd, source }));
   }
 
-  async saveAggregates(aggregates: LiveAggregates, builtAt: Date): Promise<void> {
+  async saveSnapshot(snapshot: RunSnapshot): Promise<void> {
+    await this.collection<SnapshotDoc>(INGEST_COLLECTIONS.snapshots).replaceOne(
+      { _id: String(snapshot.takenAt.getTime()) },
+      snapshot,
+      { upsert: true }
+    );
+  }
+
+  async walletObservations(): Promise<WalletObservation[]> {
+    const docs = await this.collection<ObservationDoc>(INGEST_COLLECTIONS.walletObservations)
+      .find({})
+      .toArray();
+    return docs.map(({ chainId, address, firstObservedAt, bounded }) => ({
+      chainId,
+      address,
+      firstObservedAt,
+      bounded
+    }));
+  }
+
+  async addWalletObservations(items: readonly WalletObservation[]): Promise<void> {
+    if (items.length === 0) {
+      return;
+    }
+    // `$setOnInsert` keeps the first observation of a wallet when a retried run sees it again.
+    await this.collection<ObservationDoc>(INGEST_COLLECTIONS.walletObservations).bulkWrite(
+      items.map((item) => ({
+        updateOne: {
+          filter: { _id: `${item.chainId}|${item.address}` },
+          update: { $setOnInsert: item },
+          upsert: true
+        }
+      })),
+      { ordered: false }
+    );
+  }
+
+  async saveAggregates(
+    aggregates: LiveAggregates,
+    builtAt: Date,
+    run: IngestRunStatus
+  ): Promise<void> {
     const write = async <T>(name: string, items: readonly T[], key: (item: T) => string) => {
       const collection = this.collection<Stamped<T>>(name);
       const stamp = builtAt.getTime();
@@ -265,7 +335,11 @@ export class MongoIngestRepository implements IngestRepository {
         (item) => `${item.network}|${item.user}`
       )
     ];
-    await this.state.updateOne({ _id: AGGREGATES_ID }, { $set: { builtAt } }, { upsert: true });
+    await this.state.updateOne(
+      { _id: AGGREGATES_ID },
+      { $set: { builtAt, run, wallets: aggregates.wallets } },
+      { upsert: true }
+    );
     for (const collection of written) {
       await collection.deleteMany({ builtAt: { $ne: builtAt } });
     }
@@ -276,19 +350,32 @@ export class MongoIngestRepository implements IngestRepository {
   }
 
   async loadAggregates(): Promise<StoredAggregates | null> {
-    const builtAt = await this.aggregatesBuiltAt();
+    const state = await this.state.findOne({ _id: AGGREGATES_ID });
+    const builtAt = state?.builtAt ?? null;
     if (builtAt === null) {
       return null;
     }
+    const checkpoints = await this.readCheckpoints();
+    // A run that stored its snapshot and stopped before building belongs to no build yet.
+    const snapshots = (
+      await this.collection<SnapshotDoc>(INGEST_COLLECTIONS.snapshots).find({}).toArray()
+    )
+      .map(({ _id, ...rest }) => rest)
+      .filter((snapshot) => snapshot.takenAt.getTime() <= builtAt.getTime())
+      .sort((left, right) => left.takenAt.getTime() - right.takenAt.getTime());
     const read = async <T>(name: string): Promise<T[]> =>
       (await this.collection<Stamped<T>>(name).find({ builtAt }).toArray()).map(
         (doc) => strip(doc) as T
       );
     return {
       builtAt,
+      run: state?.run ?? null,
+      walletsTrackingSince: checkpoints.walletsTrackingSince,
+      snapshots,
       hourly: await read<HourlyFacts>(INGEST_COLLECTIONS.hourly),
       activity: await read<UserActivity>(INGEST_COLLECTIONS.activity),
-      signups: await read<UserSignup>(INGEST_COLLECTIONS.signups)
+      signups: await read<UserSignup>(INGEST_COLLECTIONS.signups),
+      wallets: state?.wallets ?? []
     };
   }
 
