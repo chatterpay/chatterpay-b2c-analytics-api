@@ -20,12 +20,24 @@ import {
   networkProfile,
   networksFor
 } from './catalog.js';
+import { shareOf } from './decimal.js';
 import { countMetric } from './format.js';
-import { type MetricGroup, provenanceOf, sourceFor } from './sources.js';
-import type { CountMetric, SeriesBucket, UsersGranularity, UsersResponse } from './types.js';
+import { liveAsOf, type MetricGroup, provenanceOf, sourceFor } from './sources.js';
+import type {
+  CountMetric,
+  NewWalletsBlock,
+  RetentionMonth,
+  RetentionSummaryBlock,
+  SeriesBucket,
+  UsersGranularity,
+  UsersResponse
+} from './types.js';
 
 const RETENTION_COHORTS = 6;
-const USERS_GROUPS: readonly MetricGroup[] = ['activeUsers', 'signups', 'retention'];
+/** Monthly cohorts the retention summary looks at; month 6 needs cohorts at least 7 months old. */
+const SUMMARY_COHORTS = 12;
+const SUMMARY_MONTHS: ReadonlyArray<RetentionMonth['month']> = [1, 3, 6];
+const USERS_GROUPS: readonly MetricGroup[] = ['activeUsers', 'signups', 'retention', 'wallets'];
 const START_DAY = dayNumberFromIso(DATASET_START_DAY);
 
 interface SeriesPlan {
@@ -91,6 +103,116 @@ function retention(networks: readonly NetworkId[], now: DayHour): UsersResponse[
     cohorts.push({ cohort: isoMonthOf(cohortStart), size, retained });
   }
   return cohorts;
+}
+
+function newWalletsIn(networks: readonly NetworkId[], window: TimeWindow): number {
+  const source = sourceFor('wallets');
+  return networks.reduce((sum, id) => sum + source.facts(id, window).newWallets, 0);
+}
+
+/**
+ * Builds the New Wallets block. A wallet is a chain id and address of a B2C user; it counts on the
+ * hour of its first verifiable appearance (see `LIVE_METRIC_GROUPS`). Wallets without one are not
+ * counted and lower the coverage, so the figures are then a lower bound.
+ */
+function newWallets(
+  networks: readonly NetworkId[],
+  plan: SeriesPlan,
+  point: DayHour,
+  last30: TimeWindow,
+  previous30: TimeWindow
+): NewWalletsBlock {
+  const source = sourceFor('wallets');
+  const byNetwork = networks.map((id) => {
+    const coverage = source.walletCoverage(id, point);
+    return {
+      network: id,
+      label: networkProfile(id).label,
+      newWallets: source.facts(id, plan.current).newWallets,
+      wallets: coverage.wallets,
+      verifiedWallets: coverage.verified
+    };
+  });
+  const wallets = byNetwork.reduce((sum, item) => sum + item.wallets, 0);
+  const verified = byNetwork.reduce((sum, item) => sum + item.verifiedWallets, 0);
+  const since = source.walletsTrackingSince();
+  return {
+    source: source.kind,
+    availability: verified < wallets ? 'partial' : 'available',
+    reason: verified < wallets ? 'unverified_wallets' : null,
+    asOf: liveAsOf('wallets'),
+    definition: 'first_verifiable_appearance',
+    trackingSince: since?.toISOString() ?? null,
+    tile: countMetric(newWalletsIn(networks, last30), newWalletsIn(networks, previous30)),
+    series: plan.buckets.map((bucket) => ({
+      ...periodOf(bucket),
+      newWallets: newWalletsIn(networks, bucket)
+    })),
+    byNetwork,
+    coverage: { wallets, verifiedWallets: verified }
+  };
+}
+
+/**
+ * Builds the retention summary at 1, 3 and 6 months. A cohort counts for month N only when the N-th
+ * month after its own is complete, so every rate compares cohorts that all had the chance to
+ * return in that month.
+ */
+function retentionSummary(networks: readonly NetworkId[], now: DayHour): RetentionSummaryBlock {
+  const source = sourceFor('retention');
+  const cohorts: RetentionSummaryBlock['cohorts'] = [];
+  const totals = new Map<RetentionMonth['month'], { eligible: number; size: number; kept: number }>(
+    SUMMARY_MONTHS.map((month) => [month, { eligible: 0, size: 0, kept: 0 }])
+  );
+  for (let monthsAgo = SUMMARY_COHORTS; monthsAgo >= 1; monthsAgo -= 1) {
+    const cohortStart = addMonths(now.day, -monthsAgo);
+    // A cohort of `monthsAgo` months ago has `monthsAgo - 1` complete months after its own.
+    const complete = monthsAgo - 1;
+    const { size, retained } = source.cohortAcross(
+      networks,
+      cohortStart,
+      Math.min(complete, SUMMARY_MONTHS.at(-1) ?? 0)
+    );
+    cohorts.push({
+      cohort: isoMonthOf(cohortStart),
+      size,
+      retained: SUMMARY_MONTHS.map((month) => ({
+        month,
+        users: month <= complete ? (retained[month - 1] ?? 0) : null
+      }))
+    });
+    for (const month of SUMMARY_MONTHS) {
+      const total = totals.get(month);
+      if (total !== undefined && month <= complete) {
+        total.eligible += 1;
+        total.size += size;
+        total.kept += retained[month - 1] ?? 0;
+      }
+    }
+  }
+  const months: RetentionMonth[] = SUMMARY_MONTHS.map((month) => {
+    const total = totals.get(month) ?? { eligible: 0, size: 0, kept: 0 };
+    const rate = shareOf(total.kept, total.size);
+    return {
+      month,
+      availability: rate === null ? 'unavailable' : 'available',
+      reason: rate === null ? 'no_eligible_cohort' : null,
+      eligibleCohorts: total.eligible,
+      cohortUsers: total.size,
+      retainedUsers: total.kept,
+      rate
+    };
+  });
+  const available = months.filter((month) => month.availability === 'available').length;
+  return {
+    source: source.kind,
+    availability:
+      available === months.length ? 'available' : available === 0 ? 'unavailable' : 'partial',
+    reason: available === months.length ? null : 'no_eligible_cohort',
+    asOf: liveAsOf('retention'),
+    months,
+    cohorts
+  };
 }
 
 /**
@@ -168,6 +290,8 @@ export function buildUsers(
       label: networkProfile(id).label,
       activeUsers: active.activeUsers(id, plan.current),
       totalUsers: signups.totalUsersAt(id, point)
-    }))
+    })),
+    newWallets: newWallets(networks, plan, point, last30, previous30),
+    retentionSummary: retentionSummary(networks, point)
   };
 }
