@@ -202,6 +202,15 @@ export function totalUsersAt(network: NetworkId, point: DayHour): number {
 // Prefix sums of new users per network: index i holds the users that joined before START_DAY + i.
 const usersBeforeCache = new Map<NetworkId, number[]>();
 
+/**
+ * Drops the memoized facts. Called after the network catalog changes, because the profile of a
+ * network id may change with it.
+ */
+export function resetFactsCaches(): void {
+  fullDayCache.clear();
+  usersBeforeCache.clear();
+}
+
 function usersBeforeDay(network: NetworkId, day: number): number {
   let prefix = usersBeforeCache.get(network);
   if (prefix === undefined) {
