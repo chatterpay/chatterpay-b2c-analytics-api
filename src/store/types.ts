@@ -124,8 +124,13 @@ export interface ActivatedMember {
  * `expired`. Every method takes the current instant explicitly so callers control the clock.
  */
 export interface Store {
-  /** Backend kind; the in-memory store is limited to a single instance. */
-  readonly kind: 'memory';
+  /** Backend kind; the in-memory store is limited to tests and local runs without MongoDB. */
+  readonly kind: 'memory' | 'mongo';
+
+  /** Reports whether the backend answers; used by the readiness probe. */
+  ping(): Promise<boolean>;
+  /** Releases the connection. */
+  close(): Promise<void>;
 
   /** Creates the active user unless one with that email exists; returns the active user. */
   ensureUser(email: string, role: User['role'], now: Date): Promise<User>;
