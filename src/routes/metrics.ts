@@ -79,7 +79,7 @@ const usersQuery = {
   additionalProperties: false,
   properties: {
     network: { ...networkFilter, default: 'all' },
-    granularity: { type: 'string', enum: GRANULARITY_ENUM, default: 'daily' }
+    granularity: { type: 'string', enum: GRANULARITY_ENUM, default: 'monthly' }
   }
 } as const;
 
