@@ -1,6 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { requireRoles } from '../auth/principal.js';
-import type { NetworkFilter } from '../metrics/catalog.js';
+import { ApiError } from '../errors/api-error.js';
+import {
+  isKnownNetwork,
+  listNetworks,
+  NETWORK_ID_PATTERN,
+  type NetworkFilter
+} from '../metrics/catalog.js';
 import { buildOverview } from '../metrics/overview.js';
 import { buildRevenue } from '../metrics/revenue.js';
 import type { MetricsRange, UsersGranularity } from '../metrics/types.js';
@@ -13,14 +19,19 @@ export interface MetricsRoutesOptions {
   clock: () => Date;
 }
 
-const NETWORK_ENUM = ['all', 'base', 'cardano'];
 const RANGE_ENUM = ['today', 'week', 'month', 'year', 'ytd', 'all'];
 const GRANULARITY_ENUM = ['daily', 'monthly', 'yearly'];
 
 const decimal = { type: 'string', pattern: '^-?\\d+\\.\\d+$' } as const;
 const nullableDecimal = { type: ['string', 'null'], pattern: '^-?\\d+\\.\\d+$' } as const;
 const instant = { type: 'string', format: 'date-time' } as const;
-const network = { type: 'string', enum: ['base', 'cardano'] } as const;
+const network = { type: 'string', pattern: NETWORK_ID_PATTERN, maxLength: 64 } as const;
+// `all` or a network id; whether the id is in the catalog is checked by the handlers.
+const networkFilter = {
+  type: 'string',
+  pattern: `^all$|${NETWORK_ID_PATTERN}`,
+  maxLength: 64
+} as const;
 
 const period = object({ start: instant, end: instant });
 const countMetric = object({
@@ -40,7 +51,7 @@ function meta(extra: Record<string, unknown>): Record<string, unknown> {
     dataStatus: { type: 'string', enum: ['mock'] },
     generatedAt: instant,
     currency: { type: 'string', enum: ['USD'] },
-    network: { type: 'string', enum: NETWORK_ENUM },
+    network: networkFilter,
     ...extra,
     period,
     previousPeriod: { anyOf: [period, { type: 'null' }] },
@@ -52,7 +63,7 @@ const rangeQuery = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    network: { type: 'string', enum: NETWORK_ENUM, default: 'all' },
+    network: { ...networkFilter, default: 'all' },
     range: { type: 'string', enum: RANGE_ENUM, default: 'month' }
   }
 } as const;
@@ -61,7 +72,7 @@ const usersQuery = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    network: { type: 'string', enum: NETWORK_ENUM, default: 'all' },
+    network: { ...networkFilter, default: 'all' },
     granularity: { type: 'string', enum: GRANULARITY_ENUM, default: 'daily' }
   }
 } as const;
@@ -134,6 +145,16 @@ const usersResponse = object({
   )
 });
 
+const networksResponse = object({
+  networks: arrayOf(
+    object({
+      id: network,
+      label: { type: 'string' },
+      family: { type: 'string', enum: ['evm', 'cardano'] }
+    })
+  )
+});
+
 const revenueResponse = object({
   meta: meta({ range: { type: 'string', enum: RANGE_ENUM } }),
   tiles: object({
@@ -170,7 +191,8 @@ const revenueResponse = object({
  * Registers the mock metrics endpoints under the plugin prefix.
  *
  * Every route requires an `admin` or `viewer` session, answers `Cache-Control: private, no-store`
- * and `X-Data-Status: mock`. Unknown query parameters and values outside the enums answer 400.
+ * and `X-Data-Status: mock`. Unknown query parameters, values outside the enums and networks
+ * outside the catalog answer 400.
  *
  * @param app - Fastify instance (encapsulated by the prefix).
  * @param options - Clock used to anchor the dataset.
@@ -184,6 +206,25 @@ export async function metricsRoutes(
     reply.header('cache-control', 'private, no-store');
     reply.header('x-data-status', 'mock');
   });
+  app.addHook<{ Querystring: { network?: string } }>('preHandler', async (request) => {
+    const requested = request.query.network;
+    if (requested !== undefined && !isKnownNetwork(requested)) {
+      throw new ApiError(400, 'BAD_REQUEST', 'Unknown network');
+    }
+  });
+
+  app.get(
+    '/networks',
+    {
+      schema: {
+        operationId: 'getMetricsNetworks',
+        summary: 'Networks of the environment, from the ChatterPay B2C database',
+        tags: ['metrics'],
+        response: { 200: networksResponse, ...errorResponses }
+      }
+    },
+    async () => ({ networks: listNetworks() })
+  );
 
   app.get<{ Querystring: { network: NetworkFilter; range: MetricsRange } }>(
     '/overview',
