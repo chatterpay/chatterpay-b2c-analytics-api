@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { buildApp } from './app.js';
 import { googleServiceAccountVerifier } from './auth/scheduler-identity.js';
 import { type AppEnv, loadEnv } from './config/env.js';
+import { rpcBalanceReader } from './ingest/balance-reader.js';
 import { coingeckoPriceProvider } from './ingest/coingecko.js';
 import { refreshLiveMetrics } from './ingest/live-loader.js';
 import { runIngestion } from './ingest/run.js';
@@ -55,12 +56,15 @@ function ingestionHandle(
         reader: networks.activity(),
         repository,
         prices: env.PRICES_PROVIDER === 'coingecko' ? coingeckoPriceProvider() : null,
+        balances: env.BALANCES_PROVIDER === 'rpc' ? rpcBalanceReader() : null,
+        masterWallets: env.MASTER_WALLETS,
         clock: () => new Date(),
         options: {
           batchSize: env.INGEST_BATCH_SIZE,
           maxTransactionsPerRun: env.INGEST_MAX_TRANSACTIONS_PER_RUN,
           revisitHours: env.INGEST_REVISIT_HOURS,
           maxProviderCallsPerRun: env.PRICES_MAX_CALLS_PER_RUN,
+          maxBalanceCallsPerRun: env.BALANCES_MAX_CALLS_PER_RUN,
           maxRunMs,
           lockTtlMs: maxRunMs + LOCK_MARGIN_MS
         },
