@@ -1,5 +1,5 @@
 {
-  "name": "chatterpay-b2c-analytics-api",
+  "name": "chatterpay-analytics-api",
   "version": "0.1.0",
   "private": true,
   "description": "ChatterPay Analytics API: private backend that serves mock analytics behind the site BFF.",
