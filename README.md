@@ -93,8 +93,8 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 | `CHALLENGE_TTL_MINUTES` | `10` | 1-60 |
 | `MONGO_URI` | unset | `mongodb://` or `mongodb+srv://`. Required in production; unset uses the in-memory store |
 | `MONGO_DB_NAME` | `chatterpay-analytics-dev` | Analytics-only database |
-| `B2C_MONGO_DB_NAME` | `chatterpay-dev` | ChatterPay B2C database; its `blockchains` collection lists the networks of the environment |
-| `B2C_MONGO_URI` | unset | Connection string of the B2C database; unset reuses `MONGO_URI` |
+| `B2C_MONGO_URI` | unset | Connection string of the ChatterPay B2C database, with the database in its path; its `blockchains` collection lists the networks of the environment. Required in production; unset reuses `MONGO_URI` |
+| `B2C_MONGO_DB_NAME` | `chatterpay-dev` | B2C database used when `B2C_MONGO_URI` has no database in its path |
 
 ## Persistence
 
@@ -115,7 +115,7 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 
 ## Mock dataset
 
-- Networks: one per document of the B2C `blockchains` collection (`B2C_MONGO_DB_NAME`), sorted by name. The id is the slug of the name (`Base Sepolia` → `base-sepolia`); `family` is `evm` (also when absent) or `cardano`, and documents of other families are skipped. The catalog is read at startup, where a failure stops the process, and every 5 minutes, where a failure keeps the previous catalog. Without Mongo, the catalog is `base-sepolia` and `cardano-preprod`.
+- Networks: one per document of the `blockchains` collection of the B2C database, sorted by name. The id is the slug of the name (`Base Sepolia` → `base-sepolia`); `family` is `evm` (also when absent) or `cardano`, and documents of other families are skipped. The catalog is read at startup, where a failure stops the process, and every 5 minutes, where a failure keeps the previous catalog. Without Mongo, the catalog is `base-sepolia` and `cardano-preprod`.
 - Filters: `network` = `all` or a network id, default `all`; `range` = `today` | `week` | `month` | `year` | `ytd` | `all`, default `month`; `granularity` = `daily` | `monthly` | `yearly`, default `daily`. Unknown parameters, values and networks answer 400.
 - Generated in memory from a seeded function of `(datasetVersion, network, day)`: the same day always yields the same figures on every instance. Activity starts on 2025-01-01 and ends at the current UTC hour.
 - `today`, `week`, `month` and `year` are rolling windows of 1, 7, 30 and 365 days; `ytd` starts on January 1; `all` starts at the dataset start and has no comparison. The previous period ends at the same hour, so partial days are compared like for like.
@@ -129,13 +129,13 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 
 | Substitution | Value |
 |---|---|
-| `_SERVICE_NAME` | `chatterpay-analytics-api-develop` or `chatterpay-analytics-api-main` |
+| `_SERVICE_NAME` | `chatterpay-analytics-back-develop` or `chatterpay-analytics-back-main` |
 | `_DEPLOY_REGION` / `_AR_HOSTNAME` / `_TRIGGER_ID` | Region, Artifact Registry host, trigger id |
 
-- Server variables (`LOG_LEVEL`, `BODY_LIMIT_BYTES`, `REQUEST_TIMEOUT_MS`, `JWT_KEY_ID`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SESSION_TTL_MINUTES`, `CHALLENGE_TTL_MINUTES`, `MONGO_DB_NAME`, `B2C_MONGO_DB_NAME`) are defined in the Cloud Run service YAML. The image only sets `NODE_ENV`, `HOST` and `PORT`; the deploy keeps the variables already defined on the service.
+- Server variables (`LOG_LEVEL`, `BODY_LIMIT_BYTES`, `REQUEST_TIMEOUT_MS`, `JWT_KEY_ID`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SESSION_TTL_MINUTES`, `CHALLENGE_TTL_MINUTES`, `MONGO_DB_NAME`) are defined in the Cloud Run service YAML. The image only sets `NODE_ENV`, `HOST` and `PORT`; the deploy keeps the variables already defined on the service.
 - Secrets never enter the image: `DEMO_ACCESS_CODE`, `JWT_PRIVATE_KEY` and `MONGO_URI` come from Secret Manager through `secretKeyRef` in the Cloud Run service YAML. `MONGO_URI` reads `ANALYTICS_BACKEND_MONGO_CONN_STRING_DEV` / `_MAIN`: the connection string of a database user whose only role is `readWrite` on the analytics database of the same Atlas cluster as the backend.
 - The service name selects the VPC: `*-develop` deploys on `chatterpay-dev-vpc` / `chatterpay-dev-run`, `*-main` on `chatterpay-main-vpc` / `chatterpay-main-run`; any other name stops the build.
-- The service sits behind the HTTPS load balancer on `dev.analytics-api.chatterpay.net` and `analytics-api.chatterpay.net`, with ingress `internal-and-cloud-load-balancing`. The deploy uses `--no-allow-unauthenticated`: only the service account of the site has `roles/run.invoker`. The BFF sends a Google-signed ID token whose audience is the API domain, declared on the service as a custom audience (`run.googleapis.com/custom-audiences`).
+- The service sits behind the HTTPS load balancer on `dev.back.analytics.chatterpay.net` and `back.analytics.chatterpay.net`, with ingress `internal-and-cloud-load-balancing`. The deploy uses `--no-allow-unauthenticated`: only the service account of the site has `roles/run.invoker`. The BFF sends a Google-signed ID token whose audience is the API domain, declared on the service as a custom audience (`run.googleapis.com/custom-audiences`).
 - The container listens on `0.0.0.0:8080` as the non-root `node` user.
 
 The site is served on `dev.analytics.chatterpay.net` and `analytics.chatterpay.net`.
