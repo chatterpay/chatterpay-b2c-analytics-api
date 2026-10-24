@@ -3,8 +3,9 @@ info:
   title: ChatterPay Analytics API
   version: 0.1.0
   description: Private API behind the ChatterPay Analytics site BFF. Cloud Run
-    only admits callers with an IAM identity token of the site service account.
-    Every metric is synthetic and carries dataStatus "mock".
+    only admits callers with an IAM identity token of the site service account,
+    whose audience is the API domain. Every metric is synthetic and carries
+    dataStatus "mock".
 components:
   schemas:
     ApiError:
@@ -54,10 +55,11 @@ paths:
                     type: string
                     enum:
                       - ok
+                      - unavailable
   /readyz:
     get:
       operationId: getReadiness
-      summary: Readiness probe
+      summary: "Readiness probe: the process and the store answer"
       tags:
         - infrastructure
       responses:
@@ -75,6 +77,22 @@ paths:
                     type: string
                     enum:
                       - ok
+                      - unavailable
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - status
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - ok
+                      - unavailable
   /v1/auth/request-code:
     post:
       operationId: requestLoginCode
