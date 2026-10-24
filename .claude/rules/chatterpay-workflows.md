@@ -4,7 +4,7 @@ The three `/chatterpay-*` skills are **manual, explicit** workflows. Do not invo
 
 ## Repositories
 
-- This repo is the private API of ChatterPay Analytics. `origin` → `chatterpay/chatterpay-b2c-analytics-api`. The site and BFF live in `chatterpay/chatterpay-b2c-analytics-site`. Verify both with `git remote -v` before building issue links.
+- This repo is the private API of ChatterPay Analytics. `origin` → `chatterpay/chatterpay-analytics-api`. The site and BFF live in `chatterpay/chatterpay-analytics-site`. Verify both with `git remote -v` before building issue links.
 - Issue numbers belong to one repository: `#8` in the API does not identify `#8` in the site.
 - The repo has no `.doc/development/coding-guidelines.md`. `AGENTS.md` sets the commit format `[type] :gitmoji: message`: one line, English, imperative, at most 80 characters. Types and icons come from the catalog in the reference. Do not invent types or icons.
 
