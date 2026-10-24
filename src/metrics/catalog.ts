@@ -1,11 +1,24 @@
-/** Network ids accepted by the metrics endpoints, besides `all`. */
-export type NetworkId = 'base' | 'cardano';
+/**
+ * Network id: slug of the network name in the B2C `blockchains` collection (`Base Sepolia` →
+ * `base-sepolia`). The set varies per environment, so it is a string validated against the catalog.
+ */
+export type NetworkId = string;
 
 /** Network filter of the metrics endpoints. */
 export type NetworkFilter = NetworkId | 'all';
 
-/** Networks of the dataset, in display order. */
-export const NETWORK_IDS: readonly NetworkId[] = ['base', 'cardano'];
+/** Pattern of a network id; it also rejects `all`, which is the filter for every network. */
+export const NETWORK_ID_PATTERN = '^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$';
+
+/** Family of a network, which selects the synthetic activity template. */
+export type NetworkFamily = 'evm' | 'cardano';
+
+/** Network of the catalog, as read from the B2C `blockchains` collection. */
+export interface NetworkDefinition {
+  id: NetworkId;
+  label: string;
+  family: NetworkFamily;
+}
 
 /** Version of the synthetic dataset; changing the generator requires a new value. */
 export const DATASET_VERSION = 'mock-v1';
@@ -23,6 +36,7 @@ export interface AssetProfile {
 export interface NetworkProfile {
   id: NetworkId;
   label: string;
+  family: NetworkFamily;
   assets: readonly AssetProfile[];
   newUsersPerDay: number;
   activeUsersPerDay: number;
@@ -35,12 +49,12 @@ export interface NetworkProfile {
   swapFeeBps: number;
 }
 
-// Labels and assets mirror the ChatterPay development networks; every amount is synthetic.
+type ActivityTemplate = Omit<NetworkProfile, 'id' | 'label' | 'family'>;
+
+// Assets mirror what ChatterPay carries on each family; every amount is synthetic.
 // Cardano has no swaps: ChatterPay carries ADA and USDCx transfers there.
-const PROFILES: Readonly<Record<NetworkId, NetworkProfile>> = {
-  base: {
-    id: 'base',
-    label: 'Base Sepolia',
+const TEMPLATES: Readonly<Record<NetworkFamily, ActivityTemplate>> = {
+  evm: {
     assets: [
       { symbol: 'USDC', weight: 45 },
       { symbol: 'USDT', weight: 30 },
@@ -57,8 +71,6 @@ const PROFILES: Readonly<Record<NetworkId, NetworkProfile>> = {
     swapFeeBps: 100
   },
   cardano: {
-    id: 'cardano',
-    label: 'Cardano Preprod',
     assets: [
       { symbol: 'ADA', weight: 70 },
       { symbol: 'USDCx', weight: 30 }
@@ -74,14 +86,103 @@ const PROFILES: Readonly<Record<NetworkId, NetworkProfile>> = {
   }
 };
 
+/** Catalog used until the B2C networks are loaded, and by tests and local runs without Mongo. */
+export const DEFAULT_NETWORKS: readonly NetworkDefinition[] = [
+  { id: 'base-sepolia', label: 'Base Sepolia', family: 'evm' },
+  { id: 'cardano-preprod', label: 'Cardano Preprod', family: 'cardano' }
+];
+
+/**
+ * Scale of the user counts of a network, in [0.5, 1.0], derived from its id so two networks of the
+ * same family do not show identical activity and a network keeps its scale across restarts.
+ */
+function scaleOf(id: NetworkId): number {
+  let hash = 0;
+  for (const char of id) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return 0.5 + (hash % 501) / 1000;
+}
+
+function profileOf(definition: NetworkDefinition, position: number): NetworkProfile {
+  const template = TEMPLATES[definition.family];
+  // The first network of each family keeps the template volume; the following ones are scaled.
+  const scale = position === 0 ? 1 : scaleOf(definition.id);
+  return {
+    ...template,
+    id: definition.id,
+    label: definition.label,
+    family: definition.family,
+    newUsersPerDay: Math.max(1, Math.round(template.newUsersPerDay * scale)),
+    activeUsersPerDay: Math.max(1, Math.round(template.activeUsersPerDay * scale))
+  };
+}
+
+let profiles: ReadonlyMap<NetworkId, NetworkProfile> = new Map();
+let networkIds: readonly NetworkId[] = [];
+
+/**
+ * Replaces the network catalog. Ids must be unique and match {@link NETWORK_ID_PATTERN}.
+ *
+ * @param definitions - Networks in display order; at least one.
+ * @throws {Error} When the list is empty, an id is invalid or two networks share an id.
+ */
+export function setNetworks(definitions: readonly NetworkDefinition[]): void {
+  if (definitions.length === 0) {
+    throw new Error('The network catalog needs at least one network');
+  }
+  const pattern = new RegExp(NETWORK_ID_PATTERN);
+  const next = new Map<NetworkId, NetworkProfile>();
+  const perFamily = new Map<NetworkFamily, number>();
+  for (const definition of definitions) {
+    if (!pattern.test(definition.id) || next.has(definition.id)) {
+      throw new Error(`Invalid or duplicated network id: ${definition.id}`);
+    }
+    const position = perFamily.get(definition.family) ?? 0;
+    perFamily.set(definition.family, position + 1);
+    next.set(definition.id, profileOf(definition, position));
+  }
+  profiles = next;
+  networkIds = definitions.map((definition) => definition.id);
+}
+
+setNetworks(DEFAULT_NETWORKS);
+
+/**
+ * Networks of the catalog, in display order.
+ *
+ * @returns Id, label and family of each network.
+ */
+export function listNetworks(): NetworkDefinition[] {
+  return networkIds.map((id) => {
+    const { label, family } = networkProfile(id);
+    return { id, label, family };
+  });
+}
+
+/**
+ * Tells whether a network filter names `all` or a network of the catalog.
+ *
+ * @param filter - Value of the `network` query parameter.
+ * @returns `true` when the metrics endpoints can serve it.
+ */
+export function isKnownNetwork(filter: string): filter is NetworkFilter {
+  return filter === 'all' || profiles.has(filter);
+}
+
 /**
  * Returns the synthetic profile of a network.
  *
- * @param network - Network id.
+ * @param network - Network id of the catalog.
  * @returns The profile used by the generator.
+ * @throws {Error} When the id is not in the catalog.
  */
 export function networkProfile(network: NetworkId): NetworkProfile {
-  return PROFILES[network];
+  const profile = profiles.get(network);
+  if (profile === undefined) {
+    throw new Error(`Unknown network: ${network}`);
+  }
+  return profile;
 }
 
 /**
@@ -91,5 +192,5 @@ export function networkProfile(network: NetworkId): NetworkProfile {
  * @returns The covered networks, in display order.
  */
 export function networksFor(filter: NetworkFilter): readonly NetworkId[] {
-  return filter === 'all' ? NETWORK_IDS : [filter];
+  return filter === 'all' ? networkIds : [filter];
 }
