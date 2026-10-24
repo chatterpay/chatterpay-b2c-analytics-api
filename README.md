@@ -9,7 +9,8 @@ In V0 every metric is synthetic: responses carry `dataStatus: "mock"` and the si
 - Node.js 22.12+ or 24 (the container runs 24), TypeScript strict, ES modules.
 - Fastify 5 with JSON Schema validation and `@fastify/helmet`.
 - Biome for lint and format, Vitest for tests, Yarn 1 with a frozen lockfile.
-- MongoDB (analytics-only database) for sessions, invites, login attempts and audit, added in the persistence phase.
+- `jose` for the session JWTs (EdDSA, Ed25519).
+- Persistence behind a store interface (`src/store/types.ts`). The in-memory implementation is the only one available; a MongoDB implementation (analytics-only database) follows.
 
 ## Local development
 
@@ -18,7 +19,7 @@ yarn install --frozen-lockfile
 yarn dev
 ```
 
-The server listens on `http://127.0.0.1:4001`. `yarn dev` loads `.env` when it exists; every variable has a default, see `.env.example` for the names.
+The server listens on `http://127.0.0.1:4001`. `yarn dev` loads `.env` when it exists; outside production every variable has a default or is optional, see `.env.example` for the names and [Configuration](#configuration) for the rules.
 
 | Script | Purpose |
 |---|---|
@@ -42,10 +43,59 @@ The contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml) (OpenAPI 3.
 | `GET /v1/metrics/overview?network&range` | admin, viewer | Volume, transactions, fees, active and new users; series and network breakdown |
 | `GET /v1/metrics/users?network&granularity` | admin, viewer | Daily/monthly/yearly active users, new and total users, retention cohorts |
 | `GET /v1/metrics/revenue?network&range` | admin, viewer | Transfer and swap fees, volume, network and asset breakdowns |
+| `POST /v1/auth/request-code` | public (BFF) | Opens a login challenge for an email; 202 `{ challengeId, expiresAt }` |
+| `POST /v1/auth/verify-code` | public (BFF) | Exchanges challenge, email and access code for `{ token, expiresAt, user }` |
+| `GET /v1/auth/me` | admin, viewer | Member and session expiry behind the bearer token |
+| `POST /v1/auth/logout` | admin, viewer | Revokes the session; 204 |
+| `GET /v1/team/members` | admin | Active members sorted by email |
+| `PATCH /v1/team/members/:id` | admin | Changes the role `{ role }`; 409 when no active admin would remain |
+| `DELETE /v1/team/members/:id` | admin | Removes the member and revokes its sessions; 204, 409 when no active admin would remain |
+| `GET /v1/team/invites` | admin | Invites, newest first |
+| `POST /v1/team/invites` | admin | Creates an invite `{ email, role, mutationId }`; 201, idempotent by `mutationId`, 409 for members and pending invites |
+| `POST /v1/team/invites/:id/resend` | admin | Simulates a new delivery of a pending invite; 409 when not pending |
+| `POST /v1/team/invites/:id/revoke` | admin | Revokes a pending invite; 409 when not pending |
+| `GET /v1/team/activity?limit` | admin | Login and team events, newest first; `limit` 1-100, default 50 |
 
-Every error response has the shape `{ code, message, requestId }`. The `x-request-id` response header echoes a valid incoming id (8-64 characters, letters, digits and dashes) or a generated UUID.
+Every error response has the shape `{ code, message, requestId }`. The `x-request-id` response header echoes a valid incoming id (8-64 characters, letters, digits and dashes) or a generated UUID. Auth, team and metrics responses carry `Cache-Control: private, no-store`. Request bodies are JSON only; unknown body or query properties answer 400 and path ids must be UUIDs.
 
-Until the login flow exists, the metrics routes answer 401 to every request: the default authenticator admits nobody. Tests inject their own authenticator through `buildApp`.
+## Authentication
+
+1. The BFF calls `request-code` with the email and forwards the browser IP in `x-client-ip` (used only when it is an IPv4 or IPv6 literal; otherwise the socket address applies). A challenge is created for every email, members or not, so the answer reveals nothing. No email is sent and no code is generated: the code is the shared `DEMO_ACCESS_CODE`.
+2. The BFF calls `verify-code` with the challenge id, the email and the code. Any failure answers the same 401 `Invalid or expired code`: unknown, expired or consumed challenge, email different from the challenge, wrong code, or an email that is neither an active member nor holder of a pending invite. A challenge admits 5 attempts. The code is compared in constant time (HMAC-SHA256 with a per-process key, then `timingSafeEqual`). Without `DEMO_ACCESS_CODE` the route answers 503.
+3. On success the challenge is consumed. An email without an active member but with a pending invite becomes a member with the invite role and the invite turns `accepted`. The API stores a session (`jti`, expiry `SESSION_TTL_MINUTES`) and returns a JWT signed with EdDSA, header `kid`, claims `iss`, `aud`, `sub` (user id), `jti`, `role`, `iat`, `exp`.
+4. Protected routes take `Authorization: Bearer <jwt>`. The token is verified with the public key (EdDSA only), issuer and audience; then the session must exist, be neither revoked nor expired, and belong to an active member. The role applied is the current role in the store, not the `role` claim, so role changes and removals apply to the next request.
+
+| Limit | Scope | Window | Answer |
+|---|---|---|---|
+| 5 `request-code` | normalized email | 15 min | 429 `RATE_LIMITED` with `Retry-After` |
+| 20 `request-code` | client IP | 15 min | 429 with `Retry-After` |
+| 30 `verify-code` | client IP | 15 min | 429 with `Retry-After` |
+| 5 attempts | challenge | challenge lifetime | 401, the challenge stops accepting codes |
+
+Team rules: invites last 7 days and are reported `expired` afterwards; delivery is simulated (status `simulated`, `lastSentAt`, `resendCount`), no email is sent. Role changes and removals never leave the team without an active admin. The activity log records `login`, `login_failed` (only for emails of active members), `logout`, `invite_created`, `invite_resent`, `invite_revoked`, `invite_accepted`, `role_changed` and `member_removed`; it never holds codes or tokens.
+
+## Configuration
+
+`loadEnv` validates the environment at startup and lists invalid variables by name only. Empty values count as unset.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `NODE_ENV` | `development` | `development`, `test` or `production` |
+| `HOST` / `PORT` | `127.0.0.1` / `4001` | The container sets `0.0.0.0` / `8080` |
+| `LOG_LEVEL` | `info` | |
+| `BODY_LIMIT_BYTES` / `REQUEST_TIMEOUT_MS` | `16384` / `10000` | |
+| `DEMO_ACCESS_CODE` | unset | At least 12 characters. Required in production; unset answers 503 on `verify-code` |
+| `JWT_PRIVATE_KEY` | unset | PEM PKCS8 Ed25519, `\n` escapes allowed. Required in production; unset generates an ephemeral key at startup (warning logged, sessions end on restart) |
+| `JWT_KEY_ID` | `dev` | `kid` header |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | `chatterpay-analytics-api` / `chatterpay-analytics-site` | |
+| `SESSION_TTL_MINUTES` | `120` | 5-1440 |
+| `CHALLENGE_TTL_MINUTES` | `10` | 1-60 |
+| `BOOTSTRAP_ADMIN_EMAILS` / `BOOTSTRAP_VIEWER_EMAILS` | empty | Comma-separated; created at startup when no active member has the email |
+| `ALLOW_IN_MEMORY_STORE` | `false` | Production refuses to start with the in-memory store unless `true` |
+
+## In-memory store
+
+`buildApp` takes the store through its options and defaults to the in-memory store, which logs a warning at startup. Its state lives in the process: members created by invites, sessions, invites and activity are lost on restart, and two instances do not share them, so it fits local runs, tests and a single-instance demo (Cloud Run with at most one instance and `ALLOW_IN_MEMORY_STORE=true`). The bootstrap variables recreate the initial members on every start. Invariant checks (last active admin, pending invites, challenge attempts) run atomically inside each store method.
 
 ## Mock dataset
 
@@ -58,9 +108,19 @@ Until the login flow exists, the metrics routes answer 401 to every request: the
 
 ## Deployment
 
-- Cloud Run service per environment (`chatterpay-analytics-dev-api`, `chatterpay-analytics-api`) that requires authenticated invocations: only the service account of the site has `roles/run.invoker`.
-- No public custom domain. The BFF calls the `*.run.app` URL with a Google-signed ID token whose audience is that URL.
+`cloudbuild.yaml` writes the trigger substitutions to `.env` (`CreateEnv`), turns the names declared as `ARG` in the `Dockerfile` into build arguments, builds and pushes the image, and deploys it to Cloud Run. The same file serves both environments.
+
+| Substitution | Value |
+|---|---|
+| `_SERVICE_NAME` | `chatterpay-analytics-api-develop` or `chatterpay-analytics-api-main` |
+| `_DEPLOY_REGION` / `_AR_HOSTNAME` / `_TRIGGER_ID` | Region, Artifact Registry host, trigger id |
+| `_LOG_LEVEL`, `_BODY_LIMIT_BYTES`, `_REQUEST_TIMEOUT_MS`, `_JWT_KEY_ID`, `_JWT_ISSUER`, `_JWT_AUDIENCE`, `_SESSION_TTL_MINUTES`, `_CHALLENGE_TTL_MINUTES`, `_ALLOW_IN_MEMORY_STORE` | Non-secret settings; empty applies the default |
+
+- A new non-secret variable is added to `CreateEnv` and as `ARG`/`ENV` in the `Dockerfile`.
+- Secrets never enter the image: `DEMO_ACCESS_CODE` and `JWT_PRIVATE_KEY` come from Secret Manager through `secretKeyRef` in the Cloud Run service YAML. `BOOTSTRAP_ADMIN_EMAILS` and `BOOTSTRAP_VIEWER_EMAILS` are set there as plain variables. The `Build` step skips these names if they are ever declared as `ARG`.
+- The service name selects the VPC: `*-develop` deploys on `chatterpay-dev-vpc` / `chatterpay-dev-run`, `*-main` on `chatterpay-main-vpc` / `chatterpay-main-run`; any other name stops the build.
+- The deploy uses `--no-allow-unauthenticated`: only the service account of the site has `roles/run.invoker`. There is no public custom domain; the BFF calls the `*.run.app` URL with a Google-signed ID token whose audience is that URL.
+- The deploy uses `--max-instances 1` while the in-memory store is in use, together with `ALLOW_IN_MEMORY_STORE=true`.
 - The container listens on `0.0.0.0:8080` as the non-root `node` user.
-- Secrets come from Secret Manager at runtime; nothing is passed as build argument.
 
 Public domains belong to the site: `dev.analytics.chatterpay.net` and `analytics.chatterpay.net`.
