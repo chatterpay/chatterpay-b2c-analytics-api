@@ -2,7 +2,7 @@ import { buildApp } from './app.js';
 import { loadEnv } from './config/env.js';
 import { listNetworks, setNetworks } from './metrics/catalog.js';
 import { resetFactsCaches } from './metrics/facts.js';
-import { B2cNetworkSource } from './store/b2c-networks.js';
+import { B2cNetworkSource, databaseFromUri } from './store/b2c-networks.js';
 import { MemoryStore } from './store/memory-store.js';
 import { MongoStore } from './store/mongo-store.js';
 import type { Store } from './store/types.js';
@@ -29,7 +29,10 @@ async function main(): Promise<void> {
   const networks =
     b2cUri === null
       ? null
-      : await B2cNetworkSource.connect({ uri: b2cUri, dbName: env.B2C_MONGO_DB_NAME });
+      : await B2cNetworkSource.connect({
+          uri: b2cUri,
+          dbName: databaseFromUri(b2cUri) ?? env.B2C_MONGO_DB_NAME
+        });
   if (networks !== null) {
     setNetworks(await networks.load());
   }
