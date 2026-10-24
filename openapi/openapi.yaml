@@ -1445,7 +1445,7 @@ paths:
               - daily
               - monthly
               - yearly
-            default: daily
+            default: monthly
           in: query
           name: granularity
           required: false
