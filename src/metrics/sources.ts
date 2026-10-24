@@ -1,4 +1,4 @@
-import type { DayHour, TimeWindow } from './calendar.js';
+import { addMonths, type DayHour, dayWindow, type TimeWindow } from './calendar.js';
 import { DATASET_VERSION, type NetworkId } from './catalog.js';
 import {
   activeUsersInWindow,
@@ -33,15 +33,61 @@ export interface MetricsSource {
     cohortSize: number,
     months: number
   ): number[];
+  /**
+   * Distinct users active on any of `networks` inside a window. A person active on several of them
+   * counts once, so the result can be lower than the sum of {@link MetricsSource.activeUsers}.
+   */
+  activeUsersAcross(networks: readonly NetworkId[], window: TimeWindow): number;
+  /** Distinct users of any of `networks` that joined inside a window, each counted once. */
+  newUsersAcross(networks: readonly NetworkId[], window: TimeWindow): number;
+  /** Distinct users of any of `networks` that joined through `point`, inclusive, each once. */
+  totalUsersAcross(networks: readonly NetworkId[], point: DayHour): number;
+  /**
+   * Monthly cohort over `networks`: distinct users that joined in the month starting on
+   * `cohortStartDay`, and how many of them were active on any of the networks in each of the
+   * `months` following months.
+   */
+  cohortAcross(
+    networks: readonly NetworkId[],
+    cohortStartDay: number,
+    months: number
+  ): { size: number; retained: number[] };
 }
 
-/** Synthetic dataset of `facts.ts`. */
+/** Users that joined a network inside a window, per the synthetic model. */
+function mockNewUsers(network: NetworkId, window: TimeWindow): number {
+  return factsInWindow(network, window).newUsers;
+}
+
+/**
+ * Synthetic dataset of `facts.ts`. It has no user identities: each network is modelled as its own
+ * population, so the totals over several networks are the sums of the networks.
+ */
 export const MOCK_SOURCE: MetricsSource = {
   kind: 'mock',
   facts: factsInWindow,
   activeUsers: activeUsersInWindow,
   totalUsersAt,
-  retained: retainedUsers
+  retained: retainedUsers,
+  activeUsersAcross: (networks, window) =>
+    networks.reduce((sum, id) => sum + activeUsersInWindow(id, window), 0),
+  newUsersAcross: (networks, window) =>
+    networks.reduce((sum, id) => sum + mockNewUsers(id, window), 0),
+  totalUsersAcross: (networks, point) =>
+    networks.reduce((sum, id) => sum + totalUsersAt(id, point), 0),
+  cohortAcross: (networks, cohortStartDay, months) => {
+    const cohortWindow = dayWindow(cohortStartDay, addMonths(cohortStartDay, 1) - 1);
+    let size = 0;
+    const retained = new Array<number>(months).fill(0);
+    for (const id of networks) {
+      const networkSize = mockNewUsers(id, cohortWindow);
+      size += networkSize;
+      retainedUsers(id, cohortStartDay, networkSize, months).forEach((value, index) => {
+        retained[index] = (retained[index] ?? 0) + value;
+      });
+    }
+    return { size, retained };
+  }
 };
 
 /**
