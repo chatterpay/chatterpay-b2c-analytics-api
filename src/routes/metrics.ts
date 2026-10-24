@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { requireRoles } from '../auth/principal.js';
 import { ApiError } from '../errors/api-error.js';
 import {
@@ -20,6 +20,11 @@ export interface MetricsRoutesOptions {
 }
 
 const RANGE_ENUM = ['today', 'week', 'month', 'year', 'ytd', 'all'];
+
+function withStatus<T extends { meta: { dataStatus: string } }>(reply: FastifyReply, body: T): T {
+  reply.header('x-data-status', body.meta.dataStatus);
+  return body;
+}
 const GRANULARITY_ENUM = ['daily', 'monthly', 'yearly'];
 
 const decimal = { type: 'string', pattern: '^-?\\d+\\.\\d+$' } as const;
@@ -48,7 +53,8 @@ const moneyMetric = object({
 function meta(extra: Record<string, unknown>): Record<string, unknown> {
   return object({
     datasetVersion: { type: 'string' },
-    dataStatus: { type: 'string', enum: ['mock'] },
+    dataStatus: { type: 'string', enum: ['mock', 'mixed', 'live'] },
+    lastUpdatedAt: { anyOf: [instant, { type: 'null' }] },
     generatedAt: instant,
     currency: { type: 'string', enum: ['USD'] },
     network: networkFilter,
@@ -188,11 +194,13 @@ const revenueResponse = object({
 });
 
 /**
- * Registers the mock metrics endpoints under the plugin prefix.
+ * Registers the metrics endpoints under the plugin prefix.
  *
- * Every route requires an `admin` or `viewer` session, answers `Cache-Control: private, no-store`
- * and `X-Data-Status: mock`. Unknown query parameters, values outside the enums and networks
- * outside the catalog answer 400.
+ * Every route requires an `admin` or `viewer` session and answers `Cache-Control: private,
+ * no-store`. Live values come from the aggregates of the analytics database, loaded in memory;
+ * no handler reads the B2C database or a provider. `X-Data-Status` repeats `meta.dataStatus`
+ * (`mock`, `mixed` or `live`); `/networks`, which has no meta, answers `mock`. Unknown query
+ * parameters, values outside the enums and networks outside the catalog answer 400.
  *
  * @param app - Fastify instance (encapsulated by the prefix).
  * @param options - Clock used to anchor the dataset.
@@ -204,7 +212,9 @@ export async function metricsRoutes(
   app.addHook('onRequest', requireRoles(['admin', 'viewer']));
   app.addHook('onSend', async (_request, reply) => {
     reply.header('cache-control', 'private, no-store');
-    reply.header('x-data-status', 'mock');
+    if (!reply.hasHeader('x-data-status')) {
+      reply.header('x-data-status', 'mock');
+    }
   });
   app.addHook<{ Querystring: { network?: string } }>('preHandler', async (request) => {
     const requested = request.query.network;
@@ -237,7 +247,8 @@ export async function metricsRoutes(
         response: { 200: overviewResponse, ...errorResponses }
       }
     },
-    async (request) => buildOverview(request.query.network, request.query.range, options.clock())
+    async (request, reply) =>
+      withStatus(reply, buildOverview(request.query.network, request.query.range, options.clock()))
   );
 
   app.get<{ Querystring: { network: NetworkFilter; granularity: UsersGranularity } }>(
@@ -251,7 +262,11 @@ export async function metricsRoutes(
         response: { 200: usersResponse, ...errorResponses }
       }
     },
-    async (request) => buildUsers(request.query.network, request.query.granularity, options.clock())
+    async (request, reply) =>
+      withStatus(
+        reply,
+        buildUsers(request.query.network, request.query.granularity, options.clock())
+      )
   );
 
   app.get<{ Querystring: { network: NetworkFilter; range: MetricsRange } }>(
@@ -259,12 +274,13 @@ export async function metricsRoutes(
     {
       schema: {
         operationId: 'getRevenueMetrics',
-        summary: 'Revenue dataset: synthetic fees and volume by network and asset',
+        summary: 'Revenue dataset: fees and volume by network and asset',
         tags: ['metrics'],
         querystring: rangeQuery,
         response: { 200: revenueResponse, ...errorResponses }
       }
     },
-    async (request) => buildRevenue(request.query.network, request.query.range, options.clock())
+    async (request, reply) =>
+      withStatus(reply, buildRevenue(request.query.network, request.query.range, options.clock()))
   );
 }
