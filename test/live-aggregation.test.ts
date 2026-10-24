@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IngestedUser } from '../src/ingest/types.js';
 import { dayNumberFromIso, dayWindow } from '../src/metrics/calendar.js';
 import { aggregateActivity, liveSourceFrom } from '../src/metrics/live.js';
+import { buildOverview } from '../src/metrics/overview.js';
 import { impliedSwapPrices, PriceBook } from '../src/metrics/pricing.js';
+import { setLiveSource } from '../src/metrics/sources.js';
+import { buildUsers } from '../src/metrics/users.js';
 import { CHAINS, TOKENS, transaction } from './ingest-fakes.js';
 
 const CHAIN_MAP = new Map(CHAINS.map((chain) => [chain.chainId, chain.network]));
@@ -210,5 +213,111 @@ describe('aggregateActivity', () => {
 
   it('gives the same aggregates for the same input', () => {
     expect(build().aggregates).toEqual(build().aggregates);
+  });
+});
+
+describe('users across networks', () => {
+  const NETWORKS = ['base-sepolia', 'cardano-preprod'] as const;
+  // u1 also sends on Cardano the same day it sends on Base.
+  const CARDANO_TRANSFER = transaction(11, {
+    chainId: '900000000001',
+    from: 'addr_test1u1',
+    token: 'USDCx',
+    date: new Date('2026-10-12T14:00:00.000Z')
+  });
+
+  function source() {
+    return liveSourceFrom(
+      aggregateActivity({
+        transactions: [...ROWS, CARDANO_TRANSFER],
+        users: USERS,
+        tokens: TOKENS,
+        chains: CHAIN_MAP,
+        prices: []
+      }).aggregates
+    );
+  }
+
+  it('counts a user active on two networks once in the union and once on each network', () => {
+    const live = source();
+    const day = dayWindow(DAY, DAY);
+
+    expect(live.activeUsers('base-sepolia', day)).toBe(2);
+    expect(live.activeUsers('cardano-preprod', day)).toBe(1);
+    expect(live.activeUsersAcross(NETWORKS, day)).toBe(2);
+    expect(live.activeUsersAcross(['cardano-preprod'], day)).toBe(1);
+  });
+
+  it('counts a user with wallets on two networks once in new and total users', () => {
+    const live = source();
+    const september = dayWindow(dayNumberFromIso('2026-09-01'), dayNumberFromIso('2026-09-30'));
+    const nineOClock = { day: DAY, hour: 9 };
+
+    expect(live.facts('base-sepolia', september).newUsers).toBe(1);
+    expect(live.facts('cardano-preprod', september).newUsers).toBe(1);
+    expect(live.newUsersAcross(NETWORKS, september)).toBe(1);
+    expect(live.totalUsersAt('base-sepolia', nineOClock)).toBe(3);
+    expect(live.totalUsersAt('cardano-preprod', nineOClock)).toBe(1);
+    expect(live.totalUsersAcross(NETWORKS, nineOClock)).toBe(3);
+    expect(live.totalUsersAcross(NETWORKS, { day: DAY, hour: 8 })).toBe(2);
+  });
+
+  it('builds a cohort of distinct users retained by activity on any network', () => {
+    const live = source();
+    const september = dayNumberFromIso('2026-09-01');
+
+    expect(live.cohortAcross(NETWORKS, september, 2)).toEqual({ size: 1, retained: [1, 0] });
+    expect(live.cohortAcross(['cardano-preprod'], september, 1)).toEqual({
+      size: 1,
+      retained: [1]
+    });
+  });
+
+  describe('responses', () => {
+    const NOW = new Date('2026-10-13T12:00:00.000Z');
+
+    beforeAll(() => {
+      setLiveSource(source(), NOW);
+    });
+
+    afterAll(() => {
+      setLiveSource(null);
+    });
+
+    it('Users tiles and series count people once while byNetwork counts per network', () => {
+      const users = buildUsers('all', 'monthly', NOW);
+
+      expect(users.tiles.monthlyActiveUsers.value).toBe(3);
+      expect(users.byNetwork.reduce((sum, item) => sum + item.activeUsers, 0)).toBe(4);
+      expect(users.tiles.totalUsers.value).toBe(3);
+      expect(users.byNetwork.reduce((sum, item) => sum + item.totalUsers, 0)).toBe(4);
+      const october = users.series.find((point) => point.start === '2026-10-01T00:00:00.000Z');
+      expect(october?.activeUsers).toBe(3);
+      expect(october?.byNetwork.reduce((sum, item) => sum + item.activeUsers, 0)).toBe(4);
+      const september = users.series.find((point) => point.start === '2026-09-01T00:00:00.000Z');
+      expect(september?.newUsers).toBe(1);
+      expect(september?.byNetwork.reduce((sum, item) => sum + item.newUsers, 0)).toBe(2);
+      expect(users.retention.find((cohort) => cohort.cohort === '2026-09')).toEqual({
+        cohort: '2026-09',
+        size: 1,
+        retained: []
+      });
+    });
+
+    it('Overview user tiles count people once', () => {
+      const overview = buildOverview('all', 'month', NOW);
+
+      expect(overview.tiles.activeUsers.value).toBe(3);
+      expect(overview.byNetwork.reduce((sum, item) => sum + item.activeUsers, 0)).toBe(4);
+      expect(overview.tiles.newUsers.value).toBe(2);
+      expect(overview.byNetwork.reduce((sum, item) => sum + item.newUsers, 0)).toBe(3);
+    });
+
+    it('a single network keeps its own counts', () => {
+      const users = buildUsers('cardano-preprod', 'monthly', NOW);
+
+      expect(users.tiles.monthlyActiveUsers.value).toBe(1);
+      expect(users.tiles.totalUsers.value).toBe(1);
+    });
   });
 });
