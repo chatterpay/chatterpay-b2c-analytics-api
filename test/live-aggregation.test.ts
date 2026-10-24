@@ -1,0 +1,214 @@
+import { describe, expect, it } from 'vitest';
+import type { IngestedUser } from '../src/ingest/types.js';
+import { dayNumberFromIso, dayWindow } from '../src/metrics/calendar.js';
+import { aggregateActivity, liveSourceFrom } from '../src/metrics/live.js';
+import { impliedSwapPrices, PriceBook } from '../src/metrics/pricing.js';
+import { CHAINS, TOKENS, transaction } from './ingest-fakes.js';
+
+const CHAIN_MAP = new Map(CHAINS.map((chain) => [chain.chainId, chain.network]));
+const DAY = dayNumberFromIso('2026-10-12');
+const ROUTER = '0xRouter';
+
+const USERS: IngestedUser[] = [
+  {
+    id: 'u1',
+    createdAt: new Date('2026-09-15T08:30:00.000Z'),
+    wallets: [
+      { chainId: '84532', address: '0xuser1' },
+      { chainId: '900000000001', address: 'addr_test1u1' }
+    ]
+  },
+  {
+    id: 'u2',
+    createdAt: new Date('2026-10-12T09:10:00.000Z'),
+    wallets: [{ chainId: '84532', address: '0xUser2' }]
+  },
+  { id: 'u3', createdAt: null, wallets: [{ chainId: '84532', address: '0xUser3' }] }
+];
+
+const ROWS = [
+  // Transfer with the symbol in lower case, as some rows store it.
+  transaction(1, { token: 'usdt', amount: 100, fee: 0.080082 }),
+  // WETH -> USDT swap: two rows with the same hash; the stable leg gives the value.
+  transaction(2, {
+    type: 'swap',
+    hash: '0xswapA',
+    from: '0xUser1',
+    to: ROUTER,
+    token: 'WETH',
+    amount: 0.001,
+    fee: 0.00003,
+    date: new Date('2026-10-12T10:20:00.000Z')
+  }),
+  transaction(3, {
+    type: 'swap',
+    hash: '0xswapA',
+    from: ROUTER,
+    to: '0xUser1',
+    token: 'USDT',
+    amount: 2.5,
+    fee: 0,
+    date: new Date('2026-10-12T10:20:00.020Z')
+  }),
+  // USDC -> WETH swap by another user, an hour later.
+  transaction(4, {
+    type: 'swap',
+    hash: '0xswapB',
+    from: '0xuser2',
+    to: ROUTER,
+    token: 'USDC',
+    amount: 10,
+    fee: 0.08,
+    date: new Date('2026-10-12T11:05:00.000Z')
+  }),
+  transaction(5, {
+    type: 'swap',
+    hash: '0xswapB',
+    from: ROUTER,
+    to: '0xuser2',
+    token: 'WETH',
+    amount: 0.004,
+    fee: 0,
+    date: new Date('2026-10-12T11:05:00.010Z')
+  }),
+  // WETH transfer valued at the price implied by the swaps of the day.
+  transaction(6, {
+    token: 'WETH',
+    amount: 0.002,
+    fee: 0.0001,
+    from: '0xUser2',
+    date: new Date('2026-10-12T12:00:00.000Z')
+  }),
+  // Not counted: failed, deposit, chain outside the catalog.
+  transaction(7, { status: 'failed' }),
+  transaction(8, { type: 'deposit', fee: 0 }),
+  transaction(9, { chainId: '137' }),
+  // Sender that is not a known user still counts as an active address.
+  transaction(10, { from: '0xStranger', amount: 5, date: new Date('2026-10-13T00:30:00.000Z') })
+];
+
+function build() {
+  return aggregateActivity({
+    transactions: ROWS,
+    users: USERS,
+    tokens: TOKENS,
+    chains: CHAIN_MAP,
+    prices: []
+  });
+}
+
+describe('PriceBook', () => {
+  it('prefers provider prices and falls back to the closest earlier, then later, day', () => {
+    const book = new PriceBook([
+      { symbol: 'WETH', day: '2026-10-10', usd: 2000, source: 'swap' },
+      { symbol: 'WETH', day: '2026-10-10', usd: 2100, source: 'provider' },
+      { symbol: 'WETH', day: '2026-10-20', usd: 3000, source: 'swap' }
+    ]);
+
+    expect(book.usd('WETH', dayNumberFromIso('2026-10-10'))).toBe(2100);
+    expect(book.usd('WETH', dayNumberFromIso('2026-10-15'))).toBe(2100);
+    expect(book.usd('WETH', dayNumberFromIso('2026-10-25'))).toBe(3000);
+    expect(book.usd('WETH', dayNumberFromIso('2026-10-01'))).toBe(2100);
+    expect(book.usd('WBTC', DAY)).toBeNull();
+  });
+
+  it('weights implied prices by volume within a day', () => {
+    expect(
+      impliedSwapPrices([
+        { day: '2026-10-12', symbol: 'WETH', amount: 1, stableAmount: 2000 },
+        { day: '2026-10-12', symbol: 'WETH', amount: 3, stableAmount: 7000 }
+      ])
+    ).toEqual([{ symbol: 'WETH', day: '2026-10-12', usd: 2250, source: 'swap' }]);
+  });
+});
+
+describe('aggregateActivity', () => {
+  it('counts completed transfers and one swap per hash, on catalog chains only', () => {
+    const { stats } = build();
+
+    expect(stats).toEqual({ transfers: 3, swaps: 2, unpriced: 0, outsideCatalog: 1, users: 3 });
+  });
+
+  it('values swaps on the stable leg and transfers with the implied price', () => {
+    const source = liveSourceFrom(build().aggregates);
+    const facts = source.facts('base-sepolia', dayWindow(DAY, DAY));
+
+    expect(facts.transfers).toBe(2);
+    expect(facts.swaps).toBe(2);
+    expect(facts.transferVolume).toEqual({ USDT: 10_000, WETH: 500 });
+    expect(facts.transferFees).toEqual({ USDT: 8, WETH: 25 });
+    // WETH -> USDT: 2.50 USD, fee 0.00003 WETH at 2500 USD; USDC -> WETH: 10 USD, fee 0.08.
+    expect(facts.swapVolume).toEqual({ WETH: 250, USDC: 1000 });
+    expect(facts.swapFees).toEqual({ WETH: 8, USDC: 8 });
+    expect(facts.newUsers).toBe(1);
+  });
+
+  it('cuts windows by hour', () => {
+    const source = liveSourceFrom(build().aggregates);
+    const tenOClock = { start: { day: DAY, hour: 10 }, end: { day: DAY, hour: 10 } };
+
+    expect(source.facts('base-sepolia', tenOClock).transfers).toBe(1);
+    expect(source.facts('base-sepolia', tenOClock).swaps).toBe(1);
+    expect(source.facts('cardano-preprod', tenOClock).transfers).toBe(0);
+  });
+
+  it('counts distinct active users per window', () => {
+    const source = liveSourceFrom(build().aggregates);
+
+    expect(source.activeUsers('base-sepolia', dayWindow(DAY, DAY))).toBe(2);
+    expect(source.activeUsers('base-sepolia', dayWindow(DAY, DAY + 1))).toBe(3);
+    expect(source.activeUsers('cardano-preprod', dayWindow(DAY, DAY + 1))).toBe(0);
+  });
+
+  it('counts total users with undated users from the start', () => {
+    const source = liveSourceFrom(build().aggregates);
+
+    expect(source.totalUsersAt('base-sepolia', { day: DAY, hour: 8 })).toBe(2);
+    expect(source.totalUsersAt('base-sepolia', { day: DAY, hour: 9 })).toBe(3);
+    expect(source.totalUsersAt('cardano-preprod', { day: DAY, hour: 9 })).toBe(1);
+  });
+
+  it('retains a cohort by its activity in the following months', () => {
+    const source = liveSourceFrom(build().aggregates);
+    const september = dayNumberFromIso('2026-09-01');
+
+    expect(source.retained('base-sepolia', september, 1, 2)).toEqual([1, 0]);
+    expect(source.retained('cardano-preprod', september, 1, 1)).toEqual([0]);
+  });
+
+  it('marks operations without any price as unpriced and values them at zero', () => {
+    const { aggregates, stats } = aggregateActivity({
+      transactions: [transaction(1, { token: 'WBTC', amount: 0.001, fee: 0.00001 })],
+      users: USERS,
+      tokens: TOKENS,
+      chains: CHAIN_MAP,
+      prices: []
+    });
+
+    expect(stats.unpriced).toBe(1);
+    expect(aggregates.hourly.find((item) => item.transfers > 0)?.transferVolume).toEqual({
+      WBTC: 0
+    });
+  });
+
+  it('uses provider prices when no swap implies one', () => {
+    const { aggregates } = aggregateActivity({
+      transactions: [transaction(1, { token: 'WBTC', amount: 0.001, fee: 0.00001 })],
+      users: USERS,
+      tokens: TOKENS,
+      chains: CHAIN_MAP,
+      prices: [{ symbol: 'WBTC', day: '2026-10-24', usd: 100_000, source: 'provider' }]
+    });
+
+    expect(aggregates.hourly.find((item) => item.transfers > 0)?.transferVolume).toEqual({
+      WBTC: 10_000
+    });
+    expect(aggregates.hourly.find((item) => item.transfers > 0)?.transferFees).toEqual({
+      WBTC: 100
+    });
+  });
+
+  it('gives the same aggregates for the same input', () => {
+    expect(build().aggregates).toEqual(build().aggregates);
+  });
+});
