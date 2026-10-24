@@ -15,17 +15,17 @@ import {
 } from './calendar.js';
 import {
   DATASET_START_DAY,
-  DATASET_VERSION,
   type NetworkFilter,
   type NetworkId,
   networkProfile,
   networksFor
 } from './catalog.js';
-import { activeUsersInWindow, factsInWindow, retainedUsers, totalUsersAt } from './facts.js';
 import { countMetric } from './format.js';
+import { type MetricGroup, provenanceOf, sourceFor } from './sources.js';
 import type { CountMetric, SeriesBucket, UsersGranularity, UsersResponse } from './types.js';
 
 const RETENTION_COHORTS = 6;
+const USERS_GROUPS: readonly MetricGroup[] = ['activeUsers', 'signups', 'retention'];
 const START_DAY = dayNumberFromIso(DATASET_START_DAY);
 
 interface SeriesPlan {
@@ -74,14 +74,17 @@ function activeMetric(
   days: number
 ): CountMetric {
   const previous = shiftWindow(window, -days);
+  const source = sourceFor('activeUsers');
   return countMetric(
-    networks.reduce((sum, id) => sum + activeUsersInWindow(id, window), 0),
-    networks.reduce((sum, id) => sum + activeUsersInWindow(id, previous), 0)
+    networks.reduce((sum, id) => sum + source.activeUsers(id, window), 0),
+    networks.reduce((sum, id) => sum + source.activeUsers(id, previous), 0)
   );
 }
 
 function retention(networks: readonly NetworkId[], now: DayHour): UsersResponse['retention'] {
   const cohorts: UsersResponse['retention'] = [];
+  const signups = sourceFor('signups');
+  const retention = sourceFor('retention');
   // Only complete months: the most recent cohort is last month, with no later month yet.
   for (let monthsAgo = RETENTION_COHORTS; monthsAgo >= 1; monthsAgo -= 1) {
     const cohortStart = addMonths(now.day, -monthsAgo);
@@ -89,9 +92,9 @@ function retention(networks: readonly NetworkId[], now: DayHour): UsersResponse[
     let size = 0;
     const retained: number[] = new Array<number>(monthsAgo - 1).fill(0);
     for (const id of networks) {
-      const networkSize = factsInWindow(id, cohortWindow).newUsers;
+      const networkSize = signups.facts(id, cohortWindow).newUsers;
       size += networkSize;
-      retainedUsers(id, cohortStart, networkSize, monthsAgo - 1).forEach((value, index) => {
+      retention.retained(id, cohortStart, networkSize, monthsAgo - 1).forEach((value, index) => {
         retained[index] = (retained[index] ?? 0) + value;
       });
     }
@@ -105,7 +108,8 @@ function retention(networks: readonly NetworkId[], now: DayHour): UsersResponse[
  *
  * Tiles compare trailing windows with the same span right before: today against the same hours of
  * yesterday, 30 days, 365 days. The series and the network breakdown follow the granularity.
- * Users are counted per network; a person active on two networks counts once on each.
+ * Users are counted per network; a person active on two networks counts once on each. Each metric
+ * group is live or synthetic as set in `LIVE_METRIC_GROUPS`.
  *
  * @param network - Network filter.
  * @param granularity - Series granularity.
@@ -122,11 +126,12 @@ export function buildUsers(
   const plan = planSeries(granularity, point);
   const last30 = dayWindow(point.day - 29, point.day, point.hour);
   const previous30 = shiftWindow(last30, -30);
+  const active = sourceFor('activeUsers');
+  const signups = sourceFor('signups');
 
   return {
     meta: {
-      datasetVersion: DATASET_VERSION,
-      dataStatus: 'mock',
+      ...provenanceOf(USERS_GROUPS),
       generatedAt: now.toISOString(),
       currency: 'USD',
       network,
@@ -144,19 +149,19 @@ export function buildUsers(
         365
       ),
       newUsers: countMetric(
-        networks.reduce((sum, id) => sum + factsInWindow(id, last30).newUsers, 0),
-        networks.reduce((sum, id) => sum + factsInWindow(id, previous30).newUsers, 0)
+        networks.reduce((sum, id) => sum + signups.facts(id, last30).newUsers, 0),
+        networks.reduce((sum, id) => sum + signups.facts(id, previous30).newUsers, 0)
       ),
       totalUsers: countMetric(
-        networks.reduce((sum, id) => sum + totalUsersAt(id, point), 0),
-        networks.reduce((sum, id) => sum + totalUsersAt(id, previous30.end), 0)
+        networks.reduce((sum, id) => sum + signups.totalUsersAt(id, point), 0),
+        networks.reduce((sum, id) => sum + signups.totalUsersAt(id, previous30.end), 0)
       )
     },
     series: plan.buckets.map((bucket) => {
       const byNetwork = networks.map((id) => ({
         network: id,
-        activeUsers: activeUsersInWindow(id, bucket),
-        newUsers: factsInWindow(id, bucket).newUsers
+        activeUsers: active.activeUsers(id, bucket),
+        newUsers: signups.facts(id, bucket).newUsers
       }));
       return {
         ...periodOf(bucket),
@@ -169,8 +174,8 @@ export function buildUsers(
     byNetwork: networks.map((id) => ({
       network: id,
       label: networkProfile(id).label,
-      activeUsers: activeUsersInWindow(id, plan.current),
-      totalUsers: totalUsersAt(id, point)
+      activeUsers: active.activeUsers(id, plan.current),
+      totalUsers: signups.totalUsersAt(id, point)
     }))
   };
 }
