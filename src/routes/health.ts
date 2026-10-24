@@ -23,15 +23,37 @@ const healthResponseSchema = {
  * @param app - Fastify instance to register the routes on.
  */
 export async function healthRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/healthz', { schema: { response: healthResponseSchema } }, async (_request, reply) => {
-    reply.header('cache-control', 'no-store');
-    const body: HealthBody = { status: 'ok' };
-    return body;
-  });
+  app.get(
+    '/healthz',
+    {
+      schema: {
+        operationId: 'getHealth',
+        summary: 'Liveness probe',
+        tags: ['infrastructure'],
+        response: healthResponseSchema
+      }
+    },
+    async (_request, reply) => {
+      reply.header('cache-control', 'no-store');
+      const body: HealthBody = { status: 'ok' };
+      return body;
+    }
+  );
 
-  app.get('/readyz', { schema: { response: healthResponseSchema } }, async (_request, reply) => {
-    reply.header('cache-control', 'no-store');
-    const body: HealthBody = { status: 'ok' };
-    return body;
-  });
+  app.get(
+    '/readyz',
+    {
+      schema: {
+        operationId: 'getReadiness',
+        summary: 'Readiness probe',
+        tags: ['infrastructure'],
+        response: healthResponseSchema
+      }
+    },
+    async (_request, reply) => {
+      reply.header('cache-control', 'no-store');
+      const body: HealthBody = { status: 'ok' };
+      return body;
+    }
+  );
 }
