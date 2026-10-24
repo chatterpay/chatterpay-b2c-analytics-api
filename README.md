@@ -121,16 +121,15 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 
 ## Deployment
 
-`cloudbuild.yaml` writes the trigger substitutions to `.env` (`CreateEnv`), turns the names declared as `ARG` in the `Dockerfile` into build arguments, builds and pushes the image, and deploys it to Cloud Run. The same file serves both environments.
+`cloudbuild.yaml` builds and pushes the image and deploys it to Cloud Run. The same file serves both environments.
 
 | Substitution | Value |
 |---|---|
 | `_SERVICE_NAME` | `chatterpay-analytics-api-develop` or `chatterpay-analytics-api-main` |
 | `_DEPLOY_REGION` / `_AR_HOSTNAME` / `_TRIGGER_ID` | Region, Artifact Registry host, trigger id |
-| `_LOG_LEVEL`, `_BODY_LIMIT_BYTES`, `_REQUEST_TIMEOUT_MS`, `_JWT_KEY_ID`, `_JWT_ISSUER`, `_JWT_AUDIENCE`, `_SESSION_TTL_MINUTES`, `_CHALLENGE_TTL_MINUTES`, `_MONGO_DB_NAME` | Non-secret settings; empty applies the default |
 
-- A new non-secret variable is added to `CreateEnv` and as `ARG`/`ENV` in the `Dockerfile`.
-- Secrets never enter the image: `DEMO_ACCESS_CODE`, `JWT_PRIVATE_KEY` and `MONGO_URI` come from Secret Manager through `secretKeyRef` in the Cloud Run service YAML. The `Build` step skips these names if they are ever declared as `ARG`.
+- Server variables (`LOG_LEVEL`, `BODY_LIMIT_BYTES`, `REQUEST_TIMEOUT_MS`, `JWT_KEY_ID`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SESSION_TTL_MINUTES`, `CHALLENGE_TTL_MINUTES`, `MONGO_DB_NAME`) are defined in the Cloud Run service YAML. The image only sets `NODE_ENV`, `HOST` and `PORT`; the deploy keeps the variables already defined on the service.
+- Secrets never enter the image: `DEMO_ACCESS_CODE`, `JWT_PRIVATE_KEY` and `MONGO_URI` come from Secret Manager through `secretKeyRef` in the Cloud Run service YAML.
 - The service name selects the VPC: `*-develop` deploys on `chatterpay-dev-vpc` / `chatterpay-dev-run`, `*-main` on `chatterpay-main-vpc` / `chatterpay-main-run`; any other name stops the build.
 - The service sits behind the HTTPS load balancer on `dev.analytics-api.chatterpay.net` and `analytics-api.chatterpay.net`, with ingress `internal-and-cloud-load-balancing`. The deploy uses `--no-allow-unauthenticated`: only the service account of the site has `roles/run.invoker`. The BFF sends a Google-signed ID token whose audience is the API domain, declared on the service as a custom audience (`run.googleapis.com/custom-audiences`).
 - The container listens on `0.0.0.0:8080` as the non-root `node` user.
