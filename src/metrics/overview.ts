@@ -41,9 +41,7 @@ interface NetworkTotals {
   facts: Facts;
   previous: Facts | null;
   activeUsers: number;
-  previousActiveUsers: number | null;
   newUsers: number;
-  previousNewUsers: number | null;
 }
 
 function totalsFor(
@@ -59,9 +57,7 @@ function totalsFor(
     facts: activity.facts(network, current),
     previous: previous === null ? null : activity.facts(network, previous),
     activeUsers: active.activeUsers(network, current),
-    previousActiveUsers: previous === null ? null : active.activeUsers(network, previous),
-    newUsers: signups.facts(network, current).newUsers,
-    previousNewUsers: previous === null ? null : signups.facts(network, previous).newUsers
+    newUsers: signups.facts(network, current).newUsers
   };
 }
 
@@ -85,8 +81,10 @@ function sumOrNull<T>(items: readonly T[], pick: (item: T) => number | null): nu
  * Builds the Overview dataset.
  *
  * Totals, series points and the network breakdown of a metric group come from the same source, so
- * tiles equal the sum of the breakdown and of the series. Each group is live or synthetic as set in
- * `LIVE_METRIC_GROUPS`.
+ * money and transaction tiles equal the sum of the breakdown and of the series. User tiles count a
+ * person once however many of the selected networks they use, while `byNetwork` counts per
+ * network, so its user rows can add up to more than the tile. Each group is live or synthetic as
+ * set in `LIVE_METRIC_GROUPS`.
  *
  * @param network - Network filter.
  * @param range - Time range.
@@ -103,6 +101,8 @@ export function buildOverview(
   const totals = networks.map((id) => totalsFor(id, resolved.current, resolved.previous));
 
   const activity = sourceFor('activity');
+  const active = sourceFor('activeUsers');
+  const signups = sourceFor('signups');
   const series = resolved.buckets.map((bucket) => {
     const byNetwork = networks.map((id) => {
       const facts = activity.facts(id, bucket);
@@ -142,12 +142,12 @@ export function buildOverview(
         sumOrNull(totals, (t) => (t.previous === null ? null : feesCents(t.previous)))
       ),
       activeUsers: countMetric(
-        sum(totals, (t) => t.activeUsers),
-        sumOrNull(totals, (t) => t.previousActiveUsers)
+        active.activeUsersAcross(networks, resolved.current),
+        resolved.previous === null ? null : active.activeUsersAcross(networks, resolved.previous)
       ),
       newUsers: countMetric(
-        sum(totals, (t) => t.newUsers),
-        sumOrNull(totals, (t) => t.previousNewUsers)
+        signups.newUsersAcross(networks, resolved.current),
+        resolved.previous === null ? null : signups.newUsersAcross(networks, resolved.previous)
       )
     },
     series,
