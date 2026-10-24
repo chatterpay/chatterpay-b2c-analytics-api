@@ -9,6 +9,7 @@ import type { AppEnv } from './config/env.js';
 import { registerErrorHandling } from './plugins/error-handler.js';
 import { authRoutes } from './routes/auth.js';
 import { healthRoutes } from './routes/health.js';
+import { type IngestionHandle, ingestRoutes } from './routes/ingest.js';
 import { metricsRoutes } from './routes/metrics.js';
 import { registerSharedSchemas } from './routes/schemas.js';
 import { teamRoutes } from './routes/team.js';
@@ -25,6 +26,8 @@ export interface AppOptions {
   clock?: () => Date;
   /** Persistence; a new in-memory store by default, refused in production. */
   store?: Store;
+  /** Ingestion behind `POST /v1/internal/ingest`; `null` by default, which answers 503. */
+  ingestion?: IngestionHandle | null;
 }
 
 /**
@@ -90,7 +93,7 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
         title: 'ChatterPay Analytics API',
         version: '0.1.0',
         description:
-          'Private API behind the ChatterPay Analytics site BFF. Cloud Run only admits callers with an IAM identity token of the site service account, whose audience is the API domain. Every metric is synthetic and carries dataStatus "mock".'
+          'Private API behind the ChatterPay Analytics site BFF. Cloud Run only admits callers with an IAM identity token of the site or the scheduler service account, whose audience is the API domain. Metrics come from the aggregates of the analytics database, which the scheduler refreshes through the ingestion endpoint; meta.dataStatus tells live, mixed and mock values apart.'
       },
       servers: [{ url: 'http://127.0.0.1:4001', description: 'Local development' }]
     },
@@ -124,6 +127,10 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
   await app.register(authRoutes, { prefix: '/v1/auth', env, store, keys, clock });
   await app.register(teamRoutes, { prefix: '/v1/team', store, clock });
   await app.register(metricsRoutes, { prefix: '/v1/metrics', clock });
+  await app.register(ingestRoutes, {
+    prefix: '/v1/internal',
+    ingestion: options.ingestion ?? null
+  });
 
   return app;
 }
