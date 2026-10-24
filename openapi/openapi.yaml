@@ -3,9 +3,11 @@ info:
   title: ChatterPay Analytics API
   version: 0.1.0
   description: Private API behind the ChatterPay Analytics site BFF. Cloud Run
-    only admits callers with an IAM identity token of the site service account,
-    whose audience is the API domain. Every metric is synthetic and carries
-    dataStatus "mock".
+    only admits callers with an IAM identity token of the site or the scheduler
+    service account, whose audience is the API domain. Metrics come from the
+    aggregates of the analytics database, which the scheduler refreshes through
+    the ingestion endpoint; meta.dataStatus tells live, mixed and mock values
+    apart.
 components:
   schemas:
     ApiError:
@@ -1126,6 +1128,7 @@ paths:
                     required:
                       - datasetVersion
                       - dataStatus
+                      - lastUpdatedAt
                       - generatedAt
                       - currency
                       - network
@@ -1140,6 +1143,13 @@ paths:
                         type: string
                         enum:
                           - mock
+                          - mixed
+                          - live
+                      lastUpdatedAt:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
                       generatedAt:
                         type: string
                         format: date-time
@@ -1460,6 +1470,7 @@ paths:
                     required:
                       - datasetVersion
                       - dataStatus
+                      - lastUpdatedAt
                       - generatedAt
                       - currency
                       - network
@@ -1474,6 +1485,13 @@ paths:
                         type: string
                         enum:
                           - mock
+                          - mixed
+                          - live
+                      lastUpdatedAt:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
                       generatedAt:
                         type: string
                         format: date-time
@@ -1754,7 +1772,7 @@ paths:
   /v1/metrics/revenue:
     get:
       operationId: getRevenueMetrics
-      summary: "Revenue dataset: synthetic fees and volume by network and asset"
+      summary: "Revenue dataset: fees and volume by network and asset"
       tags:
         - metrics
       parameters:
@@ -1800,6 +1818,7 @@ paths:
                     required:
                       - datasetVersion
                       - dataStatus
+                      - lastUpdatedAt
                       - generatedAt
                       - currency
                       - network
@@ -1814,6 +1833,13 @@ paths:
                         type: string
                         enum:
                           - mock
+                          - mixed
+                          - live
+                      lastUpdatedAt:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
                       generatedAt:
                         type: string
                         format: date-time
@@ -2062,6 +2088,153 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/internal/ingest:
+    post:
+      operationId: runIngestion
+      summary: Ingests the B2C activity into the analytics database (Cloud Scheduler
+        only)
+      tags:
+        - internal
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - status
+                  - startedAt
+                  - durationMs
+                  - sources
+                  - aggregates
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - completed
+                      - partial
+                      - locked
+                  startedAt:
+                    type: string
+                    format: date-time
+                  durationMs:
+                    type: integer
+                    minimum: 0
+                  sources:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - transactions
+                      - users
+                      - catalog
+                      - prices
+                    properties:
+                      transactions:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - read
+                          - revisited
+                          - lastId
+                        properties:
+                          read:
+                            type: integer
+                            minimum: 0
+                          revisited:
+                            type: integer
+                            minimum: 0
+                          lastId:
+                            type:
+                              - "null"
+                              - string
+                      users:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - read
+                        properties:
+                          read:
+                            type: integer
+                            minimum: 0
+                      catalog:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - tokens
+                          - networks
+                        properties:
+                          tokens:
+                            type: integer
+                            minimum: 0
+                          networks:
+                            type: integer
+                            minimum: 0
+                      prices:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - provider
+                          - calls
+                          - prices
+                          - failed
+                        properties:
+                          provider:
+                            type:
+                              - "null"
+                              - string
+                          calls:
+                            type: integer
+                            minimum: 0
+                          prices:
+                            type: integer
+                            minimum: 0
+                          failed:
+                            type: boolean
+                  aggregates:
+                    anyOf:
+                      - type: object
+                        additionalProperties: false
+                        required:
+                          - transfers
+                          - swaps
+                          - unpriced
+                          - outsideCatalog
+                          - users
+                          - builtAt
+                        properties:
+                          transfers:
+                            type: integer
+                            minimum: 0
+                          swaps:
+                            type: integer
+                            minimum: 0
+                          unpriced:
+                            type: integer
+                            minimum: 0
+                          outsideCatalog:
+                            type: integer
+                            minimum: 0
+                          users:
+                            type: integer
+                            minimum: 0
+                          builtAt:
+                            type: string
+                            format: date-time
+                      - type: "null"
+        "401":
           description: Default Response
           content:
             application/json:
