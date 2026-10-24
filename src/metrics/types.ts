@@ -1,4 +1,5 @@
 import type { NetworkFilter, NetworkId } from './catalog.js';
+import type { DataStatus } from './sources.js';
 
 /** Time range of Overview and Revenue. */
 export type MetricsRange = 'today' | 'week' | 'month' | 'year' | 'ytd' | 'all';
@@ -18,7 +19,10 @@ export interface Period {
 /** Fields shared by the `meta` object of every metrics response. */
 export interface MetricsMetaBase {
   datasetVersion: string;
-  dataStatus: 'mock';
+  /** `live` when every value comes from the B2C data, `mixed` when some do, `mock` otherwise. */
+  dataStatus: DataStatus;
+  /** End of the ingestion run the live values come from; `null` when every value is synthetic. */
+  lastUpdatedAt: string | null;
   generatedAt: string;
   currency: 'USD';
   network: NetworkFilter;
