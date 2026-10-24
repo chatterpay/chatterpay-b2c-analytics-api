@@ -19,7 +19,7 @@ export function registerErrorHandling(app: FastifyInstance): void {
         message: error.message,
         requestId: request.id
       };
-      return reply.status(error.statusCode).send(body);
+      return reply.status(error.statusCode).headers(error.headers).send(body);
     }
 
     const statusCode =
