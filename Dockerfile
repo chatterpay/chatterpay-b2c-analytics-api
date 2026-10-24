@@ -15,18 +15,8 @@ COPY package.json yarn.lock ./
 RUN yarn install --frozen-lockfile --non-interactive --production && yarn cache clean
 
 FROM node:24-alpine AS runtime
-# Non-secret settings from the Cloud Build trigger (see cloudbuild.yaml). An empty value counts as
-# unset and the API applies its default. Secrets are not declared here: Cloud Run injects them.
-ARG LOG_LEVEL
-ARG BODY_LIMIT_BYTES
-ARG REQUEST_TIMEOUT_MS
-ARG JWT_KEY_ID
-ARG JWT_ISSUER
-ARG JWT_AUDIENCE
-ARG SESSION_TTL_MINUTES
-ARG CHALLENGE_TTL_MINUTES
-ARG MONGO_DB_NAME
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=8080     LOG_LEVEL=${LOG_LEVEL}     BODY_LIMIT_BYTES=${BODY_LIMIT_BYTES}     REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS}     JWT_KEY_ID=${JWT_KEY_ID}     JWT_ISSUER=${JWT_ISSUER}     JWT_AUDIENCE=${JWT_AUDIENCE}     SESSION_TTL_MINUTES=${SESSION_TTL_MINUTES}     CHALLENGE_TTL_MINUTES=${CHALLENGE_TTL_MINUTES}     MONGO_DB_NAME=${MONGO_DB_NAME}
+# Server settings and secrets are defined on the Cloud Run service, not in the image.
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=8080
 WORKDIR /app
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
