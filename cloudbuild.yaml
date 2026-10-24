@@ -9,14 +9,14 @@ steps:
       - "-f"
       - "Dockerfile"
       - "-t"
-      - "$_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA"
+      - "$_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/chatterpay-analytics-api/$_SERVICE_NAME:$COMMIT_SHA"
       - "."
 
   - name: "gcr.io/cloud-builders/docker"
     id: Push
     args:
       - "push"
-      - "$_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA"
+      - "$_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/chatterpay-analytics-api/$_SERVICE_NAME:$COMMIT_SHA"
 
   - name: "gcr.io/cloud-builders/gcloud"
     id: Deploy
@@ -41,10 +41,10 @@ steps:
           *-develop) network=chatterpay-dev-vpc; subnet=chatterpay-dev-run ;;
           *) echo "no VPC egress mapping for service $_SERVICE_NAME" >&2; exit 1 ;;
         esac
-        gcloud run deploy '$_SERVICE_NAME' --platform managed --region '$_DEPLOY_REGION' --image '$_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA' --labels 'managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$_TRIGGER_ID' --network "$$network" --subnet "$$subnet" --vpc-egress all-traffic --quiet --no-allow-unauthenticated
+        gcloud run deploy '$_SERVICE_NAME' --platform managed --region '$_DEPLOY_REGION' --image '$_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/chatterpay-analytics-api/$_SERVICE_NAME:$COMMIT_SHA' --labels 'managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID,gcb-trigger-id=$_TRIGGER_ID' --network "$$network" --subnet "$$subnet" --vpc-egress all-traffic --quiet --no-allow-unauthenticated
 
 images:
-  - $_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/$REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA
+  - $_AR_HOSTNAME/$PROJECT_ID/cloud-run-source-deploy/chatterpay-analytics-api/$_SERVICE_NAME:$COMMIT_SHA
 
 options:
   logging: CLOUD_LOGGING_ONLY
