@@ -5,10 +5,18 @@ import { object } from './schemas.js';
 export interface MemberBody {
   id: string;
   email: string;
+  /** Name recorded for the member; `null` when none was recorded. */
+  name: string | null;
   role: User['role'];
   status: 'active';
   createdAt: string;
   lastLoginAt: string | null;
+}
+
+/** Member as listed by the team endpoint, with its last audited activity. */
+export interface TeamMemberBody extends MemberBody {
+  /** Last event of the activity log the member acted in, logins included; `null` when none. */
+  lastActivityAt: string | null;
 }
 
 /** Invite as exposed by the API; `createdBy` is the email of the creator. */
@@ -53,14 +61,30 @@ export const idParamsSchema: Record<string, unknown> = object({
   id: { type: 'string', format: 'uuid' }
 });
 
-/** Response schema of a {@link MemberBody}. */
-export const memberSchema: Record<string, unknown> = object({
+const memberProperties = {
   id: { type: 'string' },
   email: { type: 'string' },
+  name: {
+    type: ['string', 'null'],
+    description: 'Name recorded for the member by an operator; null when none. Never derived.'
+  },
   role: roleSchema,
   status: { type: 'string', enum: ['active'] },
   createdAt: instant,
   lastLoginAt: nullableInstant
+};
+
+/** Response schema of a {@link MemberBody}. */
+export const memberSchema: Record<string, unknown> = object(memberProperties);
+
+/** Response schema of a {@link TeamMemberBody}. */
+export const teamMemberSchema: Record<string, unknown> = object({
+  ...memberProperties,
+  lastActivityAt: {
+    ...nullableInstant,
+    description:
+      'Last event of the activity log the member acted in, of any action; distinct from lastLoginAt.'
+  }
 });
 
 /** Response schema of an {@link InviteBody}. */
@@ -109,10 +133,25 @@ export function toMemberBody(user: User): MemberBody {
   return {
     id: user.id,
     email: user.email,
+    name: user.name,
     role: user.role,
     status: 'active',
     createdAt: user.createdAt.toISOString(),
     lastLoginAt: user.lastLoginAt === null ? null : user.lastLoginAt.toISOString()
+  };
+}
+
+/**
+ * Maps an active user and its last activity to the team list body.
+ *
+ * @param user - Active user.
+ * @param lastActivityAt - Last event the user acted in; `null` when none.
+ * @returns The team member body.
+ */
+export function toTeamMemberBody(user: User, lastActivityAt: Date | null): TeamMemberBody {
+  return {
+    ...toMemberBody(user),
+    lastActivityAt: lastActivityAt === null ? null : lastActivityAt.toISOString()
   };
 }
 
