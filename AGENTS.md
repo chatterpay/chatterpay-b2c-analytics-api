@@ -15,6 +15,8 @@ Instructions for coding agents working in this repository.
 - Request input is validated with schemas; MongoDB queries never take operators from client input.
 - Error responses use `ApiError` / the shared handler: `{ code, message, requestId }`, no stack traces or internal messages for 5xx.
 - Logs never contain JWTs, cookies, access codes, connection strings or emails in clear text.
+- The activity log never stores access codes or tokens. Every `verify-code` failure answers the same generic 401, and `request-code` answers the same for members and unknown emails.
+- Persistence goes through the `Store` interface (`src/store/types.ts`). A store method that checks an invariant (last active admin, pending invite, challenge attempts) performs the check and the write atomically; routes never split them across calls.
 - Every route declares its querystring and response schemas; run `yarn openapi` in the same change so `openapi/openapi.yaml` matches.
 - Changing the mock generator output requires a new `DATASET_VERSION`.
 
