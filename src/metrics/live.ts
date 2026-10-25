@@ -6,15 +6,17 @@ import type {
   LiveAggregates,
   NetworkWallets,
   TokenInfo,
+  UnpricedOperations,
   UserActivity,
   UserSignup,
   WalletObservation
 } from '../ingest/types.js';
 import { addMonths, type DayHour, isoDayOf, type TimeWindow } from './calendar.js';
 import type { NetworkId } from './catalog.js';
-import type { Facts } from './facts.js';
+import { emptyUnpriced, type Facts, MONEY_KEYS } from './facts.js';
 import { impliedSwapPrices, PriceBook, type StableSwap } from './pricing.js';
 import type { MetricsSource, WalletCoverage } from './sources.js';
+import type { UsdValuation } from './types.js';
 
 const HOUR_MS = 3_600_000;
 /** Status of a row that moved funds. Other statuses (`failed`, `submitted`, ...) are not counted. */
@@ -31,17 +33,28 @@ export interface AggregationInput {
   prices: readonly DailyPrice[];
   /** First ingestion run that saw each wallet; none when omitted. */
   observations?: readonly WalletObservation[];
+  /** `none` leaves every amount and fee other than zero without a USD value; `market` by default. */
+  valuation?: UsdValuation;
 }
 
 /** Counters of an aggregation. */
 export interface AggregationStats {
   transfers: number;
   swaps: number;
-  /** Counted operations without a USD price for their token on any day, valued at zero. */
+  /** Counted operations whose amount has no USD value; left out of the volume, not taken as zero. */
   unpriced: number;
+  /** Counted operations whose fee, other than zero, has no USD value; left out of the fees. */
+  unpricedFees: number;
+  /**
+   * Swaps with a completed row that do not prove a complete operation (a single leg, a leg not
+   * completed, legs that do not mirror each other, extra legs or a row without hash); not counted.
+   */
+  unverifiedSwaps: number;
   /** Completed transfers and swaps on chains outside the catalog. */
   outsideCatalog: number;
   users: number;
+  /** Users with a wallet on a catalog network and without `creationDate`. */
+  undatedUsers: number;
   /** User wallets on networks of the catalog. */
   wallets: number;
   /** Of those, the wallets with a verifiable first appearance. */
@@ -69,6 +82,9 @@ interface Operation {
   feeUsd: number | null;
 }
 
+/** Hour of a build: its unpriced operations are always recorded. */
+type BuiltHour = HourlyFacts & { unpriced: UnpricedOperations };
+
 function blankFacts(): Facts {
   return {
     newUsers: 0,
@@ -79,14 +95,19 @@ function blankFacts(): Facts {
     transferVolume: {},
     swapVolume: {},
     transferFees: {},
-    swapFees: {}
+    swapFees: {},
+    unpriced: emptyUnpriced()
   };
 }
 
-const MONEY_KEYS = ['transferVolume', 'swapVolume', 'transferFees', 'swapFees'] as const;
-
 function addTo(record: Record<string, number>, key: string, value: number): void {
   record[key] = (record[key] ?? 0) + value;
+}
+
+function addRecord(target: Record<string, number>, item: Readonly<Record<string, number>>): void {
+  for (const [asset, value] of Object.entries(item)) {
+    addTo(target, asset, value);
+  }
 }
 
 function addFacts(target: Facts, item: Facts): void {
@@ -96,9 +117,8 @@ function addFacts(target: Facts, item: Facts): void {
   target.transfers += item.transfers;
   target.swaps += item.swaps;
   for (const key of MONEY_KEYS) {
-    for (const [asset, value] of Object.entries(item[key])) {
-      addTo(target[key], asset, value);
-    }
+    addRecord(target[key], item[key]);
+    addRecord(target.unpriced[key], item.unpriced[key]);
   }
 }
 
@@ -149,24 +169,114 @@ function tokenResolver(tokens: readonly TokenInfo[]): TokenResolver {
     index.get(`${chainId}|${raw.toUpperCase()}`) ?? { symbol: raw.toUpperCase(), stable: false };
 }
 
+/** Earlier row first: by date, then by B2C id, so the order of the copies never matters. */
+function byDateThenId(left: IngestedTransaction, right: IngestedTransaction): number {
+  return left.date.getTime() - right.date.getTime() || left.id.localeCompare(right.id);
+}
+
+/** A swap whose two legs prove the complete operation. */
+interface CompleteSwap {
+  input: IngestedTransaction;
+  output: IngestedTransaction;
+}
+
+/** One leg of a swap: its earliest row, completed when any copy of the leg is. */
+interface SwapLeg {
+  row: IngestedTransaction;
+  completed: boolean;
+}
+
 /**
- * Picks the input leg of a swap: the backend writes one row from the user to the router and one
- * from the router back to the user, so the input is the row whose sender received the other row.
+ * Legs of the rows of one swap group. Rows with the same direction, token and amount are one leg
+ * written more than once (a retransmission), never two legs.
  */
-function swapLegs(
-  rows: readonly IngestedTransaction[]
-): { input: IngestedTransaction; output: IngestedTransaction | null } | null {
-  const sorted = [...rows].sort((left, right) => left.date.getTime() - right.date.getTime());
-  const first = sorted[0];
-  if (first === undefined) {
-    return null;
+function legsOf(rows: readonly IngestedTransaction[]): SwapLeg[] {
+  const legs = new Map<string, SwapLeg>();
+  for (const row of [...rows].sort(byDateThenId)) {
+    const key = [row.from.toLowerCase(), row.to.toLowerCase(), row.token.toUpperCase(), row.amount]
+      .map(String)
+      .join('|');
+    const leg = legs.get(key);
+    const completed = row.status === COMPLETED;
+    if (leg === undefined || (completed && !leg.completed)) {
+      legs.set(key, { row, completed });
+    }
   }
-  const input =
-    sorted.find((row) =>
-      sorted.some((other) => other !== row && other.to.toLowerCase() === row.from.toLowerCase())
-    ) ?? first;
-  const output = sorted.find((row) => row !== input) ?? null;
-  return { input, output };
+  return [...legs.values()];
+}
+
+/** Whether two legs go in opposite directions between the same two distinct addresses. */
+function mirrored(left: SwapLeg, right: SwapLeg): boolean {
+  const from = left.row.from.toLowerCase();
+  const to = left.row.to.toLowerCase();
+  return from !== to && from === right.row.to.toLowerCase() && to === right.row.from.toLowerCase();
+}
+
+/**
+ * Pairs the swap rows of the catalog chains into complete swaps.
+ *
+ * The backend writes a swap as two rows with the transaction hash of the chain: one from the
+ * user's wallet to the router and one from the router back to the wallet. B2C rows carry no
+ * operation id, so rows are grouped by chain id, hash and the unordered pair of addresses; two
+ * swaps sharing a transaction (several wallets in one bundle) stay apart. A group proves a complete
+ * swap only with exactly two legs that mirror each other, both completed. The input is the leg
+ * sent by a known user wallet, or the earlier one when that does not decide it. Any other group
+ * with a completed row (a single leg, a leg not completed yet, extra legs, a row without hash) is
+ * unverified: it is left out of every count, never read as a transfer or as half a swap. Groups
+ * without a completed row are failed or pending swaps and count nowhere, as failed transfers do.
+ *
+ * @param rows - Swap rows of catalog chains, of any status.
+ * @param isUserWallet - Whether an address is a wallet of a known user on a chain.
+ * @returns The complete swaps and how many groups were unverified.
+ */
+function pairSwaps(
+  rows: readonly IngestedTransaction[],
+  isUserWallet: (chainId: string, address: string) => boolean
+): { swaps: CompleteSwap[]; unverified: number } {
+  const groups = new Map<string, IngestedTransaction[]>();
+  for (const row of rows) {
+    const pair = [row.from.toLowerCase(), row.to.toLowerCase()].sort().join('|');
+    // Without a hash nothing ties a row to its other leg.
+    const key =
+      row.hash === '' ? `${row.chainId}||${row.id}` : `${row.chainId}|${row.hash}|${pair}`;
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+  const swaps: CompleteSwap[] = [];
+  let unverified = 0;
+  for (const group of groups.values()) {
+    if (!group.some((row) => row.status === COMPLETED)) {
+      continue;
+    }
+    const legs = legsOf(group);
+    const [left, right] = legs;
+    if (
+      legs.length !== 2 ||
+      left === undefined ||
+      right === undefined ||
+      !mirrored(left, right) ||
+      !left.completed ||
+      !right.completed
+    ) {
+      unverified += 1;
+      continue;
+    }
+    const leftUser = isUserWallet(left.row.chainId, left.row.from);
+    const rightUser = isUserWallet(right.row.chainId, right.row.from);
+    const leftIsInput = leftUser === rightUser ? byDateThenId(left.row, right.row) <= 0 : leftUser;
+    swaps.push(
+      leftIsInput ? { input: left.row, output: right.row } : { input: right.row, output: left.row }
+    );
+  }
+  return { swaps, unverified };
+}
+
+function byNetworkThenUser(
+  left: { network: string; user: string },
+  right: { network: string; user: string }
+): number {
+  return left.network.localeCompare(right.network) || left.user.localeCompare(right.user);
 }
 
 /** Key of a wallet: chain id and address, the address in lower case unless it is bech32. */
@@ -204,11 +314,13 @@ function firstOperations(rows: readonly IngestedTransaction[]): Map<string, numb
 /**
  * Aggregates the ingested B2C rows into hourly facts, user activity and signups.
  *
- * Counted operations are completed `transfer` rows and completed swaps, one per transaction hash
- * and chain however many rows the swap has. A swap is valued and attributed on its input leg; its
+ * Counted operations are completed `transfer` rows and complete swaps (see {@link pairSwaps}),
+ * one per swap however many rows it has. A swap is valued and attributed on its input leg; its
  * USD value is the stable leg when either leg is stable. Other tokens are valued with
- * {@link PriceBook}. Money is rounded to cents per operation. The output depends only on the
- * input, so rebuilding the same day gives the same aggregates.
+ * {@link PriceBook}. An amount, or a fee other than zero, without a USD value is left out of the
+ * money figures and counted per asset in `unpriced`, never taken as zero; with `valuation: none`
+ * nothing is valued. Money is rounded to cents per operation. The output depends only on the input
+ * and not on the order of its rows, so rebuilding the same copies gives the same aggregates.
  *
  * The first verifiable appearance of a user wallet on its network is the earliest of two pieces of
  * evidence: the first completed B2C operation that sent from or paid to it, and the first
@@ -229,34 +341,42 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
   }
   const userOf = (chainId: string, address: string): string =>
     owners.get(`${chainId}|${address.toLowerCase()}`) ?? `address:${address.toLowerCase()}`;
+  const valued = (input.valuation ?? 'market') === 'market';
 
   const stats: AggregationStats = {
     transfers: 0,
     swaps: 0,
     unpriced: 0,
+    unpricedFees: 0,
+    unverifiedSwaps: 0,
     outsideCatalog: 0,
     users: input.users.length,
+    undatedUsers: 0,
     wallets: 0,
     verifiedWallets: 0
   };
   const operations: Operation[] = [];
   const stableSwaps: StableSwap[] = [];
-  const swapRows = new Map<string, IngestedTransaction[]>();
+  const swapRows: IngestedTransaction[] = [];
+  // The copies come in any order; walking them by B2C id makes every sum and list of the build
+  // independent of it.
+  const rows = [...input.transactions].sort((left, right) => left.id.localeCompare(right.id));
 
-  for (const row of input.transactions) {
-    if (row.status !== COMPLETED || (row.type !== 'transfer' && row.type !== 'swap')) {
+  for (const row of rows) {
+    if (row.type !== 'transfer' && row.type !== 'swap') {
       continue;
     }
     const network = input.chains.get(row.chainId);
     if (network === undefined) {
-      stats.outsideCatalog += 1;
+      stats.outsideCatalog += row.status === COMPLETED ? 1 : 0;
       continue;
     }
+    // Swap rows of every status are paired, so a leg not completed yet keeps its swap unverified.
     if (row.type === 'swap') {
-      const key = `${row.chainId}|${row.hash}`;
-      const rows = swapRows.get(key) ?? [];
-      rows.push(row);
-      swapRows.set(key, rows);
+      swapRows.push(row);
+      continue;
+    }
+    if (row.status !== COMPLETED) {
       continue;
     }
     const token = resolve(row.chainId, row.token);
@@ -269,27 +389,29 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
       stable: token.stable,
       amount: row.amount,
       fee: row.fee,
-      valueUsd: token.stable ? row.amount : null,
-      feeUsd: token.stable ? row.fee : null
+      valueUsd: valued && token.stable ? row.amount : null,
+      feeUsd: valued && token.stable ? row.fee : null
     });
   }
 
-  for (const rows of swapRows.values()) {
-    const legs = swapLegs(rows);
-    const network = legs === null ? undefined : input.chains.get(legs.input.chainId);
-    if (legs === null || network === undefined) {
+  const paired = pairSwaps(swapRows, (chainId, address) =>
+    owners.has(`${chainId}|${address.toLowerCase()}`)
+  );
+  stats.unverifiedSwaps = paired.unverified;
+  for (const { input: inLeg, output: outLeg } of paired.swaps) {
+    const network = input.chains.get(inLeg.chainId);
+    if (network === undefined) {
       continue;
     }
-    const { input: inLeg, output: outLeg } = legs;
     const inToken = resolve(inLeg.chainId, inLeg.token);
-    const outToken = outLeg === null ? null : resolve(outLeg.chainId, outLeg.token);
+    const outToken = resolve(outLeg.chainId, outLeg.token);
     const day = isoDayOf(Math.floor(hourIndex(inLeg.date) / 24));
     let valueUsd: number | null = null;
     let feeUsd: number | null = null;
-    if (inToken.stable) {
+    if (valued && inToken.stable) {
       valueUsd = inLeg.amount;
       feeUsd = inLeg.fee;
-      if (outLeg !== null && outToken !== null && !outToken.stable) {
+      if (!outToken.stable) {
         stableSwaps.push({
           day,
           symbol: outToken.symbol,
@@ -297,10 +419,11 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
           stableAmount: inLeg.amount
         });
       }
-    } else if (outLeg !== null && outToken?.stable === true) {
+    } else if (valued && outToken.stable) {
       valueUsd = outLeg.amount;
-      // The fee is taken in the input token; the swap itself gives its stable price.
-      feeUsd = inLeg.amount > 0 ? (inLeg.fee * outLeg.amount) / inLeg.amount : 0;
+      // The fee is taken in the input token; the swap itself gives its stable price. Without an
+      // input amount it gives none, and the fee is priced like any other.
+      feeUsd = inLeg.amount > 0 ? (inLeg.fee * outLeg.amount) / inLeg.amount : null;
       stableSwaps.push({
         day,
         symbol: inToken.symbol,
@@ -323,8 +446,8 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
   }
 
   const prices = new PriceBook([...input.prices, ...impliedSwapPrices(stableSwaps)]);
-  const hourly = new Map<string, HourlyFacts>();
-  const factsAt = (network: NetworkId, hour: number): HourlyFacts => {
+  const hourly = new Map<string, BuiltHour>();
+  const factsAt = (network: NetworkId, hour: number): BuiltHour => {
     const key = `${network}|${hour}`;
     let facts = hourly.get(key);
     if (facts === undefined) {
@@ -338,7 +461,8 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
         transferVolume: {},
         swapVolume: {},
         transferFees: {},
-        swapFees: {}
+        swapFees: {},
+        unpriced: emptyUnpriced()
       };
       hourly.set(key, facts);
     }
@@ -347,25 +471,39 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
   const activity = new Map<string, { network: NetworkId; user: string; hours: Set<number> }>();
 
   for (const operation of operations) {
-    const known = operation.valueUsd !== null && operation.feeUsd !== null;
+    const needsPrice =
+      operation.valueUsd === null || (operation.feeUsd === null && operation.fee !== 0);
     const price =
-      operation.stable || known ? 1 : prices.usd(operation.asset, Math.floor(operation.hour / 24));
-    if (price === null) {
-      stats.unpriced += 1;
-    }
-    const valueUsd = operation.valueUsd ?? operation.amount * (price ?? 0);
-    const feeUsd = operation.feeUsd ?? operation.fee * (price ?? 0);
+      !valued || !needsPrice
+        ? null
+        : operation.stable
+          ? 1
+          : prices.usd(operation.asset, Math.floor(operation.hour / 24));
+    const valueUsd = operation.valueUsd ?? (price === null ? null : operation.amount * price);
+    const feeUsd =
+      operation.feeUsd ?? (operation.fee === 0 ? 0 : price === null ? null : operation.fee * price);
     const facts = factsAt(operation.network, operation.hour);
-    if (operation.kind === 'transfer') {
+    const transfer = operation.kind === 'transfer';
+    const volumeKey = transfer ? 'transferVolume' : 'swapVolume';
+    const feesKey = transfer ? 'transferFees' : 'swapFees';
+    if (transfer) {
       stats.transfers += 1;
       facts.transfers += 1;
-      addTo(facts.transferVolume, operation.asset, Math.round(valueUsd * 100));
-      addTo(facts.transferFees, operation.asset, Math.round(feeUsd * 100));
     } else {
       stats.swaps += 1;
       facts.swaps += 1;
-      addTo(facts.swapVolume, operation.asset, Math.round(valueUsd * 100));
-      addTo(facts.swapFees, operation.asset, Math.round(feeUsd * 100));
+    }
+    if (valueUsd === null) {
+      stats.unpriced += 1;
+      addTo(facts.unpriced[volumeKey], operation.asset, 1);
+    } else {
+      addTo(facts[volumeKey], operation.asset, Math.round(valueUsd * 100));
+    }
+    if (feeUsd === null) {
+      stats.unpricedFees += 1;
+      addTo(facts.unpriced[feesKey], operation.asset, 1);
+    } else {
+      addTo(facts[feesKey], operation.asset, Math.round(feeUsd * 100));
     }
     const key = `${operation.network}|${operation.user}`;
     const entry = activity.get(key) ?? {
@@ -385,6 +523,9 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
       if (network !== undefined) {
         networks.add(network);
       }
+    }
+    if (user.createdAt === null && networks.size > 0) {
+      stats.undatedUsers += 1;
     }
     for (const network of networks) {
       const hour = user.createdAt === null ? null : hourIndex(user.createdAt);
@@ -433,14 +574,16 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
       hourly: [...hourly.values()].sort(
         (left, right) => left.network.localeCompare(right.network) || left.hour - right.hour
       ),
-      activity: [...activity.values()].map(
-        (entry): UserActivity => ({
-          network: entry.network,
-          user: entry.user,
-          hours: [...entry.hours].sort((left, right) => left - right)
-        })
-      ),
-      signups,
+      activity: [...activity.values()]
+        .map(
+          (entry): UserActivity => ({
+            network: entry.network,
+            user: entry.user,
+            hours: [...entry.hours].sort((left, right) => left - right)
+          })
+        )
+        .sort(byNetworkThenUser),
+      signups: signups.sort(byNetworkThenUser),
       wallets: [...wallets.values()].sort((left, right) =>
         left.network.localeCompare(right.network)
       )
@@ -501,7 +644,9 @@ class LiveSource implements MetricsSource {
         transferVolume: item.transferVolume,
         swapVolume: item.swapVolume,
         transferFees: item.transferFees,
-        swapFees: item.swapFees
+        swapFees: item.swapFees,
+        // Builds stored before it was recorded valued those operations at zero.
+        unpriced: item.unpriced ?? emptyUnpriced()
       });
       this.hourly.set(item.network, series);
     }
@@ -639,6 +784,10 @@ class LiveSource implements MetricsSource {
   newUsersAcross(networks: readonly NetworkId[], window: TimeWindow): number {
     const { first, last } = windowHours(window);
     return new Set(networks.flatMap((network) => this.signedUpBetween(network, first, last))).size;
+  }
+
+  undatedUsersAcross(networks: readonly NetworkId[]): number {
+    return new Set(networks.flatMap((network) => this.undated.get(network) ?? [])).size;
   }
 
   totalUsersAcross(networks: readonly NetworkId[], point: DayHour): number {
