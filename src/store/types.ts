@@ -82,6 +82,15 @@ export interface ActivityEvent {
   outcome: 'success' | 'failure';
 }
 
+/**
+ * Position in the activity log: the last event of a page. The next page starts right after it in
+ * the order of {@link Store.listActivity}.
+ */
+export interface ActivityCursor {
+  at: Date;
+  id: string;
+}
+
 /** Result of a rate limit counter hit. */
 export interface RateLimitResult {
   allowed: boolean;
@@ -213,8 +222,15 @@ export interface Store {
   revokeInvite(id: string, now: Date): Promise<InviteTransitionResult>;
 
   appendActivity(event: Omit<ActivityEvent, 'id'>): Promise<ActivityEvent>;
-  /** Most recent events first. */
-  listActivity(limit: number): Promise<ActivityEvent[]>;
+  /**
+   * Most recent events first, ties on `at` broken by the most recently stored first. The order is
+   * stable, so pages read with `after` neither repeat nor skip events that were stored before the
+   * first page.
+   *
+   * @param limit - Maximum number of events.
+   * @param after - Last event of the previous page; omitted for the first page.
+   */
+  listActivity(limit: number, after?: ActivityCursor): Promise<ActivityEvent[]>;
   /**
    * Instant of the last event each user acted in, of any action and outcome.
    *
