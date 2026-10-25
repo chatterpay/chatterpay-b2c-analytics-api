@@ -111,7 +111,11 @@ describe('team routes', () => {
     expect(changedPayload.statusCode).toBe(409);
 
     const list = await harness.call({ method: 'GET', url: '/v1/team/invites', token: adminToken });
-    expect(list.json().items).toEqual([body]);
+    expect(list.json()).toEqual({
+      items: [body],
+      nextCursor: null,
+      counts: { pending: 1, history: 0 }
+    });
   });
 
   it('answers 409 to invites for members or emails with a pending invite', async () => {
@@ -183,8 +187,18 @@ describe('team routes', () => {
     // The admin session from beforeEach has expired by now.
     adminToken = await login(harness, ADMIN_EMAIL);
 
-    const list = await harness.call({ method: 'GET', url: '/v1/team/invites', token: adminToken });
-    expect(list.json().items[0]).toMatchObject({ id, status: 'expired' });
+    const pending = await harness.call({
+      method: 'GET',
+      url: '/v1/team/invites?view=pending',
+      token: adminToken
+    });
+    expect(pending.json()).toMatchObject({ items: [], counts: { pending: 0, history: 1 } });
+    const history = await harness.call({
+      method: 'GET',
+      url: '/v1/team/invites?view=history',
+      token: adminToken
+    });
+    expect(history.json().items).toEqual([expect.objectContaining({ id, status: 'expired' })]);
 
     const resend = await harness.call({
       method: 'POST',
@@ -216,7 +230,7 @@ describe('team routes', () => {
 
     const invites = await harness.call({
       method: 'GET',
-      url: '/v1/team/invites',
+      url: '/v1/team/invites?view=history',
       token: adminToken
     });
     expect(invites.json().items[0]).toMatchObject({ id: created.id, status: 'accepted' });
@@ -514,6 +528,183 @@ describe('team routes', () => {
     }
   });
 
+  describe('invite pages', () => {
+    type InvitePage = {
+      items: { id: string; status: string; createdAt: string }[];
+      nextCursor: string | null;
+      counts: { pending: number; history: number };
+    };
+
+    async function seedInvites(count: number, prefix: string): Promise<string[]> {
+      const createdBy = (await harness.store.findActiveUserByEmail(ADMIN_EMAIL))?.id ?? '';
+      const ids: string[] = [];
+      for (const index of Array.from({ length: count }, (_, position) => position)) {
+        const result = await harness.store.createInvite(
+          {
+            email: `${prefix}-${index}@example.com`,
+            role: 'viewer',
+            createdBy,
+            mutationId: randomUUID(),
+            expiresAt: new Date(harness.now().getTime() + 7 * DAY_MS)
+          },
+          harness.now()
+        );
+        if (result.kind === 'conflict') {
+          throw new Error('seed invite conflict');
+        }
+        ids.push(result.invite.id);
+        // Pairs share one instant, so the order also rests on the id tie-break.
+        if (index % 2 === 1) {
+          harness.advance(1000);
+        }
+      }
+      return ids;
+    }
+
+    async function page(query: string): Promise<InvitePage> {
+      const response = await harness.call({
+        method: 'GET',
+        url: `/v1/team/invites?${query}`,
+        token: adminToken
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('private, no-store');
+      return response.json() as InvitePage;
+    }
+
+    /** Reads every page of a view; `onPage` runs after each page, before the next one. */
+    async function readAll(
+      view: 'pending' | 'history',
+      limit: number,
+      onPage: (index: number) => Promise<void> = async () => {}
+    ): Promise<{ ids: string[]; sizes: number[] }> {
+      const ids: string[] = [];
+      const sizes: number[] = [];
+      let cursor: string | null = null;
+      do {
+        const query: string =
+          cursor === null
+            ? `view=${view}&limit=${limit}`
+            : `view=${view}&limit=${limit}&cursor=${cursor}`;
+        const body = await page(query);
+        ids.push(...body.items.map((item) => item.id));
+        sizes.push(body.items.length);
+        cursor = body.nextCursor;
+        await onPage(sizes.length);
+      } while (cursor !== null && sizes.length < 50);
+      return { ids, sizes };
+    }
+
+    it('answers empty views without a next page when there are no invites', async () => {
+      for (const view of ['pending', 'history']) {
+        expect(await page(`view=${view}`)).toEqual({
+          items: [],
+          nextCursor: null,
+          counts: { pending: 0, history: 0 }
+        });
+      }
+    });
+
+    it('lists a single pending invite on one page', async () => {
+      const [id] = await seedInvites(1, 'single');
+      const pending = await page('view=pending&limit=1');
+      expect(pending.items.map((item) => item.id)).toEqual([id]);
+      expect(pending.nextCursor).toBeNull();
+      expect(pending.counts).toEqual({ pending: 1, history: 0 });
+      expect((await page('view=history')).items).toEqual([]);
+    });
+
+    it('pages 104 invites by view without repeats, gaps or empty pages', async () => {
+      const expiring = await seedInvites(20, 'expiring');
+      harness.advance(7 * DAY_MS + 60_000);
+      adminToken = await login(harness, ADMIN_EMAIL);
+      const open = await seedInvites(84, 'open');
+      const revoked = open.filter((_, index) => index % 6 === 0);
+      for (const id of revoked) {
+        expect((await harness.store.revokeInvite(id, harness.now())).kind).toBe('ok');
+      }
+
+      const pending = await readAll('pending', 25);
+      const history = await readAll('history', 25);
+      const pendingSet = new Set(open.filter((id) => !revoked.includes(id)));
+      expect(pending.sizes).toEqual([25, 25, 20]);
+      expect(history.sizes).toEqual([25, 9]);
+      expect(new Set(pending.ids)).toEqual(pendingSet);
+      expect(new Set(history.ids)).toEqual(new Set([...expiring, ...revoked]));
+      expect(new Set([...pending.ids, ...history.ids]).size).toBe(104);
+
+      // The pages follow the order of one page that holds the whole view.
+      expect((await page('view=pending&limit=100')).items.map((item) => item.id)).toEqual(
+        pending.ids
+      );
+      const first = await page('view=history&limit=100');
+      expect(first.items.map((item) => item.id)).toEqual(history.ids);
+      expect(first.counts).toEqual({ pending: 70, history: 34 });
+      expect(new Set(first.items.map((item) => item.status))).toEqual(
+        new Set(['expired', 'revoked'])
+      );
+
+      // A view that ends on a full page answers no further cursor instead of an empty page.
+      expect((await readAll('pending', 10)).sizes).toEqual([10, 10, 10, 10, 10, 10, 10]);
+    });
+
+    it('keeps the remaining pages when invites are created between pages', async () => {
+      await seedInvites(9, 'stable');
+      const before = (await page('view=pending&limit=100')).items.map((item) => item.id);
+
+      const paged = await readAll('pending', 4, async (index) => {
+        if (index === 1) {
+          // Newer invites sort before the cursor, so later pages neither shift nor repeat.
+          harness.advance(1000);
+          await seedInvites(3, 'later');
+        }
+      });
+
+      expect(paged.ids).toEqual(before);
+      expect(paged.sizes).toEqual([4, 4, 1]);
+      expect((await page('view=pending&limit=100')).counts).toEqual({ pending: 12, history: 0 });
+    });
+
+    it('rejects a view, limit or cursor outside the invite contract', async () => {
+      const activityCursor = Buffer.from(
+        `${harness.now().toISOString()}|0123456789abcdef01234567`,
+        'utf8'
+      ).toString('base64url');
+      const queries = [
+        'view=all',
+        'view=pending&limit=0',
+        'view=history&limit=101',
+        'limit=abc',
+        'status=revoked',
+        'cursor=not%20a%20cursor',
+        `cursor=${Buffer.from('garbage', 'utf8').toString('base64url')}`,
+        `cursor=${Buffer.from(`not-a-date|${UNKNOWN_ID}`, 'utf8').toString('base64url')}`,
+        `cursor=${Buffer.from(`${harness.now().toISOString()}|${UNKNOWN_ID}|x`, 'utf8').toString('base64url')}`,
+        // An activity cursor carries an ObjectId, never an invite id.
+        `view=history&cursor=${activityCursor}`,
+        `cursor=${'x'.repeat(201)}`
+      ];
+      for (const query of queries) {
+        const response = await harness.call({
+          method: 'GET',
+          url: `/v1/team/invites?${query}`,
+          token: adminToken
+        });
+        expect(response.statusCode, query).toBe(400);
+        expect(response.json()).toMatchObject({ code: 'BAD_REQUEST' });
+      }
+    });
+
+    it('accepts a well-formed cursor of an unknown invite as a position', async () => {
+      await seedInvites(2, 'position');
+      harness.advance(1000);
+      const future = Buffer.from(`${harness.now().toISOString()}|${UNKNOWN_ID}`, 'utf8').toString(
+        'base64url'
+      );
+      expect((await page(`view=pending&cursor=${future}`)).items).toHaveLength(2);
+    });
+  });
+
   it.each([
     [
       'POST',
@@ -548,6 +739,12 @@ describe('team routes', () => {
     it.each([
       ['GET', '/v1/team/members', undefined],
       ['GET', '/v1/team/invites', undefined],
+      ['GET', '/v1/team/invites?view=history&limit=1', undefined],
+      [
+        'GET',
+        `/v1/team/invites?view=pending&cursor=${Buffer.from(`2026-01-01T00:00:00.000Z|${UNKNOWN_ID}`).toString('base64url')}`,
+        undefined
+      ],
       ['GET', '/v1/team/activity', undefined],
       [
         'GET',
