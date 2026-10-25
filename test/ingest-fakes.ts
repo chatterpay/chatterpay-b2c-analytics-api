@@ -4,6 +4,7 @@ import type {
   BalanceReader,
   CallBudget,
   CardanoHoldings,
+  CatalogRetention,
   ChainEndpoint,
   ChainInfo,
   DailyPrice,
@@ -81,6 +82,7 @@ export const CHAINS: ChainInfo[] = [
     chainId: '84532',
     network: 'base-sepolia',
     name: 'Base Sepolia',
+    family: 'evm',
     explorer: 'https://sepolia.basescan.org',
     contracts: { paymasterAddress: '0xPaymaster' }
   },
@@ -88,6 +90,7 @@ export const CHAINS: ChainInfo[] = [
     chainId: '900000000001',
     network: 'cardano-preprod',
     name: 'Cardano Preprod',
+    family: 'cardano',
     explorer: 'https://preprod.cardanoscan.io/transaction/',
     contracts: {}
   }
@@ -191,9 +194,38 @@ export class MemoryIngestRepository implements IngestRepository {
     this.userCopies = items.map((item) => ({ ...item }));
   }
 
-  async replaceCatalog(tokens: readonly TokenInfo[], chains: readonly ChainInfo[]): Promise<void> {
-    this.tokenCopies = [...tokens];
-    this.chainCopies = [...chains];
+  /** Chain ids and token keys kept by the last catalog replacement although the source dropped them. */
+  readonly retained = { networks: new Set<string>(), tokens: new Set<string>() };
+
+  async replaceCatalog(
+    tokens: readonly TokenInfo[],
+    chains: readonly ChainInfo[]
+  ): Promise<CatalogRetention> {
+    const listedChains = new Set(chains.map((chain) => chain.chainId));
+    const listedTokens = new Set(tokens.map((token) => `${token.chainId}|${token.symbol}`));
+    const rows = [...this.copies.values()];
+    const keptChains = this.chainCopies.filter(
+      (chain) =>
+        !listedChains.has(chain.chainId) &&
+        (rows.some((row) => row.chainId === chain.chainId) ||
+          this.userCopies.some((user) =>
+            user.wallets.some((wallet) => wallet.chainId === chain.chainId)
+          ) ||
+          [...this.observations.values()].some((item) => item.chainId === chain.chainId))
+    );
+    const keptTokens = this.tokenCopies.filter(
+      (token) =>
+        !listedTokens.has(`${token.chainId}|${token.symbol}`) &&
+        rows.some(
+          (row) =>
+            row.chainId === token.chainId && row.token.toUpperCase() === token.symbol.toUpperCase()
+        )
+    );
+    this.retained.networks = new Set(keptChains.map((chain) => chain.chainId));
+    this.retained.tokens = new Set(keptTokens.map((token) => `${token.chainId}|${token.symbol}`));
+    this.tokenCopies = [...tokens, ...keptTokens];
+    this.chainCopies = [...chains, ...keptChains];
+    return { networks: keptChains.length, tokens: keptTokens.length };
   }
 
   async savePrices(items: readonly DailyPrice[]): Promise<void> {
