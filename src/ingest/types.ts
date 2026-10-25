@@ -1,5 +1,11 @@
 import type { NetworkFamily, NetworkId } from '../metrics/catalog.js';
-import type { IngestRunStatus, NetworkReadReason, NetworkReadStatus } from '../metrics/types.js';
+import type {
+  IngestRunStatus,
+  NativeCoverage,
+  NetworkReadReason,
+  NetworkReadStatus,
+  UsdValuation
+} from '../metrics/types.js';
 
 /**
  * Row of the B2C `transactions` collection, as copied into the analytics database. Every type and
@@ -153,6 +159,11 @@ export interface SnapshotNetwork {
   b2cEnabled?: boolean | null;
   /** Why the network was not read, or not completely; `null` when it was read in full. */
   reason?: NetworkReadReason | null;
+  /**
+   * Whether the user wallets were read with the native coin. Absent in snapshots stored before it
+   * was recorded, when EVM user wallets were read without it.
+   */
+  native?: NativeCoverage;
 }
 
 /** Balances of one configured master wallet in a snapshot. */
@@ -170,6 +181,11 @@ export interface BalanceSnapshot {
   networks: SnapshotNetwork[];
   holdings: SnapshotHolding[];
   masterWallets: MasterWalletReading[];
+  /**
+   * `none` when the run valued nothing (every `valueCents` is `null`); absent in snapshots stored
+   * before it was recorded, which valued at market.
+   */
+  valuation?: UsdValuation;
 }
 
 /**
@@ -237,6 +253,17 @@ export interface B2cActivityReader {
   b2cEnabled(): Promise<Map<string, boolean | null>>;
 }
 
+/**
+ * Counted operations whose amount or fee had no USD value, per money figure and asset. A fee of
+ * zero is valued at zero and never counted here.
+ */
+export interface UnpricedOperations {
+  transferVolume: Record<string, number>;
+  swapVolume: Record<string, number>;
+  transferFees: Record<string, number>;
+  swapFees: Record<string, number>;
+}
+
 /** Additive activity of one network in one UTC hour. Money in USD cents per asset. */
 export interface HourlyFacts {
   network: string;
@@ -251,6 +278,11 @@ export interface HourlyFacts {
   swapVolume: Record<string, number>;
   transferFees: Record<string, number>;
   swapFees: Record<string, number>;
+  /**
+   * Operations of the hour left out of the money figures for lack of a USD value. Absent in builds
+   * stored before it was recorded, which valued those operations at zero.
+   */
+  unpriced?: UnpricedOperations;
 }
 
 /** Hours in which a user started a counted operation on a network, ascending. */
