@@ -1,7 +1,7 @@
 import { dayHourOf, hourIndexOf, periodOf } from './calendar.js';
 import { type NetworkFilter, type NetworkId, networkProfile, networksFor } from './catalog.js';
-import { type Facts, feesCents, sumAssets, volumeCents } from './facts.js';
-import { centsToUsd, moneyMetric } from './format.js';
+import type { Facts, MoneyKey } from './facts.js';
+import { centsToUsd } from './format.js';
 import { buildMasterWallets } from './holdings.js';
 import { rangeMeta } from './overview.js';
 import {
@@ -12,17 +12,32 @@ import {
 } from './products.js';
 import { resolveRange } from './ranges.js';
 import { sourceFor } from './sources.js';
-import type { MetricsRange, RevenueResponse } from './types.js';
+import type { MetricsRange, RevenueResponse, ValuedMoneyMetric } from './types.js';
+import {
+  buildValuation,
+  FEE_KEYS,
+  VOLUME_KEYS,
+  valuedMoneyMetric,
+  valuedOf,
+  valuedUsd
+} from './valuation.js';
 
+/** Assets of the facts, valued or not: an asset without any USD value has no cents entry. */
 function assetsOf(facts: Facts): string[] {
   return [
-    ...new Set([
-      ...Object.keys(facts.transferVolume),
-      ...Object.keys(facts.swapVolume),
-      ...Object.keys(facts.transferFees),
-      ...Object.keys(facts.swapFees)
-    ])
+    ...new Set(
+      [...VOLUME_KEYS, ...FEE_KEYS].flatMap((key) => [
+        ...Object.keys(facts[key]),
+        ...Object.keys(facts.unpriced[key])
+      ])
+    )
   ];
+}
+
+/** Cents of an asset in some figures; `null` when an operation of the asset has no USD value. */
+function assetCents(facts: Facts, asset: string, keys: readonly MoneyKey[]): number | null {
+  const unpriced = keys.reduce((sum, key) => sum + (facts.unpriced[key][asset] ?? 0), 0);
+  return unpriced > 0 ? null : keys.reduce((sum, key) => sum + (facts[key][asset] ?? 0), 0);
 }
 
 /**
@@ -31,9 +46,13 @@ function assetsOf(facts: Facts): string[] {
  * backend computed for the operation, not a reconciled charge.
  *
  * Fee totals equal transfer plus swap fees, and the sums of the network and asset breakdowns and
- * of the series. The average fee per transaction divides those fees by the counted transfers and
- * swaps; Polymarket volume and fees are `unavailable` because the B2C data does not record them
- * verifiably. Master wallets come from the balance snapshots and are balances, not revenue.
+ * of the series. Operations without a USD value are left out of every money figure; the tiles
+ * then answer `partial` (subtotal of the valued ones) or `unavailable`, `valuation` says which
+ * networks and assets, an asset row has no value for a figure it was not valued in, and a network
+ * row or series point whose operations have none answers `null` instead of zero. The
+ * average fee per transaction divides those fees by the counted transfers and swaps; Polymarket
+ * volume and fees are `unavailable` because the B2C data does not record them verifiably. Master
+ * wallets come from the balance snapshots and are balances, not revenue.
  *
  * @param network - Network filter.
  * @param range - Time range.
@@ -59,14 +78,15 @@ export function buildRevenue(
   const previous =
     previousWindow === null ? null : networks.map((id) => activity.facts(id, previousWindow));
 
-  const total = (pick: (facts: Facts) => number): number =>
-    current.reduce((sum, item) => sum + pick(item.facts), 0);
-  const previousTotal = (pick: (facts: Facts) => number): number | null =>
-    previous === null ? null : previous.reduce((sum, facts) => sum + pick(facts), 0);
+  const valued = (keys: readonly MoneyKey[]): ValuedMoneyMetric =>
+    valuedMoneyMetric(
+      valuedOf(
+        current.map((item) => item.facts),
+        keys
+      ),
+      previous === null ? null : valuedOf(previous, keys)
+    );
 
-  const transferFees = (facts: Facts): number => sumAssets(facts.transferFees);
-  const swapFees = (facts: Facts): number => sumAssets(facts.swapFees);
-  const swapVolume = (facts: Facts): number => sumAssets(facts.swapVolume);
   const currentTotals = activityTotals(current.map((item) => item.facts));
   const previousTotals = previous === null ? null : activityTotals(previous);
 
@@ -75,49 +95,50 @@ export function buildRevenue(
       assetsOf(facts).map((asset) => ({
         network: id,
         asset,
-        volume: (facts.transferVolume[asset] ?? 0) + (facts.swapVolume[asset] ?? 0),
-        fees: (facts.transferFees[asset] ?? 0) + (facts.swapFees[asset] ?? 0)
+        volume: assetCents(facts, asset, VOLUME_KEYS),
+        fees: assetCents(facts, asset, FEE_KEYS)
       }))
     )
     .sort(
       (a, b) =>
-        b.fees - a.fees || a.network.localeCompare(b.network) || a.asset.localeCompare(b.asset)
+        (b.fees ?? -1) - (a.fees ?? -1) ||
+        a.network.localeCompare(b.network) ||
+        a.asset.localeCompare(b.asset)
     );
 
   return {
     meta: rangeMeta(network, range, now, ['activity', 'balances']),
     tiles: {
-      feesUsd: moneyMetric(total(feesCents), previousTotal(feesCents)),
-      transferFeesUsd: moneyMetric(total(transferFees), previousTotal(transferFees)),
-      swapFeesUsd: moneyMetric(total(swapFees), previousTotal(swapFees)),
-      volumeUsd: moneyMetric(total(volumeCents), previousTotal(volumeCents)),
-      swapVolumeUsd: moneyMetric(total(swapVolume), previousTotal(swapVolume))
+      feesUsd: valued(FEE_KEYS),
+      transferFeesUsd: valued(['transferFees']),
+      swapFeesUsd: valued(['swapFees']),
+      volumeUsd: valued(VOLUME_KEYS),
+      swapVolumeUsd: valued(['swapVolume'])
     },
     series: resolved.buckets.map((bucket) => {
       const facts = networks.map((id) => activity.facts(id, bucket));
-      const transfer = facts.reduce((sum, item) => sum + transferFees(item), 0);
-      const swap = facts.reduce((sum, item) => sum + swapFees(item), 0);
       return {
         ...periodOf(bucket),
-        feesUsd: centsToUsd(transfer + swap),
-        transferFeesUsd: centsToUsd(transfer),
-        swapFeesUsd: centsToUsd(swap)
+        feesUsd: valuedUsd(facts, FEE_KEYS),
+        transferFeesUsd: valuedUsd(facts, ['transferFees']),
+        swapFeesUsd: valuedUsd(facts, ['swapFees'])
       };
     }),
     byNetwork: current.map(({ network: id, facts }) => ({
       network: id,
       label: networkProfile(id).label,
-      feesUsd: centsToUsd(feesCents(facts)),
-      transferFeesUsd: centsToUsd(transferFees(facts)),
-      swapFeesUsd: centsToUsd(swapFees(facts)),
-      volumeUsd: centsToUsd(volumeCents(facts))
+      feesUsd: valuedUsd([facts], FEE_KEYS),
+      transferFeesUsd: valuedUsd([facts], ['transferFees']),
+      swapFeesUsd: valuedUsd([facts], ['swapFees']),
+      volumeUsd: valuedUsd([facts], VOLUME_KEYS)
     })),
     byAsset: byAsset.map((item) => ({
       network: item.network,
       asset: item.asset,
-      volumeUsd: centsToUsd(item.volume),
-      feesUsd: centsToUsd(item.fees)
+      volumeUsd: item.volume === null ? null : centsToUsd(item.volume),
+      feesUsd: item.fees === null ? null : centsToUsd(item.fees)
     })),
+    valuation: buildValuation(current),
     avgFeePerTransaction: buildAverageFee(currentTotals, previousTotals),
     polymarketVolume: buildPolymarketVolume(),
     feesByProduct: buildFeesByProduct(currentTotals),
