@@ -133,8 +133,11 @@ describe('aggregateActivity', () => {
       transfers: 3,
       swaps: 2,
       unpriced: 0,
+      unpricedFees: 0,
+      unverifiedSwaps: 0,
       outsideCatalog: 1,
       users: 3,
+      undatedUsers: 1,
       // Four wallets; the two that sent a completed operation have a verifiable first appearance.
       wallets: 4,
       verifiedWallets: 2
@@ -188,7 +191,7 @@ describe('aggregateActivity', () => {
     expect(source.retained('cardano-preprod', september, 1, 1)).toEqual([0]);
   });
 
-  it('marks operations without any price as unpriced and values them at zero', () => {
+  it('counts operations without any price as unpriced and gives them no value', () => {
     const { aggregates, stats } = aggregateActivity({
       transactions: [transaction(1, { token: 'WBTC', amount: 0.001, fee: 0.00001 })],
       users: USERS,
@@ -198,8 +201,15 @@ describe('aggregateActivity', () => {
     });
 
     expect(stats.unpriced).toBe(1);
-    expect(aggregates.hourly.find((item) => item.transfers > 0)?.transferVolume).toEqual({
-      WBTC: 0
+    expect(stats.unpricedFees).toBe(1);
+    const hour = aggregates.hourly.find((item) => item.transfers > 0);
+    expect(hour?.transferVolume).toEqual({});
+    expect(hour?.transferFees).toEqual({});
+    expect(hour?.unpriced).toEqual({
+      transferVolume: { WBTC: 1 },
+      swapVolume: {},
+      transferFees: { WBTC: 1 },
+      swapFees: {}
     });
   });
 
