@@ -47,29 +47,52 @@ describe('B2C blockchains mapping', () => {
 
   it('maps documents to networks sorted by name, with evm as the default family', () => {
     const definitions = toNetworkDefinitions([
-      { name: 'Cardano Preprod', family: 'cardano' },
-      { name: 'Base Sepolia', family: 'evm' },
-      { name: 'Arbitrum Sepolia' }
+      { name: 'Cardano Preprod', family: 'cardano', chainId: 900000000001, enabled: true },
+      { name: 'Base Sepolia', family: 'evm', chainId: 84532 },
+      { name: 'Arbitrum Sepolia', chainId: 421614, enabled: false }
     ]);
 
     expect(definitions).toEqual([
-      { id: 'arbitrum-sepolia', label: 'Arbitrum Sepolia', family: 'evm' },
-      { id: 'base-sepolia', label: 'Base Sepolia', family: 'evm' },
-      { id: 'cardano-preprod', label: 'Cardano Preprod', family: 'cardano' }
+      {
+        id: 'arbitrum-sepolia',
+        label: 'Arbitrum Sepolia',
+        family: 'evm',
+        chainId: '421614',
+        b2cEnabled: false,
+        sourcePresent: true
+      },
+      {
+        id: 'base-sepolia',
+        label: 'Base Sepolia',
+        family: 'evm',
+        chainId: '84532',
+        b2cEnabled: null,
+        sourcePresent: true
+      },
+      {
+        id: 'cardano-preprod',
+        label: 'Cardano Preprod',
+        family: 'cardano',
+        chainId: '900000000001',
+        b2cEnabled: true,
+        sourcePresent: true
+      }
     ]);
   });
 
-  it('skips unknown families, unusable names and repeated slugs', () => {
+  it('skips unknown families, unusable names or chain ids and repeated slugs or chain ids', () => {
     const definitions = toNetworkDefinitions([
-      { name: 'Bitcoin Testnet4', family: 'bitcoin' },
-      { name: 42 },
-      { name: '***' },
-      { name: 'All' },
-      { name: 'Base' },
-      { name: 'base' }
+      { name: 'Bitcoin Testnet4', family: 'bitcoin', chainId: 1 },
+      { name: 42, chainId: 2 },
+      { name: '***', chainId: 3 },
+      { name: 'All', chainId: 4 },
+      { name: 'No Chain' },
+      { name: 'Base', chainId: 8453 },
+      { name: 'base', chainId: 8454 },
+      { name: 'Base Again', chainId: 8453 }
     ]);
 
-    expect(definitions).toEqual([{ id: 'base', label: 'Base', family: 'evm' }]);
+    expect(definitions.map((network) => [network.id, network.chainId])).toEqual([['base', '8453']]);
   });
 });
 
@@ -86,10 +109,12 @@ describe('network catalog', () => {
   });
 
   it('lists the networks of the environment', async () => {
-    setNetworks([
-      { id: 'base', label: 'Base', family: 'evm' },
-      { id: 'cardano', label: 'Cardano', family: 'cardano' }
-    ]);
+    setNetworks(
+      toNetworkDefinitions([
+        { name: 'Base', chainId: 8453 },
+        { name: 'Cardano', family: 'cardano', chainId: 764824073 }
+      ])
+    );
 
     const response = await app.inject({ method: 'GET', url: '/v1/metrics/networks' });
 
@@ -103,7 +128,12 @@ describe('network catalog', () => {
   });
 
   it('serves the metrics of every network of the catalog and rejects the others', async () => {
-    setNetworks(toNetworkDefinitions([{ name: 'Arbitrum Sepolia' }, { name: 'Base Sepolia' }]));
+    setNetworks(
+      toNetworkDefinitions([
+        { name: 'Arbitrum Sepolia', chainId: 421614 },
+        { name: 'Base Sepolia', chainId: 84532 }
+      ])
+    );
 
     const known = await app.inject({
       method: 'GET',
@@ -123,7 +153,12 @@ describe('network catalog', () => {
   });
 
   it('gives networks of the same family different activity', () => {
-    setNetworks(toNetworkDefinitions([{ name: 'Arbitrum Sepolia' }, { name: 'Base Sepolia' }]));
+    setNetworks(
+      toNetworkDefinitions([
+        { name: 'Arbitrum Sepolia', chainId: 421614 },
+        { name: 'Base Sepolia', chainId: 84532 }
+      ])
+    );
 
     const [first, second] = buildOverview('all', 'month', NOW).byNetwork;
 
