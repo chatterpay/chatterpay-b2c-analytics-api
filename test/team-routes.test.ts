@@ -452,6 +452,68 @@ describe('team routes', () => {
     }
   });
 
+  it('pages the activity by cursor in a stable order without repeats or gaps', async () => {
+    // The harness clock stands still, so every event shares one instant and the order rests on the
+    // tie-break alone.
+    for (const name of ['a', 'b', 'c', 'd', 'e']) {
+      await invite(`${name}@example.com`, 'viewer');
+    }
+    const all = await harness.call({
+      method: 'GET',
+      url: '/v1/team/activity?limit=100',
+      token: adminToken
+    });
+    const allIds = (all.json().items as { id: string }[]).map((item) => item.id);
+    expect(all.json().nextCursor).toBeNull();
+    expect(allIds).toHaveLength(6);
+
+    const pagedIds: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const query: string = cursor === null ? 'limit=2' : `limit=2&cursor=${cursor}`;
+      const page = await harness.call({
+        method: 'GET',
+        url: `/v1/team/activity?${query}`,
+        token: adminToken
+      });
+      expect(page.statusCode).toBe(200);
+      const body = page.json() as { items: { id: string }[]; nextCursor: string | null };
+      expect(body.items.length).toBeLessThanOrEqual(2);
+      pagedIds.push(...body.items.map((item) => item.id));
+      cursor = body.nextCursor;
+      pages += 1;
+      if (pages === 1) {
+        // Events stored after the first page are newer than the cursor: later pages skip them
+        // instead of shifting by one.
+        harness.advance(1000);
+        await invite('later@example.com', 'viewer');
+      }
+    } while (cursor !== null && pages < 10);
+
+    expect(pages).toBe(3);
+    expect(pagedIds).toEqual(allIds);
+  });
+
+  it('rejects an activity cursor that does not hold an instant and an event id', async () => {
+    const forged = [
+      'not a cursor',
+      Buffer.from('garbage', 'utf8').toString('base64url'),
+      Buffer.from(`${harness.now().toISOString()}|../../x`, 'utf8').toString('base64url'),
+      Buffer.from(`not-a-date|${UNKNOWN_ID}`, 'utf8').toString('base64url'),
+      'x'.repeat(201)
+    ];
+    for (const cursor of forged) {
+      const response = await harness.call({
+        method: 'GET',
+        url: `/v1/team/activity?cursor=${encodeURIComponent(cursor)}`,
+        token: adminToken
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ code: 'BAD_REQUEST' });
+    }
+  });
+
   it.each([
     [
       'POST',
@@ -487,6 +549,11 @@ describe('team routes', () => {
       ['GET', '/v1/team/members', undefined],
       ['GET', '/v1/team/invites', undefined],
       ['GET', '/v1/team/activity', undefined],
+      [
+        'GET',
+        `/v1/team/activity?limit=1&cursor=${Buffer.from(`2026-01-01T00:00:00.000Z|${UNKNOWN_ID}`).toString('base64url')}`,
+        undefined
+      ],
       [
         'POST',
         '/v1/team/invites',
