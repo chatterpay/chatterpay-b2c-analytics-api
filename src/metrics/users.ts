@@ -231,15 +231,18 @@ function retentionSummary(networks: readonly NetworkId[], now: DayHour): Retenti
  * @param network - Network filter.
  * @param granularity - Series granularity.
  * @param now - Current instant; the dataset ends at its hour.
+ * @param visible - Networks visible in the analytics, which `all` covers; every network of the
+ *   catalog when omitted.
  * @returns The Users response.
  */
 export function buildUsers(
   network: NetworkFilter,
   granularity: UsersGranularity,
-  now: Date
+  now: Date,
+  visible?: readonly NetworkId[]
 ): UsersResponse {
   const point = dayHourOf(now);
-  const networks = networksFor(network);
+  const networks = networksFor(network, visible);
   const plan = planSeries(granularity, point);
   const last30 = dayWindow(point.day - 29, point.day, point.hour);
   const previous30 = shiftWindow(last30, -30);
