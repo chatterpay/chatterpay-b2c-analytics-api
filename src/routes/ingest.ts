@@ -50,7 +50,22 @@ const reportSchema = object({
           network: { type: 'string' },
           status: { type: 'string', enum: ['complete', 'partial', 'failed', 'unsupported'] },
           wallets: count,
-          walletsRead: count
+          walletsRead: count,
+          calls: count,
+          failedCalls: count,
+          b2cEnabled: { type: ['boolean', 'null'] },
+          reason: {
+            type: ['string', 'null'],
+            enum: [
+              'b2c_disabled',
+              'source_absent',
+              'no_endpoint',
+              'unsupported_provider',
+              'read_incomplete',
+              null
+            ]
+          },
+          takenAt: { type: 'string', format: 'date-time' }
         })
       ),
       masterWallets: count
