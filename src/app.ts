@@ -7,6 +7,7 @@ import type { Authenticator } from './auth/principal.js';
 import { loadSigningKeys } from './auth/session-token.js';
 import type { AppEnv } from './config/env.js';
 import { registerErrorHandling } from './plugins/error-handler.js';
+import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { type IngestionHandle, ingestRoutes } from './routes/ingest.js';
@@ -126,7 +127,8 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
   await app.register(healthRoutes, { store });
   await app.register(authRoutes, { prefix: '/v1/auth', env, store, keys, clock });
   await app.register(teamRoutes, { prefix: '/v1/team', store, clock });
-  await app.register(metricsRoutes, { prefix: '/v1/metrics', clock });
+  await app.register(metricsRoutes, { prefix: '/v1/metrics', clock, store });
+  await app.register(adminRoutes, { prefix: '/v1/admin', store, clock });
   await app.register(ingestRoutes, {
     prefix: '/v1/internal',
     ingestion: options.ingestion ?? null
