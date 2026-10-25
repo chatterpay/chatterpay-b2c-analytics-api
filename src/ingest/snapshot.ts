@@ -1,5 +1,6 @@
 import type { NetworkId } from '../metrics/catalog.js';
 import { formatUnits } from '../metrics/decimal.js';
+import type { NetworkReadReason } from '../metrics/types.js';
 import type {
   BalanceReader,
   BalanceSnapshot,
@@ -34,12 +35,22 @@ export interface SnapshotInput {
   masterWallets: readonly MasterWalletConfig[];
   /** USD price per symbol on the snapshot day, from the provider; stable tokens are 1 USD. */
   prices: ReadonlyMap<string, number>;
+  /**
+   * B2C `enabled` by chain id of the networks the B2C database lists; `null` when the document has
+   * no boolean `enabled`. A chain of `chains` absent from it is a network the B2C database dropped.
+   */
+  b2cEnabled: ReadonlyMap<string, boolean | null>;
   budget: CallBudget;
 }
+
+/** Read of one network with every field recorded. */
+export type NetworkRead = Required<SnapshotNetwork>;
 
 /** Result of {@link takeBalanceSnapshot}. */
 export interface SnapshotResult {
   snapshot: BalanceSnapshot;
+  /** The same rows as `snapshot.networks`, typed with every field. */
+  networks: NetworkRead[];
   /** `complete` when every wallet was read, `failed` when none was, `partial` otherwise. */
   status: 'complete' | 'partial' | 'failed';
 }
@@ -184,12 +195,18 @@ async function readCardano(
  * understating a total. A network without endpoint, or with a provider the reader does not speak,
  * is `unsupported`. Values use the price of the snapshot day; an asset without one has no value.
  *
- * @param input - Reader, endpoints, catalog, users, master wallets, prices and budget.
+ * No request is sent for a network whose B2C document has `enabled: false` or that the B2C
+ * database no longer lists, whatever its endpoint: it is `unsupported` with the reason, and its
+ * earlier snapshots stay as they were. A document without a boolean `enabled` is read like an
+ * enabled one, because nothing in it tells a retired network from an active one; its row carries
+ * `b2cEnabled: null`.
+ *
+ * @param input - Reader, endpoints, catalog, users, master wallets, prices, B2C status and budget.
  * @returns The snapshot and its overall status.
  */
 export async function takeBalanceSnapshot(input: SnapshotInput): Promise<SnapshotResult> {
   const endpoints = new Map(input.endpoints.map((endpoint) => [endpoint.chainId, endpoint]));
-  const networks: SnapshotNetwork[] = [];
+  const networks: NetworkRead[] = [];
   const holdings: SnapshotHolding[] = [];
   const masterWallets: MasterWalletReading[] = [];
 
@@ -207,7 +224,15 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
       )
     ];
     const masters = input.masterWallets.filter((wallet) => wallet.network === chain.network);
+    const listed = input.b2cEnabled.has(chain.chainId);
+    const b2cEnabled = input.b2cEnabled.get(chain.chainId) ?? null;
+    const skipped: NetworkReadReason | null = !listed
+      ? 'source_absent'
+      : b2cEnabled === false
+        ? 'b2c_disabled'
+        : null;
     const supported =
+      skipped === null &&
       endpoint !== undefined &&
       (endpoint.family === 'evm' || input.reader.supportsCardano(endpoint.url));
     const assets =
@@ -217,6 +242,8 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
     const masterAddresses = masters.map((wallet) => normalize(wallet.address));
 
     let balances: WalletBalances = new Map();
+    const callsBefore = input.budget.used;
+    const failedBefore = input.budget.failed;
     if (supported && endpoint !== undefined) {
       const addresses = [...new Set([...holders, ...masterAddresses])];
       balances =
@@ -233,13 +260,26 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
     }
 
     const read = holders.filter((holder) => balances.has(holder));
+    const reason: NetworkReadReason | null =
+      skipped ??
+      (endpoint === undefined
+        ? 'no_endpoint'
+        : !supported
+          ? 'unsupported_provider'
+          : read.length < holders.length
+            ? 'read_incomplete'
+            : null);
     networks.push({
       network: chain.network,
       // The status describes the user wallets; a network without any has nothing left unread.
       status:
         supported || holders.length === 0 ? statusOf(holders.length, read.length) : 'unsupported',
       wallets: holders.length,
-      walletsRead: read.length
+      walletsRead: read.length,
+      calls: input.budget.used - callsBefore,
+      failedCalls: input.budget.failed - failedBefore,
+      b2cEnabled,
+      reason
     });
     assets.forEach((asset, index) => {
       let raw = 0n;
@@ -296,6 +336,7 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
   const unread = networks.some((row) => row.status !== 'complete');
   return {
     snapshot: { networks, holdings, masterWallets },
+    networks,
     status: !unread ? 'complete' : wallets > 0 && read === 0 ? 'failed' : 'partial'
   };
 }
