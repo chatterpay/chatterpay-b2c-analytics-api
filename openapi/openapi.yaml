@@ -26,6 +26,8 @@ components:
             - FORBIDDEN
             - NOT_FOUND
             - CONFLICT
+            - CONFIG_CONFLICT
+            - LAST_ENABLED_NETWORK
             - PAYLOAD_TOO_LARGE
             - RATE_LIMITED
             - SERVICE_UNAVAILABLE
@@ -680,11 +682,13 @@ paths:
                             - invite_accepted
                             - role_changed
                             - member_removed
+                            - network_hidden
+                            - network_shown
                         target:
                           type:
                             - "null"
                             - string
-                          description: Email the action applies to.
+                          description: Email the action applies to, or the network as "Label (chainId)".
                         outcome:
                           type: string
                           enum:
@@ -1051,7 +1055,7 @@ paths:
   /v1/metrics/networks:
     get:
       operationId: getMetricsNetworks
-      summary: Networks of the environment, from the ChatterPay B2C database
+      summary: "Networks the statistics show: the catalog without the hidden networks"
       tags:
         - metrics
       responses:
@@ -3296,6 +3300,228 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /v1/admin/networks:
+    get:
+      operationId: listAdminNetworks
+      summary: Every network of the catalog with its analytics visibility
+      tags:
+        - admin
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - revision
+                  - updatedAt
+                  - networks
+                properties:
+                  revision:
+                    type: integer
+                    minimum: 0
+                    description: Revision of the visibility policy; send it back as
+                      expectedRevision.
+                  updatedAt:
+                    type:
+                      - "null"
+                      - string
+                    format: date-time
+                  networks:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - id
+                        - chainId
+                        - label
+                        - family
+                        - analyticsEnabled
+                        - b2cEnabled
+                        - sourcePresent
+                      properties:
+                        id:
+                          type: string
+                          pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                          maxLength: 64
+                        chainId:
+                          type: string
+                          pattern: ^[0-9]{1,30}$
+                        label:
+                          type: string
+                        family:
+                          type: string
+                          enum:
+                            - evm
+                            - cardano
+                        analyticsEnabled:
+                          type: boolean
+                          description: Whether the statistics of the analytics include the network.
+                        b2cEnabled:
+                          type:
+                            - "null"
+                            - boolean
+                          description: "enabled of the B2C document: whether B2C accepts new operations on
+                            the network. Informative only; null when the
+                            document has no such field or B2C no longer lists
+                            the network."
+                        sourcePresent:
+                          type: boolean
+                          description: false for a network the B2C database no longer lists, kept by the
+                            analytics for its history.
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/admin/networks/{chainId}:
+    patch:
+      operationId: changeAdminNetworkVisibility
+      summary: Show or hide a network in the statistics; keeps at least one network
+        visible
+      tags:
+        - admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - analyticsEnabled
+                - expectedRevision
+              properties:
+                analyticsEnabled:
+                  type: boolean
+                expectedRevision:
+                  type: integer
+                  minimum: 0
+      parameters:
+        - schema:
+            type: string
+            pattern: ^[0-9]{1,30}$
+          in: path
+          name: chainId
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - revision
+                  - updatedAt
+                  - networks
+                properties:
+                  revision:
+                    type: integer
+                    minimum: 0
+                    description: Revision of the visibility policy; send it back as
+                      expectedRevision.
+                  updatedAt:
+                    type:
+                      - "null"
+                      - string
+                    format: date-time
+                  networks:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - id
+                        - chainId
+                        - label
+                        - family
+                        - analyticsEnabled
+                        - b2cEnabled
+                        - sourcePresent
+                      properties:
+                        id:
+                          type: string
+                          pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                          maxLength: 64
+                        chainId:
+                          type: string
+                          pattern: ^[0-9]{1,30}$
+                        label:
+                          type: string
+                        family:
+                          type: string
+                          enum:
+                            - evm
+                            - cardano
+                        analyticsEnabled:
+                          type: boolean
+                          description: Whether the statistics of the analytics include the network.
+                        b2cEnabled:
+                          type:
+                            - "null"
+                            - boolean
+                          description: "enabled of the B2C document: whether B2C accepts new operations on
+                            the network. Informative only; null when the
+                            document has no such field or B2C no longer lists
+                            the network."
+                        sourcePresent:
+                          type: boolean
+                          description: false for a network the B2C database no longer lists, kept by the
+                            analytics for its history.
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /v1/internal/ingest:
     post:
       operationId: runIngestion
@@ -3381,11 +3607,19 @@ paths:
                         required:
                           - tokens
                           - networks
+                          - retainedTokens
+                          - retainedNetworks
                         properties:
                           tokens:
                             type: integer
                             minimum: 0
                           networks:
+                            type: integer
+                            minimum: 0
+                          retainedTokens:
+                            type: integer
+                            minimum: 0
+                          retainedNetworks:
                             type: integer
                             minimum: 0
                       prices:
