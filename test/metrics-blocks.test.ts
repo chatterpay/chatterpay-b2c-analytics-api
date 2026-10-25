@@ -284,6 +284,16 @@ describe('live blocks', () => {
     expect(complete.tile.value).toBe(2);
   });
 
+  it('marks new wallets unavailable while no wallet is recorded', () => {
+    install([]);
+
+    expect(buildUsers('cardano-preprod', 'monthly', NOW).newWallets).toMatchObject({
+      availability: 'unavailable',
+      reason: 'not_recorded',
+      coverage: { wallets: 0, verifiedWallets: 0 }
+    });
+  });
+
   it('does not take an unbounded first observation as an appearance', () => {
     install(
       [],
