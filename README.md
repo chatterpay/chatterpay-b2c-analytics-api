@@ -174,7 +174,7 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 - Members exist only in the database. The first admin of a new database is inserted by an operator; the rest join through invites.
 - Invariants hold without multi-document transactions: unique indexes for one active member and one pending invite per email and one invite per `mutationId`, conditional single-document updates for challenges and invite transitions, and a compensating update for the last active admin (two concurrent changes that would each remove it can both be undone).
 - The in-memory store is refused in production and logs a warning elsewhere.
-- `MONGO_TEST_URI=mongodb://127.0.0.1:27017 yarn test` runs the route suites on MongoDB, each test on a throwaway database that is dropped afterwards.
+- `MONGO_TEST_URI=mongodb://127.0.0.1:27017 yarn test` runs the route suites on MongoDB, each test on a throwaway database that is dropped afterwards, and the ingestion suite of `test/retired-network.integration.test.ts`, which seeds a synthetic B2C database and an analytics database with unique names, drops both, and refuses a server that is not on this machine. Without `MONGO_TEST_URI` that suite is skipped.
 
 ## Ingestion
 
