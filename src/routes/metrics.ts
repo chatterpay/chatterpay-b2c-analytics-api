@@ -81,6 +81,18 @@ const reason = {
     'no_transactions',
     'no_eligible_cohort',
     'not_configured',
+    'not_read',
+    null
+  ]
+} as const;
+const networkReadReason = {
+  type: ['string', 'null'],
+  enum: [
+    'b2c_disabled',
+    'source_absent',
+    'no_endpoint',
+    'unsupported_provider',
+    'read_incomplete',
     null
   ]
 } as const;
@@ -129,9 +141,10 @@ const tvlBlock = block({
     object({
       network,
       label: { type: 'string' },
-      tvlUsd: decimal,
+      tvlUsd: nullableDecimal,
       share: nullableRatio,
-      status: { type: 'string', enum: ['complete', 'partial', 'failed', 'unsupported'] }
+      status: { type: 'string', enum: ['complete', 'partial', 'failed', 'unsupported'] },
+      reason: networkReadReason
     })
   )
 });
