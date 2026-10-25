@@ -101,6 +101,9 @@ export type Availability = 'available' | 'partial' | 'unavailable';
  * - `no_transactions`: the figure divides by a number of operations that is zero.
  * - `no_eligible_cohort`: no cohort with users is old enough for the retention month.
  * - `not_configured`: nothing is configured to read (no master wallets).
+ * - `not_read`: the snapshot holds no reading of the selected networks (disabled in B2C, no longer
+ *   listed by it, without a supported endpoint, or every request failed). Earlier snapshots keep
+ *   their own values; they are not served as the current one.
  */
 export type UnavailableReason =
   | 'no_snapshot'
@@ -111,7 +114,8 @@ export type UnavailableReason =
   | 'not_recorded'
   | 'no_transactions'
   | 'no_eligible_cohort'
-  | 'not_configured';
+  | 'not_configured'
+  | 'not_read';
 
 /** Origin, availability and freshness of a block of a response. */
 export interface BlockStatus {
@@ -126,6 +130,22 @@ export interface BlockStatus {
 
 /** Status of the read of one network in a balance snapshot. */
 export type NetworkReadStatus = 'complete' | 'partial' | 'failed' | 'unsupported';
+
+/**
+ * Why a network of a balance snapshot was not read, or not read completely.
+ *
+ * - `b2c_disabled`: the B2C document has `enabled: false`; no request is sent for the network.
+ * - `source_absent`: the B2C database no longer lists the network; no request is sent for it.
+ * - `no_endpoint`: the B2C document has no HTTPS `rpc` or `providerUrl`.
+ * - `unsupported_provider`: the endpoint speaks a dialect the reader does not.
+ * - `read_incomplete`: some wallets were not read (failed requests, call budget or deadline).
+ */
+export type NetworkReadReason =
+  | 'b2c_disabled'
+  | 'source_absent'
+  | 'no_endpoint'
+  | 'unsupported_provider'
+  | 'read_incomplete';
 
 /** Wallets a balance snapshot covers. */
 export interface SnapshotCoverage {
@@ -150,9 +170,18 @@ export interface TvlBlock extends BlockStatus {
   coverage: SnapshotCoverage | null;
   /** Last snapshot inside each bucket; `tvlUsd` and `asOf` are `null` for a bucket without one. */
   series: Array<Period & { tvlUsd: string | null; asOf: string | null }>;
-  /** Networks of the snapshot behind `value`; `share` is a ratio of the total with 4 places. */
+  /**
+   * Networks of the snapshot behind `value`; `share` is a ratio of the total with 4 places.
+   * `tvlUsd` and `share` are `null` for a network with wallets that was not read (`failed` or
+   * `unsupported`); `reason` says why, and is `null` for snapshots stored before it was recorded.
+   */
   byNetwork: Array<
-    NetworkRef & { tvlUsd: string; share: string | null; status: NetworkReadStatus }
+    NetworkRef & {
+      tvlUsd: string | null;
+      share: string | null;
+      status: NetworkReadStatus;
+      reason: NetworkReadReason | null;
+    }
   >;
 }
 
