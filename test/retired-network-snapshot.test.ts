@@ -59,6 +59,16 @@ const SCROLL_TOKEN: TokenInfo = {
   decimals: 6
 };
 const BASE_USDC: TokenInfo = TOKENS[0] as TokenInfo;
+/** Native coin of an EVM network as a B2C token document with a placeholder address. */
+function nativeOf(chainId: string): TokenInfo {
+  return {
+    chainId,
+    symbol: 'ETH',
+    stable: false,
+    address: '0x0000000000000000000000000000000000000000',
+    decimals: 18
+  };
+}
 
 /** Users: one on Base and Scroll, one on Scroll only, one on Base only. */
 const USERS: Array<IngestedUser & { country: string }> = [
@@ -131,7 +141,8 @@ describe('balance snapshot of networks disabled in B2C', () => {
       calls: 1,
       failedCalls: 0,
       b2cEnabled: true,
-      reason: null
+      reason: null,
+      native: 'not_listed'
     });
     expect(snapshot.masterWallets).toMatchObject([{ network: 'scroll', status: 'complete' }]);
   });
@@ -158,7 +169,8 @@ describe('balance snapshot of networks disabled in B2C', () => {
       calls: 0,
       failedCalls: 0,
       b2cEnabled: false,
-      reason: 'b2c_disabled'
+      reason: 'b2c_disabled',
+      native: 'not_listed'
     });
     expect(snapshot.holdings.map((holding) => holding.network)).toEqual(['base-sepolia']);
     expect(snapshot.masterWallets).toMatchObject([
@@ -312,7 +324,7 @@ function b2cReader(scrollEnabled: boolean | null): FakeReader {
   const reader = new FakeReader(
     activity(),
     USERS,
-    [BASE_USDC, SCROLL_TOKEN],
+    [BASE_USDC, nativeOf(BASE_CHAIN), SCROLL_TOKEN, nativeOf(SCROLL_CHAIN)],
     [BASE, SCROLL],
     [BASE_ENDPOINT, SCROLL_ENDPOINT]
   );
@@ -381,6 +393,7 @@ describe('ingestion of a network disabled in B2C', () => {
         failedCalls: 0,
         b2cEnabled: true,
         reason: null,
+        native: 'included',
         takenAt: DAY_TWO.toISOString()
       },
       {
@@ -392,6 +405,7 @@ describe('ingestion of a network disabled in B2C', () => {
         failedCalls: 0,
         b2cEnabled: false,
         reason: 'b2c_disabled',
+        native: 'included',
         takenAt: DAY_TWO.toISOString()
       }
     ]);
