@@ -6,18 +6,23 @@ import { rpcBalanceReader } from './ingest/balance-reader.js';
 import { coingeckoPriceProvider } from './ingest/coingecko.js';
 import { refreshLiveMetrics } from './ingest/live-loader.js';
 import { runIngestion } from './ingest/run.js';
-import { listNetworks, setNetworks } from './metrics/catalog.js';
+import { listNetworks, type NetworkDefinition, setNetworks } from './metrics/catalog.js';
 import { resetFactsCaches } from './metrics/facts.js';
 import type { IngestionHandle } from './routes/ingest.js';
-import { B2cNetworkSource, databaseFromUri } from './store/b2c-networks.js';
+import { B2cNetworkSource, databaseFromUri, mergeCatalog } from './store/b2c-networks.js';
 import { type ConnectAttempt, connectWithRetry } from './store/connect-retry.js';
 import { MongoIngestRepository } from './store/ingest-store.js';
 import { MemoryStore } from './store/memory-store.js';
 import { MongoStore } from './store/mongo-store.js';
+import { visibleNetworks } from './store/network-visibility.js';
 import type { Store } from './store/types.js';
 
 const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM'] as const;
-/** Interval between reads of the B2C networks, so a network added there shows up without a deploy. */
+/**
+ * Interval between reads of the B2C networks, so a network added there shows up without a deploy.
+ * It bounds how long instances can disagree on the catalog; the visibility policy is read on every
+ * request and has no such delay.
+ */
 const NETWORKS_REFRESH_MS = 5 * 60 * 1000;
 /** Margin between the run deadline and the lock expiry, so a slow last batch keeps the lock. */
 const LOCK_MARGIN_MS = 5 * 60 * 1000;
@@ -52,6 +57,8 @@ function ingestionHandle(
   const maxRunMs = env.INGEST_MAX_RUN_SECONDS * 1000;
   return {
     run: async () => {
+      // The run copies every network and token whatever the B2C `enabled` and the analytics
+      // visibility; the visibility only filters what the metrics endpoints serve.
       const report = await runIngestion({
         reader: networks.activity(),
         repository,
@@ -91,7 +98,9 @@ function ingestionHandle(
  *
  * With Mongo configured, the analytics and B2C connections and the first read of the networks must
  * succeed or the process does not start. The connections are retried until `STARTUP_CONNECT_MS`
- * after startup. Later reads of the networks that fail keep the previous catalog.
+ * after startup. The catalog is the B2C networks plus the networks the analytics database retains
+ * for their history. Later reads that fail keep the previous catalog, and so does a read after
+ * which no network would be visible.
  *
  * Live metrics are the last aggregate build of the analytics database, loaded at startup, after
  * each ingestion run of this instance and every `METRICS_REFRESH_SECONDS` (another instance may
@@ -124,9 +133,6 @@ async function main(): Promise<void> {
           deadline,
           log: logConnectAttempt
         });
-  if (networks !== null) {
-    setNetworks(await networks.load());
-  }
   const ingest =
     mongoUri === null || networks === null
       ? null
@@ -137,6 +143,13 @@ async function main(): Promise<void> {
           deadline,
           log: logConnectAttempt
         });
+
+  // B2C networks plus the networks the analytics database retains for their history.
+  const loadCatalog = async (source: B2cNetworkSource): Promise<NetworkDefinition[]> =>
+    mergeCatalog(await source.load(), ingest === null ? [] : await ingest.chains());
+  if (networks !== null) {
+    setNetworks(await loadCatalog(networks));
+  }
 
   let loadedAt: Date | null = null;
   const refreshLive = async (): Promise<void> => {
@@ -149,12 +162,54 @@ async function main(): Promise<void> {
     }
   };
 
+  /**
+   * Replaces the catalog when it changed. A catalog in which no network would be visible under the
+   * current policy is refused and the previous one kept, so the metrics never serve zero networks.
+   */
+  const applyCatalog = async (definitions: NetworkDefinition[]): Promise<void> => {
+    if (
+      definitions.length === 0 ||
+      JSON.stringify(definitions) === JSON.stringify(listNetworks())
+    ) {
+      return;
+    }
+    if (visibleNetworks(definitions, await store.networkVisibility()).length === 0) {
+      app.log.error(
+        { networks: definitions.map((network) => network.id) },
+        'network catalog change refused: no network would be visible'
+      );
+      return;
+    }
+    setNetworks(definitions);
+    resetFactsCaches();
+    app.log.info({ networks: definitions.map((network) => network.id) }, 'network catalog changed');
+  };
+
   const app = await buildApp(env, {
     store,
     ingestion:
       ingest === null || networks === null
         ? null
-        : ingestionHandle(env, networks, ingest, refreshLive)
+        : ingestionHandle(env, networks, ingest, async () => {
+            await refreshLive();
+            // A run can retain a network the B2C database dropped; the catalog follows at once.
+            try {
+              await applyCatalog(await loadCatalog(networks));
+              const catalog = listNetworks();
+              const visible = visibleNetworks(catalog, await store.networkVisibility()).length;
+              app.log.info(
+                {
+                  catalogNetworks: catalog.length,
+                  catalogRetained: catalog.filter((network) => !network.sourcePresent).length,
+                  analyticsEnabled: visible,
+                  analyticsDisabled: catalog.length - visible
+                },
+                'network catalog after ingestion'
+              );
+            } catch (error) {
+              app.log.warn({ err: error }, 'network catalog refresh failed');
+            }
+          })
   });
   app.log.info({ networks: listNetworks().map((network) => network.id) }, 'network catalog');
   await refreshLive().catch((error: unknown) => {
@@ -174,22 +229,11 @@ async function main(): Promise<void> {
     networks === null
       ? null
       : setInterval(() => {
-          networks.load().then(
-            (definitions) => {
-              const current = JSON.stringify(listNetworks());
-              if (definitions.length > 0 && JSON.stringify(definitions) !== current) {
-                setNetworks(definitions);
-                resetFactsCaches();
-                app.log.info(
-                  { networks: definitions.map((network) => network.id) },
-                  'network catalog changed'
-                );
-              }
-            },
-            (error: unknown) => {
+          loadCatalog(networks)
+            .then(applyCatalog)
+            .catch((error: unknown) => {
               app.log.warn({ err: error }, 'network catalog refresh failed');
-            }
-          );
+            });
         }, NETWORKS_REFRESH_MS);
   refresh?.unref();
 
