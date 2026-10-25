@@ -1,3 +1,4 @@
+import type { UnpricedOperations } from '../ingest/types.js';
 import { allocateInteger } from './allocate.js';
 import type { DayHour, TimeWindow } from './calendar.js';
 import { dayNumberFromIso, daysTouched } from './calendar.js';
@@ -23,10 +24,16 @@ export interface Facts {
   swapVolume: Record<string, number>;
   transferFees: Record<string, number>;
   swapFees: Record<string, number>;
+  /**
+   * Operations per money figure and asset without a USD value, left out of the cents above. The
+   * synthetic model values every operation, so its records are empty.
+   */
+  unpriced: UnpricedOperations;
 }
 
 type CountKey = 'newUsers' | 'newWallets' | 'activeUserDays' | 'transfers' | 'swaps';
-type MoneyKey = 'transferVolume' | 'swapVolume' | 'transferFees' | 'swapFees';
+/** Money figures of {@link Facts}, each with its record of unpriced operations. */
+export type MoneyKey = 'transferVolume' | 'swapVolume' | 'transferFees' | 'swapFees';
 
 const COUNT_KEYS: readonly CountKey[] = [
   'newUsers',
@@ -35,7 +42,8 @@ const COUNT_KEYS: readonly CountKey[] = [
   'transfers',
   'swaps'
 ];
-const MONEY_KEYS: readonly MoneyKey[] = [
+/** Every {@link MoneyKey}. */
+export const MONEY_KEYS: readonly MoneyKey[] = [
   'transferVolume',
   'swapVolume',
   'transferFees',
@@ -71,8 +79,24 @@ export function emptyFacts(network: NetworkId): Facts {
     transferVolume: zeros(),
     swapVolume: zeros(),
     transferFees: zeros(),
-    swapFees: zeros()
+    swapFees: zeros(),
+    unpriced: emptyUnpriced()
   };
+}
+
+/**
+ * Records of unpriced operations without any entry.
+ *
+ * @returns One empty record per money figure.
+ */
+export function emptyUnpriced(): UnpricedOperations {
+  return { transferVolume: {}, swapVolume: {}, transferFees: {}, swapFees: {} };
+}
+
+function addRecord(target: Record<string, number>, item: Readonly<Record<string, number>>): void {
+  for (const [asset, value] of Object.entries(item)) {
+    target[asset] = (target[asset] ?? 0) + value;
+  }
 }
 
 function noise(network: NetworkId, day: number, key: string): number {
@@ -166,9 +190,8 @@ export function sumFacts(network: NetworkId, items: readonly Facts[]): Facts {
       total[key] += item[key];
     }
     for (const key of MONEY_KEYS) {
-      for (const [asset, value] of Object.entries(item[key])) {
-        total[key][asset] = (total[key][asset] ?? 0) + value;
-      }
+      addRecord(total[key], item[key]);
+      addRecord(total.unpriced[key], item.unpriced[key]);
     }
   }
   return total;
