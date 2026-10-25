@@ -13,11 +13,27 @@ export const NETWORK_ID_PATTERN = '^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$';
 /** Family of a network, which selects the synthetic activity template. */
 export type NetworkFamily = 'evm' | 'cardano';
 
-/** Network of the catalog, as read from the B2C `blockchains` collection. */
+/**
+ * Network of the catalog: a document of the B2C `blockchains` collection, or a network the
+ * analytics database retains because it has history after the B2C database dropped it.
+ */
 export interface NetworkDefinition {
   id: NetworkId;
   label: string;
   family: NetworkFamily;
+  /**
+   * Chain id as a decimal string. It keys the analytics visibility of the network, because the id
+   * is derived from a name that can change.
+   */
+  chainId: string;
+  /**
+   * `enabled` of the B2C document: whether B2C accepts new operations on the network. Informative
+   * only; it never decides what the analytics import or show. `null` when the document has no such
+   * field or the B2C database no longer lists the network.
+   */
+  b2cEnabled: boolean | null;
+  /** `false` for a network the B2C database no longer lists, kept for its history. */
+  sourcePresent: boolean;
 }
 
 /** Version of the synthetic dataset; changing the generator requires a new value. */
@@ -86,10 +102,27 @@ const TEMPLATES: Readonly<Record<NetworkFamily, ActivityTemplate>> = {
   }
 };
 
-/** Catalog used until the B2C networks are loaded, and by tests and local runs without Mongo. */
+/**
+ * Catalog used until the B2C networks are loaded, and by tests and local runs without Mongo. Only
+ * synthetic data is served with it, so the Cardano chain id is a placeholder.
+ */
 export const DEFAULT_NETWORKS: readonly NetworkDefinition[] = [
-  { id: 'base-sepolia', label: 'Base Sepolia', family: 'evm' },
-  { id: 'cardano-preprod', label: 'Cardano Preprod', family: 'cardano' }
+  {
+    id: 'base-sepolia',
+    label: 'Base Sepolia',
+    family: 'evm',
+    chainId: '84532',
+    b2cEnabled: null,
+    sourcePresent: true
+  },
+  {
+    id: 'cardano-preprod',
+    label: 'Cardano Preprod',
+    family: 'cardano',
+    chainId: '900000000001',
+    b2cEnabled: null,
+    sourcePresent: true
+  }
 ];
 
 /**
@@ -120,6 +153,7 @@ function profileOf(definition: NetworkDefinition, position: number): NetworkProf
 
 let profiles: ReadonlyMap<NetworkId, NetworkProfile> = new Map();
 let networkIds: readonly NetworkId[] = [];
+let definitionsInOrder: readonly NetworkDefinition[] = [];
 
 /**
  * Replaces the network catalog. Ids must be unique and match {@link NETWORK_ID_PATTERN}.
@@ -134,40 +168,33 @@ export function setNetworks(definitions: readonly NetworkDefinition[]): void {
   const pattern = new RegExp(NETWORK_ID_PATTERN);
   const next = new Map<NetworkId, NetworkProfile>();
   const perFamily = new Map<NetworkFamily, number>();
+  const chainIds = new Set<string>();
   for (const definition of definitions) {
     if (!pattern.test(definition.id) || next.has(definition.id)) {
       throw new Error(`Invalid or duplicated network id: ${definition.id}`);
     }
+    if (!/^\d+$/.test(definition.chainId) || chainIds.has(definition.chainId)) {
+      throw new Error(`Invalid or duplicated chain id of network ${definition.id}`);
+    }
+    chainIds.add(definition.chainId);
     const position = perFamily.get(definition.family) ?? 0;
     perFamily.set(definition.family, position + 1);
     next.set(definition.id, profileOf(definition, position));
   }
   profiles = next;
   networkIds = definitions.map((definition) => definition.id);
+  definitionsInOrder = definitions.map((definition) => ({ ...definition }));
 }
 
 setNetworks(DEFAULT_NETWORKS);
 
 /**
- * Networks of the catalog, in display order.
+ * Networks of the catalog, in display order, whatever their analytics visibility.
  *
- * @returns Id, label and family of each network.
+ * @returns Each network with its chain id and B2C status.
  */
 export function listNetworks(): NetworkDefinition[] {
-  return networkIds.map((id) => {
-    const { label, family } = networkProfile(id);
-    return { id, label, family };
-  });
-}
-
-/**
- * Tells whether a network filter names `all` or a network of the catalog.
- *
- * @param filter - Value of the `network` query parameter.
- * @returns `true` when the metrics endpoints can serve it.
- */
-export function isKnownNetwork(filter: string): filter is NetworkFilter {
-  return filter === 'all' || profiles.has(filter);
+  return definitionsInOrder.map((definition) => ({ ...definition }));
 }
 
 /**
@@ -189,8 +216,13 @@ export function networkProfile(network: NetworkId): NetworkProfile {
  * Expands a network filter into the networks it covers.
  *
  * @param filter - `all` or a single network id.
+ * @param visible - Networks `all` stands for: the networks visible in the analytics, in display
+ *   order. Every network of the catalog when omitted.
  * @returns The covered networks, in display order.
  */
-export function networksFor(filter: NetworkFilter): readonly NetworkId[] {
-  return filter === 'all' ? networkIds : [filter];
+export function networksFor(
+  filter: NetworkFilter,
+  visible: readonly NetworkId[] = networkIds
+): readonly NetworkId[] {
+  return filter === 'all' ? visible : [filter];
 }
