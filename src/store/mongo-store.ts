@@ -18,7 +18,10 @@ import type {
   Challenge,
   CreateInviteResult,
   Invite,
+  InviteCounts,
+  InviteCursor,
   InviteTransitionResult,
+  InviteView,
   MemberMutationResult,
   NetworkVisibility,
   NetworkVisibilityChange,
@@ -71,6 +74,16 @@ function toChallenge({ _id, ...rest }: ChallengeDoc): Challenge {
 function toInvite({ _id, ...rest }: InviteDoc, now: Date): Invite {
   const expired = rest.status === PENDING && rest.expiresAt.getTime() <= now.getTime();
   return { id: _id, ...rest, status: expired ? 'expired' : rest.status };
+}
+
+/**
+ * Invites of a view at `now`. Pending invites are stored as `simulated` until they are accepted,
+ * revoked or found expired; a `simulated` invite past `expiresAt` belongs to the history.
+ */
+function inviteViewFilter(view: InviteView, now: Date): Filter<InviteDoc> {
+  return view === 'pending'
+    ? { status: PENDING, expiresAt: { $gt: now } }
+    : { $or: [{ status: { $ne: PENDING } }, { expiresAt: { $lte: now } }] };
 }
 
 function toActivity({ _id, ...rest }: ActivityDoc): ActivityEvent {
@@ -347,9 +360,42 @@ export class MongoStore implements Store {
     }
   }
 
-  async listInvites(now: Date): Promise<Invite[]> {
-    const invites = await this.invites.find({}).sort({ createdAt: -1 }).toArray();
+  async listInvites(
+    view: InviteView,
+    limit: number,
+    now: Date,
+    after?: InviteCursor
+  ): Promise<Invite[]> {
+    // Invite ids are UUID strings, so the tie-break compares them as strings, as the memory store
+    // does.
+    const filter: Filter<InviteDoc> =
+      after === undefined
+        ? inviteViewFilter(view, now)
+        : {
+            $and: [
+              inviteViewFilter(view, now),
+              {
+                $or: [
+                  { createdAt: { $lt: after.createdAt } },
+                  { createdAt: after.createdAt, _id: { $lt: after.id } }
+                ]
+              }
+            ]
+          };
+    const invites = await this.invites
+      .find(filter)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit)
+      .toArray();
     return invites.map((invite) => toInvite(invite, now));
+  }
+
+  async countInvites(now: Date): Promise<InviteCounts> {
+    const [pending, history] = await Promise.all([
+      this.invites.countDocuments(inviteViewFilter('pending', now)),
+      this.invites.countDocuments(inviteViewFilter('history', now))
+    ]);
+    return { pending, history };
   }
 
   async resendInvite(id: string, now: Date): Promise<InviteTransitionResult> {
