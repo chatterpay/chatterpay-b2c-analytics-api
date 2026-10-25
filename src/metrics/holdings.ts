@@ -1,4 +1,4 @@
-import type { CountryCount, RunSnapshot } from '../ingest/types.js';
+import type { CountryCount, RunSnapshot, SnapshotNetwork } from '../ingest/types.js';
 import { periodOf, type TimeWindow } from './calendar.js';
 import { listNetworks, type NetworkId, networkProfile } from './catalog.js';
 import { addDecimals, shareOf } from './decimal.js';
@@ -31,6 +31,21 @@ function missingReason(source: SnapshotSource): UnavailableReason {
 
 function sum(values: readonly number[]): number {
   return values.reduce((total, value) => total + value, 0);
+}
+
+/** Whether a network row holds a reading: every or some of its wallets, or none to read. */
+function wasRead(row: SnapshotNetwork): boolean {
+  return row.status === 'complete' || row.status === 'partial';
+}
+
+/**
+ * Whether a snapshot holds a reading of any of `networks`. Without one, its sums are not a value
+ * of the networks but the absence of one, so the blocks answer `null` instead of zero.
+ */
+function readsAny(snapshot: RunSnapshot, networks: ReadonlySet<NetworkId>): boolean {
+  return (snapshot.balances?.networks ?? []).some(
+    (row) => networks.has(row.network) && wasRead(row)
+  );
 }
 
 /** USD cents of the priced holdings of `networks` in a snapshot. */
@@ -83,7 +98,8 @@ function asOfOf(source: SnapshotSource, snapshot: RunSnapshot): string | null {
  * Builds the TVL block: the USD value of the assets in user wallets, from the last snapshot taken
  * through the end of the range. The comparison value is the last snapshot inside the previous
  * period; each series bucket takes the last snapshot inside it. Without a snapshot the value is
- * `null`: earlier periods are never estimated.
+ * `null`: earlier periods are never estimated. A snapshot that read none of the selected networks
+ * gives `null` as well (`not_read`): an earlier reading is never served as the current balance.
  *
  * @param networks - Networks of the filter.
  * @param resolved - Range windows and buckets.
@@ -99,7 +115,8 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
     const found = source.balancesBetween(firstHour(bucket), lastHour(bucket));
     return {
       ...periodOf(bucket),
-      tvlUsd: found === null ? null : centsToUsd(tvlCents(found, selected)),
+      tvlUsd:
+        found === null || !readsAny(found, selected) ? null : centsToUsd(tvlCents(found, selected)),
       asOf: found === null ? null : found.takenAt.toISOString()
     };
   });
@@ -122,11 +139,19 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
       ? null
       : source.balancesBetween(firstHour(previousWindow), lastHour(previousWindow));
   const total = tvlCents(current, selected);
+  const read = readsAny(current, selected);
   return {
     source: kind,
-    ...snapshotAvailability(current, selected),
+    ...(read
+      ? snapshotAvailability(current, selected)
+      : { availability: 'unavailable', reason: 'not_read' }),
     asOf: asOfOf(source, current),
-    value: moneyMetric(total, previous === null ? null : tvlCents(previous, selected)),
+    value: read
+      ? moneyMetric(
+          total,
+          previous === null || !readsAny(previous, selected) ? null : tvlCents(previous, selected)
+        )
+      : null,
     firstSnapshotAt: first?.toISOString() ?? null,
     coverage: coverageOf(current, selected),
     series,
@@ -137,9 +162,10 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
         return {
           network: row.network,
           label: networkProfile(row.network).label,
-          tvlUsd: centsToUsd(cents),
-          share: shareOf(cents, total),
-          status: row.status
+          tvlUsd: wasRead(row) ? centsToUsd(cents) : null,
+          share: wasRead(row) ? shareOf(cents, total) : null,
+          status: row.status,
+          reason: row.reason ?? null
         };
       })
   };
@@ -147,7 +173,8 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
 
 /**
  * Builds the Top Tokens block from the snapshot behind the TVL: each asset summed over the selected
- * networks, by USD value. An asset unpriced on any of them has no value and goes last.
+ * networks, by USD value. An asset unpriced on any of them has no value and goes last. A snapshot
+ * that read none of the selected networks answers `unavailable` (`not_read`), as the TVL does.
  *
  * @param networks - Networks of the filter.
  * @param resolved - Range windows.
@@ -166,6 +193,16 @@ export function buildTopTokens(
       availability: 'unavailable',
       reason: missingReason(source),
       asOf: null,
+      items: [],
+      totalUsd: null
+    };
+  }
+  if (!readsAny(current, selected)) {
+    return {
+      source: source.kind,
+      availability: 'unavailable',
+      reason: 'not_read',
+      asOf: asOfOf(source, current),
       items: [],
       totalUsd: null
     };
@@ -299,6 +336,8 @@ export function buildTopCountries(
 /**
  * Builds the Master Wallets block: the configured signers of the selected networks with their
  * balances in the last snapshot. Balances are not fees: nothing here is attributed as revenue.
+ * When none of the listed wallets was read the block is `unavailable` (`not_read`) and its total
+ * `null`; the wallets stay listed with their status.
  *
  * @param networks - Networks of the filter.
  * @param now - Current hour, in hours since 1970-01-01T00:00Z.
@@ -341,13 +380,20 @@ export function buildMasterWallets(
   });
   const total = sum(valued.map((item) => item.cents ?? 0));
   const unread = wallets.some((wallet) => wallet.status !== 'complete');
+  const noneRead = wallets.every((wallet) => wallet.status !== 'complete');
   const unpriced = wallets.some((wallet) =>
     wallet.balances.some((balance) => balance.valueCents === null)
   );
   return {
     source: source.kind,
-    availability: unread || unpriced ? 'partial' : 'available',
-    reason: unread ? 'partial_coverage' : unpriced ? 'unpriced_assets' : null,
+    availability: noneRead ? 'unavailable' : unread || unpriced ? 'partial' : 'available',
+    reason: noneRead
+      ? 'not_read'
+      : unread
+        ? 'partial_coverage'
+        : unpriced
+          ? 'unpriced_assets'
+          : null,
     asOf: asOfOf(source, current),
     items: valued.map(({ wallet, cents }) => ({
       network: wallet.network,
@@ -364,6 +410,6 @@ export function buildMasterWallets(
       valueUsd: cents === null ? null : centsToUsd(cents),
       share: cents === null ? null : shareOf(cents, total)
     })),
-    totalUsd: centsToUsd(total)
+    totalUsd: noneRead ? null : centsToUsd(total)
   };
 }
