@@ -139,7 +139,14 @@ function mockBalances(day: number): BalanceSnapshot {
     const wallets = Math.round(
       totalUsersAt(id, { day, hour: MOCK_SNAPSHOT_HOUR }) * (1.1 + 0.1 * unit(`w:${id}:${day}`))
     );
-    networks.push({ network: id, status: 'complete', wallets, walletsRead: wallets });
+    // The synthetic model reads every asset of a wallet, the native coin included.
+    networks.push({
+      network: id,
+      status: 'complete',
+      wallets,
+      walletsRead: wallets,
+      native: 'included'
+    });
     const totalCents = Math.round(
       profile.activeUsersPerDay *
         MOCK_CENTS_PER_ACTIVE_USER *
