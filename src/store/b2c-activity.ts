@@ -268,4 +268,25 @@ export class MongoB2cActivityReader implements B2cActivityReader {
     }
     return [...endpoints.values()];
   }
+
+  /**
+   * B2C `enabled` of the catalog networks, read on every run so the balance snapshot follows a
+   * network closed to new B2C operations without a deploy.
+   */
+  async b2cEnabled(): Promise<Map<string, boolean | null>> {
+    const documents = await this.db
+      .collection('blockchains')
+      .find({}, { projection: { _id: 0, name: 1, family: 1, chainId: 1, enabled: 1 } })
+      .toArray();
+    return new Map(
+      toNetworkDefinitions(
+        documents.map((document) => ({
+          name: document.name,
+          family: document.family,
+          chainId: document.chainId,
+          enabled: document.enabled
+        }))
+      ).map((network) => [network.chainId, network.b2cEnabled])
+    );
+  }
 }
