@@ -54,7 +54,7 @@ The contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml) (OpenAPI 3.
 | `GET /v1/team/members` | admin | Active members sorted by email, with `name`, `lastLoginAt` and `lastActivityAt` |
 | `PATCH /v1/team/members/:id` | admin | Changes the role `{ role }`; 409 when no active admin would remain |
 | `DELETE /v1/team/members/:id` | admin | Removes the member and revokes its sessions; 204, 409 when no active admin would remain |
-| `GET /v1/team/invites` | admin | Invites, newest first |
+| `GET /v1/team/invites?view&limit&cursor` | admin | Invites of one view, newest first: `pending` (default) or `history` (accepted, revoked and expired); `limit` 1-100, default 25; `nextCursor` of the next page of the same view and `counts` of both views |
 | `POST /v1/team/invites` | admin | Creates an invite `{ email, role, mutationId }`; 201, idempotent by `mutationId`, 409 for members and pending invites |
 | `POST /v1/team/invites/:id/resend` | admin | Simulates a new delivery of a pending invite; 409 when not pending |
 | `POST /v1/team/invites/:id/revoke` | admin | Revokes a pending invite; 409 when not pending |
