@@ -57,6 +57,34 @@ describe('team routes', () => {
     expect(items[1]?.lastLoginAt).toBeNull();
   });
 
+  it('lists the name and the last audited activity apart from the last login', async () => {
+    const loggedInAt = harness.now().toISOString();
+    harness.advance(60_000);
+    await invite('later@example.com', 'viewer');
+
+    const response = await harness.call({
+      method: 'GET',
+      url: '/v1/team/members',
+      token: adminToken
+    });
+
+    const items = response.json().items as Array<{
+      email: string;
+      name: string | null;
+      lastLoginAt: string | null;
+      lastActivityAt: string | null;
+    }>;
+    expect(items.find((item) => item.email === ADMIN_EMAIL)).toMatchObject({
+      name: null,
+      lastLoginAt: loggedInAt,
+      lastActivityAt: harness.now().toISOString()
+    });
+    expect(items.find((item) => item.email === VIEWER_EMAIL)).toMatchObject({
+      name: null,
+      lastActivityAt: null
+    });
+  });
+
   it('creates invites idempotently by mutationId with simulated delivery', async () => {
     const mutationId = randomUUID();
     const created = await invite('New.Member@example.com', 'viewer', mutationId);
