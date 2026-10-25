@@ -1,4 +1,4 @@
-import type { NetworkId } from '../metrics/catalog.js';
+import type { NetworkFamily, NetworkId } from '../metrics/catalog.js';
 import type { IngestRunStatus, NetworkReadStatus } from '../metrics/types.js';
 
 /**
@@ -81,6 +81,7 @@ export interface ChainInfo {
   /** Network id of the catalog (slug of the name). */
   network: string;
   name: string;
+  family: NetworkFamily;
   explorer: string;
   /** Contract addresses by role (`paymasterAddress`, `factoryAddress`, ...). */
   contracts: Record<string, string>;
@@ -167,12 +168,26 @@ export interface CountryCount {
   users: number;
 }
 
+/**
+ * Users per country and set of catalog networks of their wallets at an ingestion run. Each counted
+ * user is in exactly one row, so the users of any subset of the networks, each counted once, are
+ * the sum of the rows whose networks meet the subset.
+ */
+export interface CountryCombinationCount {
+  /** Networks of the user's wallets, sorted. */
+  networks: NetworkId[];
+  country: string;
+  users: number;
+}
+
 /** What one ingestion run observed at its start: balances and users per country. */
 export interface RunSnapshot {
   takenAt: Date;
   /** `null` when the run took no balance snapshot (`BALANCES_PROVIDER=none` or no budget). */
   balances: BalanceSnapshot | null;
   countries: CountryCount[];
+  /** Absent in snapshots stored before the combinations were counted. */
+  countryCombinations?: CountryCombinationCount[];
 }
 
 /** Bounds of a read of B2C transactions, by id. */
@@ -260,6 +275,12 @@ export interface StoredAggregates extends LiveAggregates {
   snapshots: RunSnapshot[];
 }
 
+/** Copies kept by {@link IngestRepository.replaceCatalog} although the B2C database dropped them. */
+export interface CatalogRetention {
+  networks: number;
+  tokens: number;
+}
+
 /** Analytics-database side of the ingestion. */
 export interface IngestRepository {
   readCheckpoints(): Promise<IngestCheckpoints>;
@@ -274,8 +295,20 @@ export interface IngestRepository {
   upsertTransactions(items: readonly IngestedTransaction[]): Promise<void>;
   /** Replaces the user copy with `items`; users absent from it are removed. */
   replaceUsers(items: readonly IngestedUser[], now: Date): Promise<void>;
-  /** Replaces the copies of the token list and the networks. */
-  replaceCatalog(tokens: readonly TokenInfo[], chains: readonly ChainInfo[]): Promise<void>;
+  /**
+   * Replaces the copies of the token list and the networks with what the B2C database lists now,
+   * stamping them with `now`. A network or token the B2C database no longer lists is kept, marked
+   * as absent from the source, while copied rows still use it: a copied transaction, user wallet or
+   * wallet observation on the network, or a copied transaction on the chain in the token's symbol
+   * (any case). The others are removed.
+   *
+   * @returns How many networks and tokens absent from the source were kept.
+   */
+  replaceCatalog(
+    tokens: readonly TokenInfo[],
+    chains: readonly ChainInfo[],
+    now: Date
+  ): Promise<CatalogRetention>;
   savePrices(items: readonly DailyPrice[]): Promise<void>;
   /** Stores the snapshot of a run, keyed by `takenAt`, so a repeated write replaces it. */
   saveSnapshot(snapshot: RunSnapshot): Promise<void>;
