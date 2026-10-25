@@ -93,6 +93,39 @@ describe('loadEnv', () => {
     expect(env.METRICS_REFRESH_SECONDS).toBe(300);
   });
 
+  it('applies the balance snapshot defaults', () => {
+    const env = loadEnv({});
+
+    expect(env.BALANCES_PROVIDER).toBe('none');
+    expect(env.BALANCES_MAX_CALLS_PER_RUN).toBe(100);
+    expect(env.MASTER_WALLETS).toEqual([]);
+  });
+
+  it('accepts public master wallet addresses only, without echoing rejected values', () => {
+    const signer = '0x9999999999999999999999999999999999999999';
+    const cardano = `addr_test1${'q'.repeat(50)}`;
+    const wallets = loadEnv({
+      MASTER_WALLETS: JSON.stringify([
+        { network: 'base-sepolia', address: signer, role: 'Backend signer' },
+        { network: 'cardano-preprod', address: cardano, role: 'Cardano sponsor' }
+      ])
+    }).MASTER_WALLETS;
+    expect(wallets.map((wallet) => wallet.address)).toEqual([signer, cardano]);
+
+    const privateKey = `0x${'ab'.repeat(32)}`;
+    const seed = 'abandon ability able about above absent absorb abstract absurd abuse access';
+    for (const address of [privateKey, seed]) {
+      const raw = JSON.stringify([{ network: 'base-sepolia', address, role: 'Signer' }]);
+      expect(() => loadEnv({ MASTER_WALLETS: raw })).toThrowError(/MASTER_WALLETS/);
+      expect(() => loadEnv({ MASTER_WALLETS: raw })).not.toThrowError(address);
+    }
+    expect(() => loadEnv({ MASTER_WALLETS: 'not json' })).toThrowError(/MASTER_WALLETS/);
+    const extraField = JSON.stringify([
+      { network: 'base-sepolia', address: signer, role: 'Signer', privateKey }
+    ]);
+    expect(() => loadEnv({ MASTER_WALLETS: extraField })).toThrowError(/MASTER_WALLETS/);
+  });
+
   it('requires the scheduler account and its audience together', () => {
     expect(() =>
       loadEnv({ INGEST_SCHEDULER_SA_EMAIL: 'scheduler@p.iam.gserviceaccount.com' })
