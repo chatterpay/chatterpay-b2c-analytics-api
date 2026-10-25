@@ -5,7 +5,8 @@ import { type AppEnv, loadEnv } from './config/env.js';
 import { rpcBalanceReader } from './ingest/balance-reader.js';
 import { coingeckoPriceProvider } from './ingest/coingecko.js';
 import { refreshLiveMetrics } from './ingest/live-loader.js';
-import { runIngestion } from './ingest/run.js';
+import { type IngestionReport, runIngestion } from './ingest/run.js';
+import { failedRunEvent, type IngestRunEvent, ingestRunEvent } from './ingest/run-event.js';
 import { listNetworks, type NetworkDefinition, setNetworks } from './metrics/catalog.js';
 import { resetFactsCaches } from './metrics/facts.js';
 import type { IngestionHandle } from './routes/ingest.js';
@@ -48,36 +49,52 @@ function logConnectAttempt(attempt: ConnectAttempt): void {
 `);
 }
 
+/**
+ * Ingestion of this process. After each run it loads the new build (`afterRun`, which returns how
+ * long that took) and writes one structured event with the run's counters and phase durations;
+ * the scheduler keeps the report as the response body, which no log records.
+ */
 function ingestionHandle(
   env: AppEnv,
   networks: B2cNetworkSource,
   repository: MongoIngestRepository,
-  afterRun: () => Promise<void>
+  afterRun: () => Promise<{ readbackMs: number }>,
+  logRun: (event: IngestRunEvent) => void
 ): IngestionHandle {
   const maxRunMs = env.INGEST_MAX_RUN_SECONDS * 1000;
   return {
     run: async () => {
-      // The run copies every network and token whatever the B2C `enabled` and the analytics
-      // visibility; the visibility only filters what the metrics endpoints serve.
-      const report = await runIngestion({
-        reader: networks.activity(),
-        repository,
-        prices: env.PRICES_PROVIDER === 'coingecko' ? coingeckoPriceProvider() : null,
-        balances: env.BALANCES_PROVIDER === 'rpc' ? rpcBalanceReader() : null,
-        masterWallets: env.MASTER_WALLETS,
-        clock: () => new Date(),
-        options: {
-          batchSize: env.INGEST_BATCH_SIZE,
-          maxTransactionsPerRun: env.INGEST_MAX_TRANSACTIONS_PER_RUN,
-          revisitHours: env.INGEST_REVISIT_HOURS,
-          maxProviderCallsPerRun: env.PRICES_MAX_CALLS_PER_RUN,
-          maxBalanceCallsPerRun: env.BALANCES_MAX_CALLS_PER_RUN,
-          maxRunMs,
-          lockTtlMs: maxRunMs + LOCK_MARGIN_MS
-        },
-        owner: randomUUID()
-      });
-      await afterRun();
+      const owner = randomUUID();
+      const startedAt = new Date();
+      let report: IngestionReport;
+      try {
+        // The run copies every network and token whatever the B2C `enabled` and the analytics
+        // visibility; the visibility only filters what the metrics endpoints serve.
+        report = await runIngestion({
+          reader: networks.activity(),
+          repository,
+          prices: env.PRICES_PROVIDER === 'coingecko' ? coingeckoPriceProvider() : null,
+          balances: env.BALANCES_PROVIDER === 'rpc' ? rpcBalanceReader() : null,
+          masterWallets: env.MASTER_WALLETS,
+          valuation: env.USD_VALUATION,
+          clock: () => new Date(),
+          options: {
+            batchSize: env.INGEST_BATCH_SIZE,
+            maxTransactionsPerRun: env.INGEST_MAX_TRANSACTIONS_PER_RUN,
+            revisitHours: env.INGEST_REVISIT_HOURS,
+            maxProviderCallsPerRun: env.PRICES_MAX_CALLS_PER_RUN,
+            maxBalanceCallsPerRun: env.BALANCES_MAX_CALLS_PER_RUN,
+            maxRunMs,
+            lockTtlMs: maxRunMs + LOCK_MARGIN_MS
+          },
+          owner
+        });
+      } catch (error) {
+        logRun(failedRunEvent(owner, startedAt, Date.now() - startedAt.getTime(), error));
+        throw error;
+      }
+      const { readbackMs } = await afterRun();
+      logRun(ingestRunEvent(report, report.status === 'locked' ? null : readbackMs));
       return report;
     },
     verifyCaller:
@@ -190,26 +207,41 @@ async function main(): Promise<void> {
     ingestion:
       ingest === null || networks === null
         ? null
-        : ingestionHandle(env, networks, ingest, async () => {
-            await refreshLive();
-            // A run can retain a network the B2C database dropped; the catalog follows at once.
-            try {
-              await applyCatalog(await loadCatalog(networks));
-              const catalog = listNetworks();
-              const visible = visibleNetworks(catalog, await store.networkVisibility()).length;
-              app.log.info(
-                {
-                  catalogNetworks: catalog.length,
-                  catalogRetained: catalog.filter((network) => !network.sourcePresent).length,
-                  analyticsEnabled: visible,
-                  analyticsDisabled: catalog.length - visible
-                },
-                'network catalog after ingestion'
-              );
-            } catch (error) {
-              app.log.warn({ err: error }, 'network catalog refresh failed');
+        : ingestionHandle(
+            env,
+            networks,
+            ingest,
+            async () => {
+              const readStarted = Date.now();
+              await refreshLive();
+              const readbackMs = Date.now() - readStarted;
+              // A run can retain a network the B2C database dropped; the catalog follows at once.
+              try {
+                await applyCatalog(await loadCatalog(networks));
+                const catalog = listNetworks();
+                const visible = visibleNetworks(catalog, await store.networkVisibility()).length;
+                app.log.info(
+                  {
+                    catalogNetworks: catalog.length,
+                    catalogRetained: catalog.filter((network) => !network.sourcePresent).length,
+                    analyticsEnabled: visible,
+                    analyticsDisabled: catalog.length - visible
+                  },
+                  'network catalog after ingestion'
+                );
+              } catch (error) {
+                app.log.warn({ err: error }, 'network catalog refresh failed');
+              }
+              return { readbackMs };
+            },
+            (event) => {
+              if (event.status === 'failed') {
+                app.log.error(event, 'ingest run');
+              } else {
+                app.log.info(event, 'ingest run');
+              }
             }
-          })
+          )
   });
   app.log.info({ networks: listNetworks().map((network) => network.id) }, 'network catalog');
   await refreshLive().catch((error: unknown) => {
