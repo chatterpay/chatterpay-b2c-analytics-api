@@ -1,5 +1,6 @@
 import { type Collection, type Db, MongoClient, MongoServerError } from 'mongodb';
 import type {
+  CatalogRetention,
   ChainInfo,
   DailyPrice,
   HourlyFacts,
@@ -23,7 +24,8 @@ import { connectOrClose } from './connect-retry.js';
  * Collections of the ingestion in the analytics database. Copies are keyed by the B2C id and
  * aggregates by a build stamp; every read is by `_id`, by that stamp over collections that are
  * replaced as a whole, or a full read of a small collection (one snapshot per run, one observation
- * per wallet), so none needs an index besides the default one.
+ * per wallet), so none needs an index besides the default one. The usage checks of a network or
+ * token the B2C database dropped scan the copies, which only happens in the runs after a drop.
  */
 export const INGEST_COLLECTIONS = {
   state: 'ingest_state',
@@ -58,8 +60,14 @@ interface StateDoc {
 
 type TransactionDoc = Omit<IngestedTransaction, 'id'> & { _id: string };
 type UserDoc = Omit<IngestedUser, 'id'> & { _id: string; seenAt: Date };
-type TokenDoc = TokenInfo & { _id: string };
-type NetworkDoc = ChainInfo & { _id: string };
+/** Stamp of a catalog copy: whether the B2C database listed it in the last run, and when it last did. */
+interface SourceStamp {
+  sourcePresent?: boolean;
+  lastSeenAt?: Date;
+}
+type TokenDoc = TokenInfo & SourceStamp & { _id: string };
+type NetworkDoc = Omit<ChainInfo, 'family'> &
+  SourceStamp & { _id: string; family?: ChainInfo['family'] };
 type PriceDoc = DailyPrice & { _id: string };
 type SnapshotDoc = RunSnapshot & { _id: string };
 type ObservationDoc = WalletObservation & { _id: string };
@@ -184,15 +192,25 @@ export class MongoIngestRepository implements IngestRepository {
     await users.deleteMany({ seenAt: { $ne: now } });
   }
 
-  async replaceCatalog(tokens: readonly TokenInfo[], chains: readonly ChainInfo[]): Promise<void> {
+  async replaceCatalog(
+    tokens: readonly TokenInfo[],
+    chains: readonly ChainInfo[],
+    now: Date
+  ): Promise<CatalogRetention> {
     const tokenDocs = this.collection<TokenDoc>(INGEST_COLLECTIONS.tokens);
     const networkDocs = this.collection<NetworkDoc>(INGEST_COLLECTIONS.networks);
+    const transactions = this.collection<TransactionDoc>(INGEST_COLLECTIONS.transactions);
     const tokenIds = tokens.map((token) => `${token.chainId}|${token.symbol}`);
     const networkIds = chains.map((chain) => chain.chainId);
+    const stamp = { sourcePresent: true, lastSeenAt: now };
     if (tokens.length > 0) {
       await tokenDocs.bulkWrite(
         tokens.map((token, index) => ({
-          replaceOne: { filter: { _id: tokenIds[index] ?? '' }, replacement: token, upsert: true }
+          replaceOne: {
+            filter: { _id: tokenIds[index] ?? '' },
+            replacement: { ...token, ...stamp },
+            upsert: true
+          }
         })),
         { ordered: false }
       );
@@ -200,13 +218,61 @@ export class MongoIngestRepository implements IngestRepository {
     if (chains.length > 0) {
       await networkDocs.bulkWrite(
         chains.map((chain) => ({
-          replaceOne: { filter: { _id: chain.chainId }, replacement: chain, upsert: true }
+          replaceOne: {
+            filter: { _id: chain.chainId },
+            replacement: { ...chain, ...stamp },
+            upsert: true
+          }
         })),
         { ordered: false }
       );
     }
-    await tokenDocs.deleteMany({ _id: { $nin: tokenIds } });
-    await networkDocs.deleteMany({ _id: { $nin: networkIds } });
+
+    // Copies the B2C database dropped. The checks below scan the copies without an index, which
+    // only happens for networks and tokens that left the source, so rarely.
+    const absentNetworks = await networkDocs
+      .find({ _id: { $nin: networkIds } }, { projection: { _id: 1 } })
+      .toArray();
+    const keptNetworks: string[] = [];
+    for (const { _id: chainId } of absentNetworks) {
+      const used =
+        (await transactions.countDocuments({ chainId }, { limit: 1 })) > 0 ||
+        (await this.collection<UserDoc>(INGEST_COLLECTIONS.users).countDocuments(
+          { 'wallets.chainId': chainId },
+          { limit: 1 }
+        )) > 0 ||
+        (await this.collection<ObservationDoc>(
+          INGEST_COLLECTIONS.walletObservations
+        ).countDocuments({ chainId }, { limit: 1 })) > 0;
+      if (used) {
+        keptNetworks.push(chainId);
+      }
+    }
+    const absentTokens = await tokenDocs
+      .find({ _id: { $nin: tokenIds } }, { projection: { _id: 1, chainId: 1, symbol: 1 } })
+      .toArray();
+    const symbolsByChain = new Map<string, Set<string>>();
+    const keptTokens: string[] = [];
+    for (const token of absentTokens) {
+      let symbols = symbolsByChain.get(token.chainId);
+      if (symbols === undefined) {
+        const used = await transactions.distinct('token', { chainId: token.chainId });
+        symbols = new Set(used.map((symbol) => String(symbol).toUpperCase()));
+        symbolsByChain.set(token.chainId, symbols);
+      }
+      if (symbols.has(token.symbol.toUpperCase())) {
+        keptTokens.push(token._id);
+      }
+    }
+
+    await networkDocs.updateMany(
+      { _id: { $in: keptNetworks } },
+      { $set: { sourcePresent: false } }
+    );
+    await tokenDocs.updateMany({ _id: { $in: keptTokens } }, { $set: { sourcePresent: false } });
+    await tokenDocs.deleteMany({ _id: { $nin: [...tokenIds, ...keptTokens] } });
+    await networkDocs.deleteMany({ _id: { $nin: [...networkIds, ...keptNetworks] } });
+    return { networks: keptNetworks.length, tokens: keptTokens.length };
   }
 
   async savePrices(items: readonly DailyPrice[]): Promise<void> {
@@ -251,10 +317,13 @@ export class MongoIngestRepository implements IngestRepository {
 
   async chains(): Promise<ChainInfo[]> {
     const docs = await this.collection<NetworkDoc>(INGEST_COLLECTIONS.networks).find({}).toArray();
-    return docs.map(({ chainId, network, name, explorer, contracts }) => ({
+    return docs.map(({ chainId, network, name, family, explorer, contracts }) => ({
       chainId,
       network,
       name,
+      // Copies written before the family was stored are rewritten by the next run while the B2C
+      // database lists them; EVM is the family of a document without one.
+      family: family ?? 'evm',
       explorer,
       contracts
     }));
