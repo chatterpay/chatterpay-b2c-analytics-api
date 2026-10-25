@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Role } from '../auth/principal.js';
+import { INITIAL_VISIBILITY, planVisibilityChange } from './network-visibility.js';
 import type {
   ActivatedMember,
   ActivityEvent,
@@ -8,6 +9,9 @@ import type {
   Invite,
   InviteTransitionResult,
   MemberMutationResult,
+  NetworkVisibility,
+  NetworkVisibilityChange,
+  NetworkVisibilityResult,
   NewInvite,
   RateLimitResult,
   Session,
@@ -52,6 +56,7 @@ export class MemoryStore implements Store {
   private readonly invites = new Map<string, Invite>();
   private readonly activity: ActivityEvent[] = [];
   private readonly counters = new Map<string, Counter>();
+  private visibility: NetworkVisibility = INITIAL_VISIBILITY;
 
   async ping(): Promise<boolean> {
     return true;
@@ -309,6 +314,26 @@ export class MemoryStore implements Store {
       allowed: false,
       retryAfterSeconds: Math.max(1, Math.ceil((counter.resetAt - instant) / 1000))
     };
+  }
+
+  async networkVisibility(): Promise<NetworkVisibility> {
+    return this.visibilityCopy();
+  }
+
+  async changeNetworkVisibility(
+    change: NetworkVisibilityChange,
+    now: Date
+  ): Promise<NetworkVisibilityResult> {
+    const plan = planVisibilityChange(this.visibilityCopy(), change, now);
+    if (plan.kind === 'done') {
+      return plan.result;
+    }
+    this.visibility = plan.next;
+    return { kind: 'ok', visibility: this.visibilityCopy(), changed: true };
+  }
+
+  private visibilityCopy(): NetworkVisibility {
+    return { ...this.visibility, disabledChainIds: [...this.visibility.disabledChainIds] };
   }
 
   private activeUserByEmail(email: string): User | undefined {
