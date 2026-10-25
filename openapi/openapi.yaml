@@ -626,7 +626,7 @@ paths:
   /v1/team/activity:
     get:
       operationId: listTeamActivity
-      summary: Login and team management events, newest first
+      summary: Login and team management events, newest first, one page per cursor
       tags:
         - team
       parameters:
@@ -638,6 +638,15 @@ paths:
           in: query
           name: limit
           required: false
+        - schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+            pattern: ^[A-Za-z0-9_-]+$
+          in: query
+          name: cursor
+          required: false
+          description: Opaque `nextCursor` of the previous page; omitted for the first page.
       responses:
         "200":
           description: Default Response
@@ -648,6 +657,7 @@ paths:
                 additionalProperties: false
                 required:
                   - items
+                  - nextCursor
                 properties:
                   items:
                     type: array
@@ -696,6 +706,12 @@ paths:
                           enum:
                             - success
                             - failure
+                  nextCursor:
+                    type:
+                      - "null"
+                      - string
+                    description: Cursor of the next page, for the `cursor` parameter; `null` on the
+                      last page.
         "400":
           description: Default Response
           content:
