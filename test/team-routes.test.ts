@@ -317,6 +317,66 @@ describe('team routes', () => {
     );
   });
 
+  it('rejects a change of the own role or the own removal, and still acts on others', async () => {
+    const adminId = await memberId(harness, adminToken, ADMIN_EMAIL);
+    const viewerId = await memberId(harness, adminToken, VIEWER_EMAIL);
+    const secondId = await memberId(harness, adminToken, SECOND_ADMIN_EMAIL);
+
+    // The rule applies whatever role is asked, including the current one.
+    for (const role of ['viewer', 'admin'] as const) {
+      const own = await harness.call({
+        method: 'PATCH',
+        url: `/v1/team/members/${adminId}`,
+        token: adminToken,
+        payload: { role }
+      });
+      expect(own.statusCode).toBe(403);
+      expect(own.headers['cache-control']).toBe('private, no-store');
+      expect(own.json()).toMatchObject({ code: 'CANNOT_CHANGE_OWN_ROLE' });
+    }
+
+    const self = await harness.call({
+      method: 'DELETE',
+      url: `/v1/team/members/${adminId}`,
+      token: adminToken
+    });
+    expect(self.statusCode).toBe(403);
+    expect(self.json()).toMatchObject({ code: 'CANNOT_REMOVE_SELF' });
+
+    const members = await harness.call({
+      method: 'GET',
+      url: '/v1/team/members',
+      token: adminToken
+    });
+    expect(members.json().items).toContainEqual(
+      expect.objectContaining({ id: adminId, role: 'admin' })
+    );
+    const activity = await harness.call({
+      method: 'GET',
+      url: '/v1/team/activity',
+      token: adminToken
+    });
+    expect(
+      activity.json().items.filter((item: { action: string }) => item.action !== 'login')
+    ).toEqual([]);
+
+    const promoted = await harness.call({
+      method: 'PATCH',
+      url: `/v1/team/members/${viewerId}`,
+      token: adminToken,
+      payload: { role: 'admin' }
+    });
+    expect(promoted.statusCode).toBe(200);
+    expect(promoted.json()).toMatchObject({ id: viewerId, role: 'admin' });
+
+    const removed = await harness.call({
+      method: 'DELETE',
+      url: `/v1/team/members/${secondId}`,
+      token: adminToken
+    });
+    expect(removed.statusCode).toBe(204);
+  });
+
   it('never leaves the team without an active admin', async () => {
     const secondToken = await login(harness, SECOND_ADMIN_EMAIL);
     const adminId = await memberId(harness, adminToken, ADMIN_EMAIL);
@@ -335,29 +395,11 @@ describe('team routes', () => {
       (await harness.call({ method: 'GET', url: '/v1/auth/me', token: secondToken })).statusCode
     ).toBe(401);
 
-    const demote = await harness.call({
-      method: 'PATCH',
-      url: `/v1/team/members/${adminId}`,
-      token: adminToken,
-      payload: { role: 'viewer' }
-    });
-    expect(demote.statusCode).toBe(409);
-    expect(demote.json()).toMatchObject({ code: 'CONFLICT' });
-
-    const remove = await harness.call({
-      method: 'DELETE',
-      url: `/v1/team/members/${adminId}`,
-      token: adminToken
-    });
-    expect(remove.statusCode).toBe(409);
-
-    const keep = await harness.call({
-      method: 'PATCH',
-      url: `/v1/team/members/${adminId}`,
-      token: adminToken,
-      payload: { role: 'admin' }
-    });
-    expect(keep.statusCode).toBe(200);
+    // The routes refuse acting on oneself first, so the store check is exercised directly: only
+    // two admins acting on each other at the same time reach it through the API.
+    expect(await harness.store.changeRole(adminId, 'viewer')).toEqual({ kind: 'last_admin' });
+    expect(await harness.store.removeUser(adminId, harness.now())).toEqual({ kind: 'last_admin' });
+    expect(await harness.store.changeRole(adminId, 'admin')).toMatchObject({ kind: 'ok' });
 
     const unknown = await harness.call({
       method: 'PATCH',
