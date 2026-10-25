@@ -1542,6 +1542,7 @@ paths:
                           - no_transactions
                           - no_eligible_cohort
                           - not_configured
+                          - not_read
                           - null
                       asOf:
                         anyOf:
@@ -1645,6 +1646,7 @@ paths:
                             - tvlUsd
                             - share
                             - status
+                            - reason
                           properties:
                             network:
                               type: string
@@ -1653,7 +1655,9 @@ paths:
                             label:
                               type: string
                             tvlUsd:
-                              type: string
+                              type:
+                                - "null"
+                                - string
                               pattern: ^-?\d+\.\d+$
                             share:
                               type:
@@ -1667,6 +1671,17 @@ paths:
                                 - partial
                                 - failed
                                 - unsupported
+                            reason:
+                              type:
+                                - "null"
+                                - string
+                              enum:
+                                - b2c_disabled
+                                - source_absent
+                                - no_endpoint
+                                - unsupported_provider
+                                - read_incomplete
+                                - null
                   topTokens:
                     type: object
                     additionalProperties: false
@@ -1703,6 +1718,7 @@ paths:
                           - no_transactions
                           - no_eligible_cohort
                           - not_configured
+                          - not_read
                           - null
                       asOf:
                         anyOf:
@@ -1777,6 +1793,7 @@ paths:
                           - no_transactions
                           - no_eligible_cohort
                           - not_configured
+                          - not_read
                           - null
                       asOf:
                         anyOf:
@@ -1846,6 +1863,7 @@ paths:
                           - no_transactions
                           - no_eligible_cohort
                           - not_configured
+                          - not_read
                           - null
                       asOf:
                         anyOf:
@@ -1891,6 +1909,7 @@ paths:
                                 - no_transactions
                                 - no_eligible_cohort
                                 - not_configured
+                                - not_read
                                 - null
                             volumeUsd:
                               type:
@@ -2340,6 +2359,7 @@ paths:
                           - no_transactions
                           - no_eligible_cohort
                           - not_configured
+                          - not_read
                           - null
                       asOf:
                         anyOf:
@@ -2471,6 +2491,7 @@ paths:
                           - no_transactions
                           - no_eligible_cohort
                           - not_configured
+                          - not_read
                           - null
                       asOf:
                         anyOf:
@@ -2517,6 +2538,7 @@ paths:
                                 - no_transactions
                                 - no_eligible_cohort
                                 - not_configured
+                                - not_read
                                 - null
                             eligibleCohorts:
                               type: integer
@@ -3010,6 +3032,7 @@ paths:
                           - no_transactions
                           - no_eligible_cohort
                           - not_configured
+                          - not_read
                           - null
                       asOf:
                         anyOf:
@@ -3074,6 +3097,7 @@ paths:
                           - no_transactions
                           - no_eligible_cohort
                           - not_configured
+                          - not_read
                           - null
                       asOf:
                         anyOf:
@@ -3120,6 +3144,7 @@ paths:
                           - no_transactions
                           - no_eligible_cohort
                           - not_configured
+                          - not_read
                           - null
                       asOf:
                         anyOf:
@@ -3164,6 +3189,7 @@ paths:
                                 - no_transactions
                                 - no_eligible_cohort
                                 - not_configured
+                                - not_read
                                 - null
                             feesUsd:
                               type:
@@ -3211,6 +3237,7 @@ paths:
                           - no_transactions
                           - no_eligible_cohort
                           - not_configured
+                          - not_read
                           - null
                       asOf:
                         anyOf:
@@ -3694,6 +3721,11 @@ paths:
                                 - status
                                 - wallets
                                 - walletsRead
+                                - calls
+                                - failedCalls
+                                - b2cEnabled
+                                - reason
+                                - takenAt
                               properties:
                                 network:
                                   type: string
@@ -3710,6 +3742,30 @@ paths:
                                 walletsRead:
                                   type: integer
                                   minimum: 0
+                                calls:
+                                  type: integer
+                                  minimum: 0
+                                failedCalls:
+                                  type: integer
+                                  minimum: 0
+                                b2cEnabled:
+                                  type:
+                                    - "null"
+                                    - boolean
+                                reason:
+                                  type:
+                                    - "null"
+                                    - string
+                                  enum:
+                                    - b2c_disabled
+                                    - source_absent
+                                    - no_endpoint
+                                    - unsupported_provider
+                                    - read_incomplete
+                                    - null
+                                takenAt:
+                                  type: string
+                                  format: date-time
                           masterWallets:
                             type: integer
                             minimum: 0
