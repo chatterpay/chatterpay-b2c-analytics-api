@@ -133,6 +133,27 @@ describe('B2C catalog reads', () => {
     expect(tokens.map((token) => token.chainId)).toEqual(['534352', '8453']);
     expect(filters.every((item) => JSON.stringify(item.filter) === '{}')).toBe(true);
   });
+
+  it('reads the B2C enabled of each network, null without a boolean', async () => {
+    const { db } = fakeDb({
+      blockchains: [
+        { name: 'Base', chainId: 8453, enabled: true },
+        { name: 'Scroll', chainId: 534352, enabled: false },
+        { name: 'Arbitrum Sepolia', chainId: 421614 },
+        { name: 'Optimism', chainId: 10, enabled: 'yes' },
+        { name: 'Solana', family: 'solana', chainId: 101, enabled: true }
+      ]
+    });
+
+    const enabled = await new MongoB2cActivityReader(db).b2cEnabled();
+
+    expect([...enabled.entries()].sort()).toEqual([
+      ['10', null],
+      ['421614', null],
+      ['534352', false],
+      ['8453', true]
+    ]);
+  });
 });
 
 describe('CoinGecko provider', () => {
