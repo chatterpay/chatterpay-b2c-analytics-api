@@ -1,6 +1,6 @@
 import type { NetworkId } from '../metrics/catalog.js';
 import { formatUnits } from '../metrics/decimal.js';
-import type { NetworkReadReason } from '../metrics/types.js';
+import type { NativeCoverage, NetworkReadReason, UsdValuation } from '../metrics/types.js';
 import type {
   BalanceReader,
   BalanceSnapshot,
@@ -41,6 +41,8 @@ export interface SnapshotInput {
    */
   b2cEnabled: ReadonlyMap<string, boolean | null>;
   budget: CallBudget;
+  /** `none` stores every balance without a USD value; `market` by default. */
+  valuation?: UsdValuation;
 }
 
 /** Read of one network with every field recorded. */
@@ -59,6 +61,10 @@ export interface SnapshotResult {
 const LOVELACE_DECIMALS = 6;
 /** Addresses up to this value are placeholders for native coins in the B2C token list. */
 const PLACEHOLDER_ADDRESS_LIMIT = 0xffffn;
+/** Address that token lists and routers use for the native coin of an EVM network. */
+const NATIVE_SENTINEL = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+/** Decimals of the balance an EVM node returns for the native coin (wei). */
+const EVM_NATIVE_DECIMALS = 18;
 
 interface Asset {
   symbol: string;
@@ -68,11 +74,20 @@ interface Asset {
   key: string | null;
 }
 
+function evmAddress(address: string): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(address);
+}
+
+/** Whether a token of an EVM list stands for the native coin instead of a contract. */
+function isNativePlaceholder(address: string): boolean {
+  return (
+    evmAddress(address) &&
+    (BigInt(address) <= PLACEHOLDER_ADDRESS_LIMIT || address.toLowerCase() === NATIVE_SENTINEL)
+  );
+}
+
 function evmContract(address: string): string | null {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(address) || BigInt(address) <= PLACEHOLDER_ADDRESS_LIMIT) {
-    return null;
-  }
-  return address;
+  return evmAddress(address) && !isNativePlaceholder(address) ? address : null;
 }
 
 /** ERC-20 tokens of an EVM chain with a contract address and decimals. */
@@ -83,6 +98,21 @@ function evmAssets(tokens: readonly TokenInfo[], chainId: string): Asset[] {
       ? []
       : [{ symbol: token.symbol, stable: token.stable, decimals: token.decimals, key: contract }];
   });
+}
+
+/**
+ * Native coin of an EVM chain when its B2C token list carries it: the first token whose address
+ * is a placeholder (up to `0xffff`) or the `0xEeee…` sentinel. It is read with `eth_getBalance`
+ * semantics (`token: null`), in wei, whatever decimals the document states. Without such a token
+ * the native coin is not read, and the snapshot says so instead of assuming a contract.
+ */
+function evmNative(tokens: readonly TokenInfo[], chainId: string): Asset | null {
+  const token = tokens.find(
+    (item) => item.chainId === chainId && isNativePlaceholder(item.address)
+  );
+  return token === undefined
+    ? null
+    : { symbol: token.symbol, stable: token.stable, decimals: EVM_NATIVE_DECIMALS, key: null };
 }
 
 /** ADA plus the native assets of a Cardano chain listed in the B2C token list. */
@@ -110,7 +140,15 @@ function cardanoAssets(tokens: readonly TokenInfo[], chainId: string): Asset[] {
   return assets;
 }
 
-function centsOf(raw: bigint, asset: Asset, prices: ReadonlyMap<string, number>): number | null {
+function centsOf(
+  raw: bigint,
+  asset: Asset,
+  prices: ReadonlyMap<string, number>,
+  valuation: UsdValuation
+): number | null {
+  if (valuation === 'none') {
+    return null;
+  }
   const price = asset.stable ? 1 : prices.get(asset.symbol);
   if (price === undefined) {
     return null;
@@ -189,11 +227,15 @@ async function readCardano(
  * Reads the balances of every user wallet and master wallet of the catalog networks, once, and
  * sums the user wallets per network and asset. Per-wallet balances are not kept.
  *
- * User wallets hold the assets of the B2C token list (ERC-20 tokens with a contract on EVM, ADA
- * and the listed native assets on Cardano); master wallets also hold the native coin. A wallet is
- * counted only when all its balances were read, so a failed batch lowers the coverage instead of
+ * User wallets hold the assets of the B2C token list (ERC-20 tokens with a contract on EVM, plus
+ * the native coin when the list carries it; ADA and the listed native assets on Cardano); master
+ * wallets always hold the native coin. Every address is read once, a master wallet that is also a
+ * user wallet included, and the native coin once per address. A network row records whether its
+ * user wallets were read with the native coin (`native`). A wallet is counted only when all its
+ * balances were read, so a failed batch or an exhausted budget lowers the coverage instead of
  * understating a total. A network without endpoint, or with a provider the reader does not speak,
- * is `unsupported`. Values use the price of the snapshot day; an asset without one has no value.
+ * is `unsupported`. Values use the price of the snapshot day; an asset without one has no value,
+ * and with `valuation: none` no asset has one.
  *
  * No request is sent for a network whose B2C document has `enabled: false` or that the B2C
  * database no longer lists, whatever its endpoint: it is `unsupported` with the reason, and its
@@ -205,6 +247,7 @@ async function readCardano(
  * @returns The snapshot and its overall status.
  */
 export async function takeBalanceSnapshot(input: SnapshotInput): Promise<SnapshotResult> {
+  const valuation = input.valuation ?? 'market';
   const endpoints = new Map(input.endpoints.map((endpoint) => [endpoint.chainId, endpoint]));
   const networks: NetworkRead[] = [];
   const holdings: SnapshotHolding[] = [];
@@ -235,10 +278,13 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
       skipped === null &&
       endpoint !== undefined &&
       (endpoint.family === 'evm' || input.reader.supportsCardano(endpoint.url));
+    const native = endpoint?.family === 'cardano' ? null : evmNative(input.tokens, chain.chainId);
     const assets =
       endpoint?.family === 'cardano'
         ? cardanoAssets(input.tokens, chain.chainId)
-        : evmAssets(input.tokens, chain.chainId);
+        : [...evmAssets(input.tokens, chain.chainId), ...(native === null ? [] : [native])];
+    const nativeCoverage: NativeCoverage =
+      chain.family === 'cardano' || native !== null ? 'included' : 'not_listed';
     const masterAddresses = masters.map((wallet) => normalize(wallet.address));
 
     let balances: WalletBalances = new Map();
@@ -254,7 +300,8 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
               endpoint.url,
               addresses,
               assets,
-              new Set(masterAddresses),
+              // With the native coin in the list every address already reads it.
+              new Set(native === null ? masterAddresses : []),
               input.budget
             );
     }
@@ -279,7 +326,8 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
       calls: input.budget.used - callsBefore,
       failedCalls: input.budget.failed - failedBefore,
       b2cEnabled,
-      reason
+      reason,
+      native: nativeCoverage
     });
     assets.forEach((asset, index) => {
       let raw = 0n;
@@ -291,21 +339,22 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
           network: chain.network,
           asset: asset.symbol,
           amount: formatUnits(raw, asset.decimals),
-          valueCents: centsOf(raw, asset, input.prices)
+          valueCents: centsOf(raw, asset, input.prices, valuation)
         });
       }
     });
 
     masters.forEach((wallet, position) => {
       const values = balances.get(masterAddresses[position] ?? '');
-      const native: Asset = {
+      const configured: Asset = {
         symbol: wallet.nativeSymbol ?? 'ETH',
         stable: false,
-        decimals: 18,
+        decimals: EVM_NATIVE_DECIMALS,
         key: null
       };
-      // EVM readings carry the native balance after the tokens; on Cardano ADA is the first asset.
-      const walletAssets = evm ? [...assets, native] : assets;
+      // EVM readings carry the native balance after the tokens, as the last asset of the list when
+      // the list has it; on Cardano ADA is the first asset.
+      const walletAssets = evm && native === null ? [...assets, configured] : assets;
       masterWallets.push({
         network: chain.network,
         role: wallet.role,
@@ -322,7 +371,7 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
                       {
                         asset: asset.symbol,
                         amount: formatUnits(raw, asset.decimals),
-                        valueCents: centsOf(raw, asset, input.prices)
+                        valueCents: centsOf(raw, asset, input.prices, valuation)
                       }
                     ]
                   : [];
@@ -335,7 +384,7 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
   const read = networks.reduce((sum, row) => sum + row.walletsRead, 0);
   const unread = networks.some((row) => row.status !== 'complete');
   return {
-    snapshot: { networks, holdings, masterWallets },
+    snapshot: { networks, holdings, masterWallets, valuation },
     networks,
     status: !unread ? 'complete' : wallets > 0 && read === 0 ? 'failed' : 'partial'
   };
