@@ -57,7 +57,32 @@ function tvlCents(snapshot: RunSnapshot, networks: ReadonlySet<NetworkId>): numb
   );
 }
 
-/** Wallets read and unpriced assets of `networks` in a snapshot. */
+/**
+ * Whether the user wallets of a read network were read without its native coin. A row stored
+ * before the coverage was recorded on an EVM network was read without it.
+ */
+function nativeMissing(row: SnapshotNetwork): boolean {
+  if (row.wallets === 0 || !wasRead(row)) {
+    return false;
+  }
+  const family = listNetworks().find((network) => network.id === row.network)?.family;
+  return (row.native ?? (family === 'cardano' ? 'included' : 'not_listed')) === 'not_listed';
+}
+
+/** Whether `networks` hold assets in a snapshot and none of them has a price. */
+function unpricedOnly(snapshot: RunSnapshot, networks: ReadonlySet<NetworkId>): boolean {
+  const held = (snapshot.balances?.holdings ?? []).filter((holding) =>
+    networks.has(holding.network)
+  );
+  return held.length > 0 && held.every((holding) => holding.valueCents === null);
+}
+
+/** Whether the run valued the snapshot; a run with `USD_VALUATION=none` stores no USD value. */
+function isValued(snapshot: RunSnapshot): boolean {
+  return snapshot.balances?.valuation !== 'none';
+}
+
+/** Wallets read, unpriced assets and networks read without native coin of `networks`. */
 function coverageOf(snapshot: RunSnapshot, networks: ReadonlySet<NetworkId>): SnapshotCoverage {
   const rows = (snapshot.balances?.networks ?? []).filter((row) => networks.has(row.network));
   return {
@@ -65,18 +90,27 @@ function coverageOf(snapshot: RunSnapshot, networks: ReadonlySet<NetworkId>): Sn
     walletsRead: sum(rows.map((row) => row.walletsRead)),
     unpricedAssets: (snapshot.balances?.holdings ?? [])
       .filter((holding) => networks.has(holding.network) && holding.valueCents === null)
-      .map((holding) => ({ network: holding.network, asset: holding.asset }))
+      .map((holding) => ({ network: holding.network, asset: holding.asset })),
+    nativeNotCovered: rows.filter(nativeMissing).map((row) => row.network)
   };
 }
 
 /**
- * Availability of the snapshot figures of `networks`: partial when a network is missing from the
- * snapshot or was not read completely, or when an asset had no price.
+ * Availability of the snapshot figures of `networks`: unavailable when the run valued nothing
+ * (`not_valued`) or no held asset had a price; partial when a network is missing from the
+ * snapshot or was not read completely, when the native coin was not read, or when an asset had no
+ * price.
  */
 function snapshotAvailability(
   snapshot: RunSnapshot,
   networks: ReadonlySet<NetworkId>
 ): { availability: Availability; reason: UnavailableReason | null } {
+  if (!isValued(snapshot)) {
+    return { availability: 'unavailable', reason: 'not_valued' };
+  }
+  if (unpricedOnly(snapshot, networks)) {
+    return { availability: 'unavailable', reason: 'unpriced_assets' };
+  }
   const rows = (snapshot.balances?.networks ?? []).filter((row) => networks.has(row.network));
   const incomplete =
     rows.length < networks.size ||
@@ -84,7 +118,11 @@ function snapshotAvailability(
   if (incomplete) {
     return { availability: 'partial', reason: 'partial_coverage' };
   }
-  if (coverageOf(snapshot, networks).unpricedAssets.length > 0) {
+  const coverage = coverageOf(snapshot, networks);
+  if (coverage.nativeNotCovered.length > 0) {
+    return { availability: 'partial', reason: 'native_not_covered' };
+  }
+  if (coverage.unpricedAssets.length > 0) {
     return { availability: 'partial', reason: 'unpriced_assets' };
   }
   return { availability: 'available', reason: null };
@@ -100,6 +138,9 @@ function asOfOf(source: SnapshotSource, snapshot: RunSnapshot): string | null {
  * period; each series bucket takes the last snapshot inside it. Without a snapshot the value is
  * `null`: earlier periods are never estimated. A snapshot that read none of the selected networks
  * gives `null` as well (`not_read`): an earlier reading is never served as the current balance.
+ * So does a run that valued nothing (`not_valued`) or a snapshot whose held assets have no price
+ * (`unpriced_assets`). User wallets read without the native coin leave it `partial`
+ * (`native_not_covered`), never `available`.
  *
  * @param networks - Networks of the filter.
  * @param resolved - Range windows and buckets.
@@ -116,7 +157,9 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
     return {
       ...periodOf(bucket),
       tvlUsd:
-        found === null || !readsAny(found, selected) ? null : centsToUsd(tvlCents(found, selected)),
+        found === null || !readsAny(found, selected) || !isValued(found)
+          ? null
+          : centsToUsd(tvlCents(found, selected)),
       asOf: found === null ? null : found.takenAt.toISOString()
     };
   });
@@ -139,17 +182,23 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
       ? null
       : source.balancesBetween(firstHour(previousWindow), lastHour(previousWindow));
   const total = tvlCents(current, selected);
-  const read = readsAny(current, selected);
+  const status: { availability: Availability; reason: UnavailableReason | null } = readsAny(
+    current,
+    selected
+  )
+    ? snapshotAvailability(current, selected)
+    : { availability: 'unavailable', reason: 'not_read' };
+  const shown = status.availability !== 'unavailable';
   return {
     source: kind,
-    ...(read
-      ? snapshotAvailability(current, selected)
-      : { availability: 'unavailable', reason: 'not_read' }),
+    ...status,
     asOf: asOfOf(source, current),
-    value: read
+    value: shown
       ? moneyMetric(
           total,
-          previous === null || !readsAny(previous, selected) ? null : tvlCents(previous, selected)
+          previous === null || !readsAny(previous, selected) || !isValued(previous)
+            ? null
+            : tvlCents(previous, selected)
         )
       : null,
     firstSnapshotAt: first?.toISOString() ?? null,
@@ -158,12 +207,15 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
     byNetwork: (current.balances?.networks ?? [])
       .filter((row) => selected.has(row.network))
       .map((row) => {
-        const cents = tvlCents(current, new Set([row.network]));
+        const own = new Set([row.network]);
+        const cents = tvlCents(current, own);
+        // A network whose held assets all lack a price has no value, not a value of zero.
+        const priced = isValued(current) && !unpricedOnly(current, own);
         return {
           network: row.network,
           label: networkProfile(row.network).label,
-          tvlUsd: wasRead(row) ? centsToUsd(cents) : null,
-          share: wasRead(row) ? shareOf(cents, total) : null,
+          tvlUsd: wasRead(row) && priced ? centsToUsd(cents) : null,
+          share: wasRead(row) && priced && shown ? shareOf(cents, total) : null,
           status: row.status,
           reason: row.reason ?? null
         };
@@ -219,6 +271,7 @@ export function buildTopTokens(
     byAsset.set(holding.asset, entry);
   }
   const total = sum([...byAsset.values()].map((entry) => entry.cents ?? 0));
+  const status = snapshotAvailability(current, selected);
   const items: TokenHolding[] = [...byAsset.entries()]
     .sort(
       ([leftAsset, left], [rightAsset, right]) =>
@@ -230,12 +283,13 @@ export function buildTopTokens(
       valueUsd: entry.cents === null ? null : centsToUsd(entry.cents),
       share: entry.cents === null ? null : shareOf(entry.cents, total)
     }));
+  // Without any USD value the items keep their amounts and the total is `null`, not zero.
   return {
     source: source.kind,
-    ...snapshotAvailability(current, selected),
+    ...status,
     asOf: asOfOf(source, current),
     items,
-    totalUsd: centsToUsd(total)
+    totalUsd: status.availability === 'unavailable' ? null : centsToUsd(total)
   };
 }
 
@@ -384,16 +438,21 @@ export function buildMasterWallets(
   const unpriced = wallets.some((wallet) =>
     wallet.balances.some((balance) => balance.valueCents === null)
   );
+  // The balances of an unvalued run stay listed with their amounts; the USD figures are `null`.
+  const notValued = !noneRead && !isValued(current);
   return {
     source: source.kind,
-    availability: noneRead ? 'unavailable' : unread || unpriced ? 'partial' : 'available',
+    availability:
+      noneRead || notValued ? 'unavailable' : unread || unpriced ? 'partial' : 'available',
     reason: noneRead
       ? 'not_read'
-      : unread
-        ? 'partial_coverage'
-        : unpriced
-          ? 'unpriced_assets'
-          : null,
+      : notValued
+        ? 'not_valued'
+        : unread
+          ? 'partial_coverage'
+          : unpriced
+            ? 'unpriced_assets'
+            : null,
     asOf: asOfOf(source, current),
     items: valued.map(({ wallet, cents }) => ({
       network: wallet.network,
@@ -407,9 +466,9 @@ export function buildMasterWallets(
         amount: balance.amount,
         valueUsd: balance.valueCents === null ? null : centsToUsd(balance.valueCents)
       })),
-      valueUsd: cents === null ? null : centsToUsd(cents),
-      share: cents === null ? null : shareOf(cents, total)
+      valueUsd: cents === null || notValued ? null : centsToUsd(cents),
+      share: cents === null || notValued ? null : shareOf(cents, total)
     })),
-    totalUsd: noneRead ? null : centsToUsd(total)
+    totalUsd: noneRead || notValued ? null : centsToUsd(total)
   };
 }
