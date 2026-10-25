@@ -24,8 +24,19 @@ const nullableString = { type: ['string', 'null'] } as const;
 
 const reportSchema = object({
   status: { type: 'string', enum: ['completed', 'partial', 'locked'] },
+  runId: { type: 'string' },
   startedAt: { type: 'string', format: 'date-time' },
   durationMs: count,
+  valuation: { type: 'string', enum: ['market', 'none'] },
+  phasesMs: object({
+    copyTransactions: count,
+    revisit: count,
+    catalogUsers: count,
+    prices: count,
+    snapshot: count,
+    aggregateRebuild: count,
+    persist: count
+  }),
   sources: object({
     transactions: object({ read: count, revisited: count, lastId: nullableString }),
     users: object({ read: count, newWallets: count, countedInCountries: count }),
@@ -65,6 +76,7 @@ const reportSchema = object({
               null
             ]
           },
+          native: { type: 'string', enum: ['included', 'not_listed'] },
           takenAt: { type: 'string', format: 'date-time' }
         })
       ),
@@ -77,8 +89,11 @@ const reportSchema = object({
         transfers: count,
         swaps: count,
         unpriced: count,
+        unpricedFees: count,
+        unverifiedSwaps: count,
         outsideCatalog: count,
         users: count,
+        undatedUsers: count,
         wallets: count,
         verifiedWallets: count,
         builtAt: { type: 'string', format: 'date-time' }
