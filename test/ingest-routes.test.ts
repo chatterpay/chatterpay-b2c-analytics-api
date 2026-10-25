@@ -26,7 +26,7 @@ const REPORT: IngestionReport = {
   sources: {
     transactions: { read: 3, revisited: 0, lastId: '000000000000000000000003' },
     users: { read: 2, newWallets: 2, countedInCountries: 2 },
-    catalog: { tokens: 6, networks: 2 },
+    catalog: { tokens: 6, networks: 2, retainedTokens: 0, retainedNetworks: 0 },
     prices: { provider: null, calls: 0, prices: 0, failed: false },
     balances: { status: 'disabled', calls: 0, failedCalls: 0, networks: [], masterWallets: 0 }
   },
