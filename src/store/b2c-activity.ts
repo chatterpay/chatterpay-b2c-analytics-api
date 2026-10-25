@@ -9,7 +9,7 @@ import type {
   TokenInfo,
   TransactionCursor
 } from '../ingest/types.js';
-import { networkSlug, toNetworkDefinitions } from './b2c-networks.js';
+import { chainIdText, familyOf, networkSlug, toNetworkDefinitions } from './b2c-networks.js';
 
 /** Fields of a B2C `transactions` row that the ingestion copies. */
 const TRANSACTION_PROJECTION = {
@@ -61,17 +61,6 @@ export function countryOfPhone(phone: unknown): string {
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value : '';
-}
-
-// Chain ids are int32, int64 (`Long`) or double depending on who wrote the document.
-function chainIdText(value: unknown): string {
-  if (typeof value === 'number' || typeof value === 'bigint') {
-    return String(value);
-  }
-  if (typeof value === 'object' && value !== null && 'toString' in value) {
-    return String(value);
-  }
-  return '';
 }
 
 function amountOf(value: unknown): number {
@@ -178,6 +167,7 @@ export class MongoB2cActivityReader implements B2cActivityReader {
   }
 
   async tokens(): Promise<TokenInfo[]> {
+    // Every token whatever its `enabled`: a token closed to new operations still values history.
     const documents = await this.db
       .collection('tokens')
       .find(
@@ -211,9 +201,14 @@ export class MongoB2cActivityReader implements B2cActivityReader {
       )
       .toArray();
     // Only networks the catalog accepts, so a chain maps to an id the metrics endpoints serve.
+    // `enabled` is not read: a network closed to new B2C operations keeps its history.
     const accepted = new Set(
       toNetworkDefinitions(
-        documents.map((document) => ({ name: document.name, family: document.family }))
+        documents.map((document) => ({
+          name: document.name,
+          family: document.family,
+          chainId: document.chainId
+        }))
       ).map((network) => network.id)
     );
     const chains = new Map<string, ChainInfo>();
@@ -221,7 +216,8 @@ export class MongoB2cActivityReader implements B2cActivityReader {
       const name = text(document.name).trim();
       const network = networkSlug(name);
       const chainId = chainIdText(document.chainId);
-      if (!accepted.has(network) || chainId === '' || chains.has(chainId)) {
+      const family = familyOf(document.family);
+      if (!accepted.has(network) || family === null || chainId === '' || chains.has(chainId)) {
         continue;
       }
       const contracts: Record<string, string> = {};
@@ -233,7 +229,14 @@ export class MongoB2cActivityReader implements B2cActivityReader {
           }
         }
       }
-      chains.set(chainId, { chainId, network, name, explorer: text(document.explorer), contracts });
+      chains.set(chainId, {
+        chainId,
+        network,
+        name,
+        family,
+        explorer: text(document.explorer),
+        contracts
+      });
     }
     return [...chains.values()];
   }
