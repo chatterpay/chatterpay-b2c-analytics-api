@@ -82,9 +82,19 @@ const reason = {
     'no_eligible_cohort',
     'not_configured',
     'not_read',
+    'not_valued',
+    'native_not_covered',
+    'undated_users',
     null
   ]
 } as const;
+const valuedMoneyMetric = object({
+  value: nullableDecimal,
+  previous: nullableDecimal,
+  changeRatio: nullableDecimal,
+  availability,
+  reason
+});
 const networkReadReason = {
   type: ['string', 'null'],
   enum: [
@@ -107,7 +117,8 @@ const ingestRunStatus = object({
     transactions: { type: 'string', enum: ['complete', 'partial'] },
     prices: { type: 'string', enum: ['complete', 'failed', 'skipped', 'disabled'] },
     balances: { type: 'string', enum: ['complete', 'partial', 'failed', 'disabled'] }
-  })
+  }),
+  valuation: { type: 'string', enum: ['market', 'none'] }
 });
 
 /** Builds the schema of a block: origin, availability, reason and freshness, then its fields. */
@@ -129,7 +140,8 @@ const tvlBlock = block({
       object({
         wallets: count,
         walletsRead: count,
-        unpricedAssets: arrayOf(object({ network, asset: { type: 'string' } }))
+        unpricedAssets: arrayOf(object({ network, asset: { type: 'string' } })),
+        nativeNotCovered: arrayOf(network)
       }),
       { type: 'null' }
     ]
@@ -196,6 +208,17 @@ const averageFeeBlock = block({
 });
 
 const polymarketVolumeBlock = block({ valueUsd: nullableDecimal });
+
+const valuationBlock = block({
+  operations: count,
+  unpricedVolume: count,
+  unpricedFees: count,
+  unpricedAssets: arrayOf(
+    object({ network, asset: { type: 'string' }, unpricedVolume: count, unpricedFees: count })
+  )
+});
+
+const signupsBlock = block({ users: count, undatedUsers: count });
 
 const masterWalletsBlock = block({
   items: arrayOf(
@@ -291,9 +314,9 @@ const usersQuery = {
 const overviewResponse = object({
   meta: meta({ range: { type: 'string', enum: RANGE_ENUM } }),
   tiles: object({
-    volumeUsd: moneyMetric,
+    volumeUsd: valuedMoneyMetric,
     transactions: countMetric,
-    feesUsd: moneyMetric,
+    feesUsd: valuedMoneyMetric,
     activeUsers: countMetric,
     newUsers: countMetric
   }),
@@ -301,22 +324,25 @@ const overviewResponse = object({
     object({
       start: instant,
       end: instant,
-      volumeUsd: decimal,
+      volumeUsd: nullableDecimal,
       transactions: { type: 'integer' },
-      byNetwork: arrayOf(object({ network, volumeUsd: decimal, transactions: { type: 'integer' } }))
+      byNetwork: arrayOf(
+        object({ network, volumeUsd: nullableDecimal, transactions: { type: 'integer' } })
+      )
     })
   ),
   byNetwork: arrayOf(
     object({
       network,
       label: { type: 'string' },
-      volumeUsd: decimal,
+      volumeUsd: nullableDecimal,
       transactions: { type: 'integer' },
-      feesUsd: decimal,
+      feesUsd: nullableDecimal,
       activeUsers: { type: 'integer' },
       newUsers: { type: 'integer' }
     })
   ),
+  valuation: valuationBlock,
   tvl: tvlBlock,
   topTokens: topTokensBlock,
   topCountries: topCountriesBlock,
@@ -359,7 +385,8 @@ const usersResponse = object({
     })
   ),
   newWallets: newWalletsBlock,
-  retentionSummary: retentionSummaryBlock
+  retentionSummary: retentionSummaryBlock,
+  signups: signupsBlock
 });
 
 const networksResponse = object({
@@ -375,34 +402,40 @@ const networksResponse = object({
 const revenueResponse = object({
   meta: meta({ range: { type: 'string', enum: RANGE_ENUM } }),
   tiles: object({
-    feesUsd: moneyMetric,
-    transferFeesUsd: moneyMetric,
-    swapFeesUsd: moneyMetric,
-    volumeUsd: moneyMetric,
-    swapVolumeUsd: moneyMetric
+    feesUsd: valuedMoneyMetric,
+    transferFeesUsd: valuedMoneyMetric,
+    swapFeesUsd: valuedMoneyMetric,
+    volumeUsd: valuedMoneyMetric,
+    swapVolumeUsd: valuedMoneyMetric
   }),
   series: arrayOf(
     object({
       start: instant,
       end: instant,
-      feesUsd: decimal,
-      transferFeesUsd: decimal,
-      swapFeesUsd: decimal
+      feesUsd: nullableDecimal,
+      transferFeesUsd: nullableDecimal,
+      swapFeesUsd: nullableDecimal
     })
   ),
   byNetwork: arrayOf(
     object({
       network,
       label: { type: 'string' },
-      feesUsd: decimal,
-      transferFeesUsd: decimal,
-      swapFeesUsd: decimal,
-      volumeUsd: decimal
+      feesUsd: nullableDecimal,
+      transferFeesUsd: nullableDecimal,
+      swapFeesUsd: nullableDecimal,
+      volumeUsd: nullableDecimal
     })
   ),
   byAsset: arrayOf(
-    object({ network, asset: { type: 'string' }, volumeUsd: decimal, feesUsd: decimal })
+    object({
+      network,
+      asset: { type: 'string' },
+      volumeUsd: nullableDecimal,
+      feesUsd: nullableDecimal
+    })
   ),
+  valuation: valuationBlock,
   avgFeePerTransaction: averageFeeBlock,
   polymarketVolume: polymarketVolumeBlock,
   feesByProduct: feesByProductBlock,
