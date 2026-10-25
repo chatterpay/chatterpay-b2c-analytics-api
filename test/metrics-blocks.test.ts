@@ -157,7 +157,13 @@ describe('live blocks', () => {
       takenAt: new Date('2026-10-24T03:00:00.000Z'),
       balances: {
         networks: [
-          { network: 'base-sepolia', status: 'complete', wallets: 2, walletsRead: 2 },
+          {
+            network: 'base-sepolia',
+            status: 'complete',
+            wallets: 2,
+            walletsRead: 2,
+            native: 'included'
+          },
           { network: 'cardano-preprod', status: 'partial', wallets: 2, walletsRead: 1 }
         ],
         holdings: [
@@ -212,7 +218,7 @@ describe('live blocks', () => {
     expect(overview.tvl.series.every((point) => point.tvlUsd === null)).toBe(true);
     expect(overview.topCountries.availability).toBe('unavailable');
     expect(revenue.masterWallets.availability).toBe('unavailable');
-    expect(overview.meta.ingest).toEqual(RUN);
+    expect(overview.meta.ingest).toEqual({ ...RUN, valuation: 'market' });
   });
 
   it('marks TVL partial when a network was not read completely', () => {
@@ -221,7 +227,12 @@ describe('live blocks', () => {
     const all = buildOverview('all', 'month', NOW).tvl;
     expect(all).toMatchObject({ availability: 'partial', reason: 'partial_coverage' });
     expect(all.value?.value).toBe('12.00');
-    expect(all.coverage).toEqual({ wallets: 4, walletsRead: 3, unpricedAssets: [] });
+    expect(all.coverage).toEqual({
+      wallets: 4,
+      walletsRead: 3,
+      unpricedAssets: [],
+      nativeNotCovered: []
+    });
 
     const base = buildOverview('base-sepolia', 'month', NOW).tvl;
     expect(base).toMatchObject({ availability: 'available', reason: null });
@@ -232,7 +243,15 @@ describe('live blocks', () => {
     install([
       snapshot({
         balances: {
-          networks: [{ network: 'base-sepolia', status: 'complete', wallets: 2, walletsRead: 2 }],
+          networks: [
+            {
+              network: 'base-sepolia',
+              status: 'complete',
+              wallets: 2,
+              walletsRead: 2,
+              native: 'included'
+            }
+          ],
           holdings: [
             { network: 'base-sepolia', asset: 'USDC', amount: '10.0', valueCents: 1000 },
             { network: 'base-sepolia', asset: 'WBTC', amount: '0.1', valueCents: null }
