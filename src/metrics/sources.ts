@@ -14,10 +14,10 @@ import {
   totalUsersAt
 } from './facts.js';
 import { EMPTY_LIVE_SNAPSHOTS, MOCK_SNAPSHOTS, type SnapshotSource } from './snapshot-source.js';
-import type { IngestRunStatus } from './types.js';
+import type { IngestRunStatus, UsdValuation } from './types.js';
 
 /** Version of the live dataset; changing how B2C rows become metrics requires a new value. */
-export const LIVE_DATASET_VERSION = 'live-v2';
+export const LIVE_DATASET_VERSION = 'live-v3';
 
 /** Where the values of a response come from. */
 export type DataStatus = 'mock' | 'mixed' | 'live';
@@ -56,6 +56,11 @@ export interface MetricsSource {
   newUsersAcross(networks: readonly NetworkId[], window: TimeWindow): number;
   /** Distinct users of any of `networks` that joined through `point`, inclusive, each once. */
   totalUsersAcross(networks: readonly NetworkId[], point: DayHour): number;
+  /**
+   * Distinct users of any of `networks` without a signup date. They are in the totals from the
+   * start, and in no signup window or cohort.
+   */
+  undatedUsersAcross(networks: readonly NetworkId[]): number;
   /**
    * Monthly cohort over `networks`: distinct users that joined in the month starting on
    * `cohortStartDay`, and how many of them were active on any of the networks in each of the
@@ -96,6 +101,7 @@ export const MOCK_SOURCE: MetricsSource = {
     networks.reduce((sum, id) => sum + mockNewUsers(id, window), 0),
   totalUsersAcross: (networks, point) =>
     networks.reduce((sum, id) => sum + totalUsersAt(id, point), 0),
+  undatedUsersAcross: () => 0,
   cohortAcross: (networks, cohortStartDay, months) => {
     const cohortWindow = dayWindow(cohortStartDay, addMonths(cohortStartDay, 1) - 1);
     let size = 0;
@@ -149,9 +155,11 @@ export type MetricGroup =
  * group is synthetic. Once a live dataset is loaded, a live group without data (no snapshot yet)
  * answers `unavailable`; it never falls back to the synthetic values.
  *
- * - `activity`: completed `transfer` and `swap` rows of the B2C `transactions` collection. A swap
- *   counts once, valued on its stable leg when it has one; fees are the `fee` field. Deposits and
- *   Polymarket rows are copied but not counted.
+ * - `activity`: completed `transfer` rows and complete swaps (both legs completed) of the B2C
+ *   `transactions` collection. A swap counts once, valued on its stable leg when it has one; fees
+ *   are the `fee` field. An operation without a USD value counts as an operation and is left out
+ *   of the money figures, which then answer `partial` or `unavailable`. Deposits and Polymarket
+ *   rows are copied but not counted.
  * - `activeUsers`: users whose wallet sent a counted operation.
  * - `signups`: `users.creationDate`, per network of the user's wallets. Wallets carry no date of
  *   their own, so a wallet added later counts from the user's signup.
@@ -244,6 +252,18 @@ export function liveAsOf(group: MetricGroup): string | null {
   return live !== null && LIVE_METRIC_GROUPS[group] ? live.asOf.toISOString() : null;
 }
 
+/**
+ * USD valuation of the build behind a group's live values.
+ *
+ * @param group - Metric group.
+ * @returns `none` when that build valued nothing; `market` otherwise, synthetic values included.
+ */
+export function liveValuation(group: MetricGroup): UsdValuation {
+  return live !== null && LIVE_METRIC_GROUPS[group]
+    ? (live.ingest?.valuation ?? 'market')
+    : 'market';
+}
+
 /** Provenance fields of the `meta` object of a response. */
 export interface Provenance {
   datasetVersion: string;
@@ -274,6 +294,10 @@ export function provenanceOf(groups: readonly MetricGroup[]): Provenance {
           : `${LIVE_DATASET_VERSION}+${DATASET_VERSION}`,
     dataStatus,
     lastUpdatedAt: anyLive && live !== null ? live.asOf.toISOString() : null,
-    ingest: anyLive && live !== null ? live.ingest : null
+    // Runs stored before the valuation was recorded valued at market.
+    ingest:
+      anyLive && live !== null && live.ingest !== null
+        ? { ...live.ingest, valuation: live.ingest.valuation ?? 'market' }
+        : null
   };
 }
