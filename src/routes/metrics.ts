@@ -1,22 +1,37 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { requireRoles } from '../auth/principal.js';
 import { ApiError } from '../errors/api-error.js';
 import {
-  isKnownNetwork,
-  listNetworks,
   NETWORK_ID_PATTERN,
-  type NetworkFilter
+  type NetworkDefinition,
+  type NetworkFilter,
+  type NetworkId
 } from '../metrics/catalog.js';
 import { buildOverview } from '../metrics/overview.js';
 import { buildRevenue } from '../metrics/revenue.js';
 import type { MetricsRange, UsersGranularity } from '../metrics/types.js';
 import { buildUsers } from '../metrics/users.js';
+import type { Store } from '../store/types.js';
+import { visibleCatalog } from './network-scope.js';
 import { arrayOf, errorResponses, object } from './schemas.js';
 
 /** Options of the metrics routes. */
 export interface MetricsRoutesOptions {
   /** Source of the current instant; injected by tests. */
   clock: () => Date;
+  /** Store of the network visibility policy, read once per request. */
+  store: Store;
+}
+
+/** Visible networks of each request, resolved once by the pre-handler. */
+const scopes = new WeakMap<FastifyRequest, readonly NetworkDefinition[]>();
+
+function visibleIds(request: FastifyRequest): readonly NetworkId[] {
+  const visible = scopes.get(request);
+  if (visible === undefined) {
+    throw new Error('Network scope not resolved');
+  }
+  return visible.map((network) => network.id);
 }
 
 const RANGE_ENUM = ['today', 'week', 'month', 'year', 'ytd', 'all'];
@@ -392,8 +407,14 @@ const revenueResponse = object({
  * (`mock`, `mixed` or `live`); `/networks`, which has no meta, answers `mock`. Unknown query
  * parameters, values outside the enums and networks outside the catalog answer 400.
  *
+ * Networks an admin hid (see `/v1/admin/networks`) are left out of `/networks`, of `network=all`
+ * (tiles, series, breakdowns, comparisons with the previous period and cohorts) and answer 400 as
+ * unknown networks when requested by id. The policy is read from the analytics database on every
+ * request; when it cannot be read the routes answer 503 instead of serving networks that may be
+ * hidden.
+ *
  * @param app - Fastify instance (encapsulated by the prefix).
- * @param options - Clock used to anchor the dataset.
+ * @param options - Clock used to anchor the dataset and store of the visibility policy.
  */
 export async function metricsRoutes(
   app: FastifyInstance,
@@ -407,10 +428,18 @@ export async function metricsRoutes(
     }
   });
   app.addHook<{ Querystring: { network?: string } }>('preHandler', async (request) => {
+    // One read of the policy per request, so every block of a response uses the same networks.
+    const visible = await visibleCatalog(options.store, request);
     const requested = request.query.network;
-    if (requested !== undefined && !isKnownNetwork(requested)) {
+    // A hidden network answers exactly like an unknown one, so its data cannot be requested.
+    if (
+      requested !== undefined &&
+      requested !== 'all' &&
+      !visible.some((network) => network.id === requested)
+    ) {
       throw new ApiError(400, 'BAD_REQUEST', 'Unknown network');
     }
+    scopes.set(request, visible);
   });
 
   app.get(
@@ -418,12 +447,14 @@ export async function metricsRoutes(
     {
       schema: {
         operationId: 'getMetricsNetworks',
-        summary: 'Networks of the environment, from the ChatterPay B2C database',
+        summary: 'Networks the statistics show: the catalog without the hidden networks',
         tags: ['metrics'],
         response: { 200: networksResponse, ...errorResponses }
       }
     },
-    async () => ({ networks: listNetworks() })
+    async (request) => ({
+      networks: (scopes.get(request) ?? []).map(({ id, label, family }) => ({ id, label, family }))
+    })
   );
 
   app.get<{ Querystring: { network: NetworkFilter; range: MetricsRange } }>(
@@ -438,7 +469,15 @@ export async function metricsRoutes(
       }
     },
     async (request, reply) =>
-      withStatus(reply, buildOverview(request.query.network, request.query.range, options.clock()))
+      withStatus(
+        reply,
+        buildOverview(
+          request.query.network,
+          request.query.range,
+          options.clock(),
+          visibleIds(request)
+        )
+      )
   );
 
   app.get<{ Querystring: { network: NetworkFilter; granularity: UsersGranularity } }>(
@@ -455,7 +494,12 @@ export async function metricsRoutes(
     async (request, reply) =>
       withStatus(
         reply,
-        buildUsers(request.query.network, request.query.granularity, options.clock())
+        buildUsers(
+          request.query.network,
+          request.query.granularity,
+          options.clock(),
+          visibleIds(request)
+        )
       )
   );
 
@@ -471,6 +515,14 @@ export async function metricsRoutes(
       }
     },
     async (request, reply) =>
-      withStatus(reply, buildRevenue(request.query.network, request.query.range, options.clock()))
+      withStatus(
+        reply,
+        buildRevenue(
+          request.query.network,
+          request.query.range,
+          options.clock(),
+          visibleIds(request)
+        )
+      )
   );
 }
