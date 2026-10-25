@@ -68,6 +68,7 @@ describe('takeBalanceSnapshot', () => {
 
     // The status covers the reads; an asset without price is left to the holdings figures.
     expect(status).toBe('complete');
+    // The Base Sepolia token list has no native coin; ADA is always read on Cardano.
     expect(snapshot.networks).toEqual([
       {
         network: 'base-sepolia',
@@ -77,7 +78,8 @@ describe('takeBalanceSnapshot', () => {
         calls: 1,
         failedCalls: 0,
         b2cEnabled: true,
-        reason: null
+        reason: null,
+        native: 'not_listed'
       },
       {
         network: 'cardano-preprod',
@@ -87,7 +89,8 @@ describe('takeBalanceSnapshot', () => {
         calls: 1,
         failedCalls: 0,
         b2cEnabled: true,
-        reason: null
+        reason: null,
+        native: 'included'
       }
     ]);
     expect(snapshot.holdings).toEqual([
@@ -113,7 +116,8 @@ describe('takeBalanceSnapshot', () => {
       calls: 1,
       failedCalls: 0,
       b2cEnabled: true,
-      reason: 'read_incomplete'
+      reason: 'read_incomplete',
+      native: 'not_listed'
     });
     expect(snapshot.holdings.find((holding) => holding.asset === 'USDC')?.valueCents).toBe(250);
     expect(snapshot.holdings.some((holding) => holding.asset === 'WBTC')).toBe(false);
@@ -143,8 +147,11 @@ describe('takeBalanceSnapshot', () => {
     expect(status).toBe('failed');
   });
 
-  it('skips tokens with placeholder contracts or without decimals', async () => {
-    const reader = new FakeBalanceReader(EVM_BALANCES);
+  it('reads a placeholder contract as the native coin and skips tokens without decimals', async () => {
+    const reader = new FakeBalanceReader({
+      ...EVM_BALANCES,
+      '0xusera|native': 500_000_000_000_000_000n
+    });
     const { snapshot } = await takeBalanceSnapshot(
       input({
         reader,
@@ -169,7 +176,53 @@ describe('takeBalanceSnapshot', () => {
       })
     );
 
-    expect(snapshot.holdings.map((holding) => holding.asset)).toEqual(['USDC']);
+    expect(snapshot.holdings).toEqual([
+      { network: 'base-sepolia', asset: 'USDC', amount: '3.0', valueCents: 300 },
+      { network: 'base-sepolia', asset: 'ETH', amount: '0.5', valueCents: 150_000 }
+    ]);
+    expect(snapshot.networks[0]?.native).toBe('included');
+  });
+
+  it('reports the native coin as included when the user holds none of it', async () => {
+    const { snapshot } = await takeBalanceSnapshot(
+      input({
+        chains: CHAINS.slice(0, 1),
+        tokens: [
+          ...TOKENS,
+          {
+            chainId: '84532',
+            symbol: 'ETH',
+            stable: false,
+            address: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE',
+            decimals: 18
+          }
+        ]
+      })
+    );
+
+    // Read and zero: a measured zero, not a missing figure.
+    expect(snapshot.networks[0]?.native).toBe('included');
+    expect(snapshot.holdings.some((holding) => holding.asset === 'ETH')).toBe(false);
+  });
+
+  it('values nothing under the `none` valuation and keeps the amounts', async () => {
+    const { snapshot } = await takeBalanceSnapshot(input({ valuation: 'none' }));
+
+    expect(snapshot.valuation).toBe('none');
+    expect(snapshot.holdings.map((holding) => holding.valueCents)).toEqual([
+      null,
+      null,
+      null,
+      null,
+      null
+    ]);
+    expect(snapshot.holdings.map((holding) => holding.amount)).toEqual([
+      '3.0',
+      '0.001',
+      '0.0001',
+      '3.0',
+      '1.0'
+    ]);
   });
 
   it('reads master wallets with the native coin and links them to the explorer', async () => {
