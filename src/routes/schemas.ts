@@ -15,6 +15,8 @@ const apiErrorSchema = {
         'BAD_REQUEST',
         'UNAUTHORIZED',
         'FORBIDDEN',
+        'CANNOT_CHANGE_OWN_ROLE',
+        'CANNOT_REMOVE_SELF',
         'NOT_FOUND',
         'CONFLICT',
         'CONFIG_CONFLICT',
