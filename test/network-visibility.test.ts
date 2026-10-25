@@ -563,10 +563,28 @@ describe('network visibility failures', () => {
     expect(report.status).toBe('completed');
     expect(report.sources.balances.status).toBe('partial');
     expect(report.sources.balances.failedCalls).toBeGreaterThan(0);
-    expect(report.sources.balances.networks).toEqual([
-      { network: 'base-sepolia', status: 'complete', wallets: 2, walletsRead: 2 },
-      { network: 'scroll', status: 'failed', wallets: 2, walletsRead: 0 }
+    expect(report.sources.balances.networks).toMatchObject([
+      {
+        network: 'base-sepolia',
+        status: 'complete',
+        wallets: 2,
+        walletsRead: 2,
+        failedCalls: 0,
+        reason: null,
+        takenAt: NOW.toISOString()
+      },
+      {
+        network: 'scroll',
+        status: 'failed',
+        wallets: 2,
+        walletsRead: 0,
+        reason: 'read_incomplete',
+        takenAt: NOW.toISOString()
+      }
     ]);
+    const [base, scrollRead] = report.sources.balances.networks;
+    expect((base?.calls ?? 0) + (scrollRead?.calls ?? 0)).toBe(report.sources.balances.calls);
+    expect(scrollRead?.failedCalls).toBe(report.sources.balances.failedCalls);
     const all = buildOverview('all', 'month', NOW).tvl;
     const scroll = buildOverview('scroll', 'month', NOW).tvl;
     expect(all).toMatchObject({
@@ -574,12 +592,23 @@ describe('network visibility failures', () => {
       availability: 'partial',
       reason: 'partial_coverage'
     });
+    // Nothing of Scroll was read: no value, never a zero.
     expect(scroll).toMatchObject({
       source: 'live',
-      availability: 'partial',
-      reason: 'partial_coverage'
+      availability: 'unavailable',
+      reason: 'not_read',
+      value: null
     });
-    expect(scroll.byNetwork).toMatchObject([{ network: 'scroll', status: 'failed' }]);
+    expect(scroll.byNetwork).toEqual([
+      {
+        network: 'scroll',
+        label: 'Scroll',
+        tvlUsd: null,
+        share: null,
+        status: 'failed',
+        reason: 'read_incomplete'
+      }
+    ]);
     expect(buildOverview('all', 'month', NOW, ['base-sepolia']).tvl).toMatchObject({
       availability: 'available',
       value: { value: '2.00' }
