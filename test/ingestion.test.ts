@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { refreshLiveMetrics } from '../src/ingest/live-loader.js';
 import { type IngestionOptions, runIngestion } from '../src/ingest/run.js';
+import type { MasterWalletConfig } from '../src/ingest/snapshot.js';
+import { buildOverview } from '../src/metrics/overview.js';
+import { buildRevenue } from '../src/metrics/revenue.js';
 import { setLiveSource, sourceFor } from '../src/metrics/sources.js';
+import { buildUsers } from '../src/metrics/users.js';
 import {
+  FakeBalanceReader,
   FakePriceProvider,
   FakeReader,
   hexId,
   MemoryIngestRepository,
+  TOKEN_ADDRESSES,
   transaction
 } from './ingest-fakes.js';
 
@@ -166,6 +172,219 @@ describe('runIngestion', () => {
     expect(report.sources.users.read).toBe(1);
     expect(report.sources.catalog).toEqual({ tokens: 6, networks: 2 });
     expect(repository.chainCopies[0]?.contracts).toEqual({ paymasterAddress: '0xPaymaster' });
+  });
+});
+
+describe('runIngestion snapshots', () => {
+  const SIGNER = '0x9999999999999999999999999999999999999999';
+  const MASTERS: MasterWalletConfig[] = [
+    { network: 'base-sepolia', address: SIGNER, role: 'Backend signer' }
+  ];
+  const USERS = [
+    {
+      id: 'u1',
+      createdAt: new Date('2026-09-01T00:00:00.000Z'),
+      wallets: [{ chainId: '84532', address: '0xUser1' }],
+      country: 'AR'
+    },
+    {
+      id: 'u2',
+      createdAt: new Date('2026-10-01T00:00:00.000Z'),
+      wallets: [
+        { chainId: '84532', address: '0xUser2' },
+        { chainId: '900000000001', address: 'addr_test1u2' }
+      ],
+      country: 'MX'
+    },
+    // A wallet outside the catalog: observed, not counted in countries.
+    { id: 'u3', createdAt: null, wallets: [{ chainId: '137', address: '0xUser3' }] }
+  ];
+  const BALANCES = new FakeBalanceReader({
+    [`0xuser1|${TOKEN_ADDRESSES.USDC}`]: 4_000_000n,
+    [`0xuser2|${TOKEN_ADDRESSES.WETH}`]: 2_000_000_000_000_000n,
+    [`${SIGNER}|native`]: 1_000_000_000_000_000_000n
+  });
+
+  function runWith(
+    reader: FakeReader,
+    repository: MemoryIngestRepository,
+    overrides: {
+      balances?: FakeBalanceReader | null;
+      prices?: FakePriceProvider | null;
+      clock?: () => Date;
+    } = {}
+  ) {
+    return runIngestion({
+      reader,
+      repository,
+      prices: overrides.prices ?? null,
+      balances: overrides.balances === undefined ? BALANCES : overrides.balances,
+      masterWallets: MASTERS,
+      clock: overrides.clock ?? (() => NOW),
+      options: { ...OPTIONS, maxBalanceCallsPerRun: 10 },
+      owner: 'test-run'
+    });
+  }
+
+  it('counts users per country without storing the country', async () => {
+    const reader = new FakeReader(rows(1), USERS);
+    const repository = new MemoryIngestRepository();
+
+    const report = await runWith(reader, repository);
+
+    expect(report.sources.users.countedInCountries).toBe(2);
+    expect(repository.userCopies.every((user) => !('country' in user))).toBe(true);
+    const snapshot = repository.snapshotCopies.get(NOW.getTime());
+    expect(snapshot?.countries).toEqual(
+      expect.arrayContaining([
+        { network: null, country: 'AR', users: 1 },
+        { network: null, country: 'MX', users: 1 },
+        { network: 'base-sepolia', country: 'MX', users: 1 },
+        { network: 'cardano-preprod', country: 'MX', users: 1 }
+      ])
+    );
+    expect(snapshot?.countries).toHaveLength(5);
+  });
+
+  it('observes wallets once and bounds the first appearance after the first run', async () => {
+    const reader = new FakeReader(rows(1), USERS.slice(0, 1));
+    const repository = new MemoryIngestRepository();
+
+    const first = await runWith(reader, repository);
+    reader.userList = USERS;
+    const later = new Date(NOW.getTime() + 86_400_000);
+    const second = await runWith(reader, repository, { clock: () => later });
+
+    expect(first.sources.users.newWallets).toBe(1);
+    expect(second.sources.users.newWallets).toBe(3);
+    expect(repository.checkpoints.walletsTrackingSince).toEqual(NOW);
+    expect(repository.observations.get('84532|0xuser1')).toEqual({
+      chainId: '84532',
+      address: '0xuser1',
+      firstObservedAt: NOW,
+      bounded: false
+    });
+    expect(repository.observations.get('900000000001|addr_test1u2')).toMatchObject({
+      firstObservedAt: later,
+      bounded: true
+    });
+  });
+
+  it('saves a balance snapshot per run and its status', async () => {
+    const reader = new FakeReader(rows(1), USERS);
+    const repository = new MemoryIngestRepository();
+    const prices = new FakePriceProvider({ WETH: 2500, ETH: 3000, ADA: 0.5, WBTC: 60_000 });
+
+    const report = await runWith(reader, repository, { prices });
+
+    expect(prices.lastSymbols).toEqual(['WETH', 'WBTC', 'ADA', 'ETH']);
+    expect(report.sources.balances).toMatchObject({
+      status: 'complete',
+      failedCalls: 0,
+      masterWallets: 1
+    });
+    expect(report.sources.balances.calls).toBeGreaterThan(0);
+    const balances = repository.snapshotCopies.get(NOW.getTime())?.balances;
+    expect(balances?.holdings).toEqual([
+      { network: 'base-sepolia', asset: 'USDC', amount: '4.0', valueCents: 400 },
+      { network: 'base-sepolia', asset: 'WETH', amount: '0.002', valueCents: 500 }
+    ]);
+    expect(balances?.masterWallets[0]?.balances).toEqual([
+      { asset: 'ETH', amount: '1.0', valueCents: 300_000 }
+    ]);
+    expect(repository.stored?.run).toEqual({
+      status: 'completed',
+      finishedAt: NOW.toISOString(),
+      sources: { transactions: 'complete', prices: 'complete', balances: 'complete' }
+    });
+  });
+
+  it('keeps the country counts and marks balances disabled without a reader', async () => {
+    const reader = new FakeReader(rows(1), USERS);
+    const repository = new MemoryIngestRepository();
+
+    const report = await runWith(reader, repository, { balances: null });
+
+    expect(report.sources.balances).toEqual({
+      status: 'disabled',
+      calls: 0,
+      failedCalls: 0,
+      networks: [],
+      masterWallets: 0
+    });
+    const snapshot = repository.snapshotCopies.get(NOW.getTime());
+    expect(snapshot?.balances).toBeNull();
+    expect(snapshot?.countries.length).toBeGreaterThan(0);
+    expect(repository.stored?.run?.sources).toEqual({
+      transactions: 'complete',
+      prices: 'disabled',
+      balances: 'disabled'
+    });
+  });
+
+  it('serves the snapshot blocks once the build is loaded', async () => {
+    const reader = new FakeReader(rows(1), USERS);
+    const repository = new MemoryIngestRepository();
+    const prices = new FakePriceProvider({ WETH: 2500, ETH: 3000 });
+    await runWith(reader, repository, { prices });
+    try {
+      await refreshLiveMetrics(repository, null);
+      const overview = buildOverview('all', 'month', NOW);
+      const revenue = buildRevenue('all', 'month', NOW);
+      const users = buildUsers('all', 'monthly', NOW);
+
+      expect(overview.meta.ingest?.sources.balances).toBe('complete');
+      expect(overview.tvl).toMatchObject({
+        source: 'live',
+        asOf: NOW.toISOString(),
+        firstSnapshotAt: NOW.toISOString()
+      });
+      expect(overview.tvl.value?.value).toBe('9.00');
+      expect(overview.topTokens.items.map((item) => [item.asset, item.valueUsd])).toEqual([
+        ['WETH', '5.00'],
+        ['USDC', '4.00']
+      ]);
+      expect(overview.topCountries.items.map((item) => [item.country, item.users])).toEqual([
+        ['AR', 1],
+        ['MX', 1]
+      ]);
+      expect(revenue.masterWallets.items[0]).toMatchObject({
+        address: SIGNER,
+        role: 'Backend signer',
+        valueUsd: '3000.00'
+      });
+      expect(revenue.polymarketVolume).toMatchObject({
+        availability: 'unavailable',
+        reason: 'not_recorded'
+      });
+      expect(users.newWallets).toMatchObject({
+        source: 'live',
+        definition: 'first_verifiable_appearance',
+        trackingSince: NOW.toISOString()
+      });
+    } finally {
+      setLiveSource(null);
+    }
+  });
+
+  it('answers unavailable for the snapshot blocks of a build without balances', async () => {
+    const repository = new MemoryIngestRepository();
+    await runWith(new FakeReader(rows(1), USERS), repository, { balances: null });
+    try {
+      await refreshLiveMetrics(repository, null);
+      const overview = buildOverview('all', 'month', NOW);
+
+      expect(overview.tvl).toMatchObject({
+        source: 'live',
+        availability: 'unavailable',
+        reason: 'snapshots_disabled',
+        value: null
+      });
+      expect(overview.topTokens).toMatchObject({ availability: 'unavailable', totalUsd: null });
+      expect(overview.topCountries.availability).toBe('available');
+    } finally {
+      setLiveSource(null);
+    }
   });
 });
 
