@@ -91,6 +91,27 @@ export interface ActivityCursor {
   id: string;
 }
 
+/**
+ * Lists of the Invites view: `pending` holds the invites that can still be resent, revoked or
+ * accepted; `history` holds the accepted, revoked and expired ones.
+ */
+export type InviteView = 'pending' | 'history';
+
+/**
+ * Position in an invite list: the last invite of a page. The next page starts right after it in
+ * the order of {@link Store.listInvites}.
+ */
+export interface InviteCursor {
+  createdAt: Date;
+  id: string;
+}
+
+/** Invites per view at one instant. */
+export interface InviteCounts {
+  pending: number;
+  history: number;
+}
+
 /** Result of a rate limit counter hit. */
 export interface RateLimitResult {
   allowed: boolean;
@@ -216,8 +237,20 @@ export interface Store {
    * conflict.
    */
   createInvite(input: NewInvite, now: Date): Promise<CreateInviteResult>;
-  /** Invites, newest first. */
-  listInvites(now: Date): Promise<Invite[]>;
+  /**
+   * Invites of one view, newest first by `createdAt`, ties broken by the greater id first. The
+   * order is stable, so pages read with `after` neither repeat nor skip invites that were stored
+   * before the first page; an invite that moves between views (revoked, accepted or expired) is
+   * listed in the view it has when its page is read.
+   *
+   * @param view - `pending` or `history`, decided at `now`.
+   * @param limit - Maximum number of invites.
+   * @param now - Instant that decides which invites are expired.
+   * @param after - Last invite of the previous page; omitted for the first page.
+   */
+  listInvites(view: InviteView, limit: number, now: Date, after?: InviteCursor): Promise<Invite[]>;
+  /** Number of invites of each view at `now`. */
+  countInvites(now: Date): Promise<InviteCounts>;
   resendInvite(id: string, now: Date): Promise<InviteTransitionResult>;
   revokeInvite(id: string, now: Date): Promise<InviteTransitionResult>;
 
