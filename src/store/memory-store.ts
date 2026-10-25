@@ -8,7 +8,10 @@ import type {
   Challenge,
   CreateInviteResult,
   Invite,
+  InviteCounts,
+  InviteCursor,
   InviteTransitionResult,
+  InviteView,
   MemberMutationResult,
   NetworkVisibility,
   NetworkVisibilityChange,
@@ -33,6 +36,25 @@ function isPending(invite: Invite, now: Date): boolean {
     (invite.status === 'created' || invite.status === 'simulated') &&
     invite.expiresAt.getTime() > now.getTime()
   );
+}
+
+/** Order of {@link Store.listInvites}: newest `createdAt` first, then the greater id first. */
+function newestInviteFirst(a: Invite, b: Invite): number {
+  const byInstant = b.createdAt.getTime() - a.createdAt.getTime();
+  if (byInstant !== 0) {
+    return byInstant;
+  }
+  if (a.id === b.id) {
+    return 0;
+  }
+  return a.id < b.id ? 1 : -1;
+}
+
+/** Whether `invite` comes after the cursor invite in the order of {@link newestInviteFirst}. */
+function isAfterInvite(invite: Invite, after: InviteCursor): boolean {
+  const instant = invite.createdAt.getTime();
+  const cursor = after.createdAt.getTime();
+  return instant < cursor || (instant === cursor && invite.id < after.id);
 }
 
 function readInvite(invite: Invite, now: Date): Invite {
@@ -229,12 +251,24 @@ export class MemoryStore implements Store {
     return { kind: 'created', invite: { ...invite } };
   }
 
-  async listInvites(now: Date): Promise<Invite[]> {
-    // Map iteration follows insertion order, which breaks ties between invites of one instant.
+  async listInvites(
+    view: InviteView,
+    limit: number,
+    now: Date,
+    after?: InviteCursor
+  ): Promise<Invite[]> {
+    // Same order and tie-break as the MongoDB store, so both page alike.
     return [...this.invites.values()]
-      .reverse()
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .filter((invite) => isPending(invite, now) === (view === 'pending'))
+      .filter((invite) => after === undefined || isAfterInvite(invite, after))
+      .sort(newestInviteFirst)
+      .slice(0, limit)
       .map((invite) => readInvite(invite, now));
+  }
+
+  async countInvites(now: Date): Promise<InviteCounts> {
+    const pending = [...this.invites.values()].filter((invite) => isPending(invite, now)).length;
+    return { pending, history: this.invites.size - pending };
   }
 
   async resendInvite(id: string, now: Date): Promise<InviteTransitionResult> {
