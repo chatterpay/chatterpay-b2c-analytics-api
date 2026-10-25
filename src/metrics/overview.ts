@@ -1,12 +1,21 @@
 import { dayHourOf, hourIndexOf, periodOf, type TimeWindow } from './calendar.js';
 import { type NetworkFilter, type NetworkId, networkProfile, networksFor } from './catalog.js';
-import { type Facts, feesCents, volumeCents } from './facts.js';
-import { centsToUsd, countMetric, moneyMetric } from './format.js';
+import type { Facts, MoneyKey } from './facts.js';
+import { countMetric } from './format.js';
 import { buildTopCountries, buildTopTokens, buildTvl } from './holdings.js';
 import { activityTotals, buildVolumeByProduct } from './products.js';
 import { resolveRange } from './ranges.js';
 import { type MetricGroup, provenanceOf, sourceFor } from './sources.js';
 import type { MetricsRange, OverviewResponse, RangeMeta } from './types.js';
+import {
+  buildValuation,
+  FEE_KEYS,
+  type ValuedCents,
+  VOLUME_KEYS,
+  valuedMoneyMetric,
+  valuedOf,
+  valuedUsd
+} from './valuation.js';
 
 const OVERVIEW_GROUPS: readonly MetricGroup[] = [
   'activity',
@@ -85,6 +94,15 @@ function sumOrNull<T>(items: readonly T[], pick: (item: T) => number | null): nu
   return total;
 }
 
+/** Valued figures of the previous period; `null` when the range has none. */
+function previousValued(
+  totals: readonly NetworkTotals[],
+  keys: readonly MoneyKey[]
+): ValuedCents | null {
+  const previous = totals.flatMap((t) => (t.previous === null ? [] : [t.previous]));
+  return previous.length < totals.length ? null : valuedOf(previous, keys);
+}
+
 /**
  * Builds the Overview dataset.
  *
@@ -120,19 +138,18 @@ export function buildOverview(
   const series = resolved.buckets.map((bucket) => {
     const byNetwork = networks.map((id) => {
       const facts = activity.facts(id, bucket);
-      return {
-        network: id,
-        volume: volumeCents(facts),
-        transactions: facts.transfers + facts.swaps
-      };
+      return { network: id, facts, transactions: facts.transfers + facts.swaps };
     });
     return {
       ...periodOf(bucket),
-      volumeUsd: centsToUsd(sum(byNetwork, (item) => item.volume)),
+      volumeUsd: valuedUsd(
+        byNetwork.map((item) => item.facts),
+        VOLUME_KEYS
+      ),
       transactions: sum(byNetwork, (item) => item.transactions),
       byNetwork: byNetwork.map((item) => ({
         network: item.network,
-        volumeUsd: centsToUsd(item.volume),
+        volumeUsd: valuedUsd([item.facts], VOLUME_KEYS),
         transactions: item.transactions
       }))
     };
@@ -141,9 +158,12 @@ export function buildOverview(
   return {
     meta: rangeMeta(network, range, now, OVERVIEW_GROUPS),
     tiles: {
-      volumeUsd: moneyMetric(
-        sum(totals, (t) => volumeCents(t.facts)),
-        sumOrNull(totals, (t) => (t.previous === null ? null : volumeCents(t.previous)))
+      volumeUsd: valuedMoneyMetric(
+        valuedOf(
+          totals.map((t) => t.facts),
+          VOLUME_KEYS
+        ),
+        previousValued(totals, VOLUME_KEYS)
       ),
       transactions: countMetric(
         sum(totals, (t) => t.facts.transfers + t.facts.swaps),
@@ -151,9 +171,12 @@ export function buildOverview(
           t.previous === null ? null : t.previous.transfers + t.previous.swaps
         )
       ),
-      feesUsd: moneyMetric(
-        sum(totals, (t) => feesCents(t.facts)),
-        sumOrNull(totals, (t) => (t.previous === null ? null : feesCents(t.previous)))
+      feesUsd: valuedMoneyMetric(
+        valuedOf(
+          totals.map((t) => t.facts),
+          FEE_KEYS
+        ),
+        previousValued(totals, FEE_KEYS)
       ),
       activeUsers: countMetric(
         active.activeUsersAcross(networks, resolved.current),
@@ -168,12 +191,13 @@ export function buildOverview(
     byNetwork: totals.map((t) => ({
       network: t.network,
       label: networkProfile(t.network).label,
-      volumeUsd: centsToUsd(volumeCents(t.facts)),
+      volumeUsd: valuedUsd([t.facts], VOLUME_KEYS),
       transactions: t.facts.transfers + t.facts.swaps,
-      feesUsd: centsToUsd(feesCents(t.facts)),
+      feesUsd: valuedUsd([t.facts], FEE_KEYS),
       activeUsers: t.activeUsers,
       newUsers: t.newUsers
     })),
+    valuation: buildValuation(totals.map((t) => ({ network: t.network, facts: t.facts }))),
     tvl: buildTvl(networks, resolved),
     topTokens: buildTopTokens(networks, resolved),
     topCountries: buildTopCountries(network, hourIndexOf(now), visible),
