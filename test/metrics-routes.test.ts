@@ -3,6 +3,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { Principal } from '../src/auth/principal.js';
 import { loadEnv } from '../src/config/env.js';
+import { aggregateActivity, liveSourceFrom } from '../src/metrics/live.js';
+import { buildOverview } from '../src/metrics/overview.js';
+import { buildRevenue } from '../src/metrics/revenue.js';
+import { setLiveSource } from '../src/metrics/sources.js';
+import { buildUsers } from '../src/metrics/users.js';
 
 const NOW = new Date('2026-10-24T15:30:00.000Z');
 const env = loadEnv({ NODE_ENV: 'test', LOG_LEVEL: 'silent' });
@@ -50,6 +55,38 @@ describe('metrics routes', () => {
       expect(body.meta.generatedAt).toBe(NOW.toISOString());
     }
   );
+
+  it.each([
+    ['overview', () => buildOverview('all', 'month', NOW), 'range=month'],
+    ['users', () => buildUsers('all', 'monthly', NOW), 'granularity=monthly'],
+    ['revenue', () => buildRevenue('all', 'month', NOW), 'range=month']
+  ] as const)('%s serializes every block of the builder', async (view, build, query) => {
+    for (const live of [false, true]) {
+      if (live) {
+        // A live build without snapshots: every snapshot block answers with its null fields.
+        const { aggregates } = aggregateActivity({
+          transactions: [],
+          users: [],
+          tokens: [],
+          chains: new Map(),
+          prices: []
+        });
+        setLiveSource(liveSourceFrom(aggregates), NOW);
+      }
+      try {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/v1/metrics/${view}?${query}`,
+          headers: { 'x-test-role': 'viewer' }
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual(JSON.parse(JSON.stringify(build())));
+      } finally {
+        setLiveSource(null);
+      }
+    }
+  });
 
   it('applies the query filters', async () => {
     const response = await app.inject({
