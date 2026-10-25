@@ -20,9 +20,20 @@ const AUDIENCE = 'https://analytics-api.example.run.app';
 const SCHEDULER = 'analytics-scheduler@project.iam.gserviceaccount.com';
 
 const REPORT: IngestionReport = {
+  runId: 'run-1',
   status: 'completed',
   startedAt: NOW.toISOString(),
   durationMs: 12,
+  valuation: 'market',
+  phasesMs: {
+    copyTransactions: 3,
+    revisit: 1,
+    catalogUsers: 2,
+    prices: 0,
+    snapshot: 0,
+    aggregateRebuild: 4,
+    persist: 2
+  },
   sources: {
     transactions: { read: 3, revisited: 0, lastId: '000000000000000000000003' },
     users: { read: 2, newWallets: 2, countedInCountries: 2 },
@@ -34,8 +45,11 @@ const REPORT: IngestionReport = {
     transfers: 3,
     swaps: 0,
     unpriced: 0,
+    unpricedFees: 0,
+    unverifiedSwaps: 0,
     outsideCatalog: 0,
     users: 2,
+    undatedUsers: 0,
     wallets: 2,
     verifiedWallets: 1,
     builtAt: NOW.toISOString()
@@ -195,7 +209,7 @@ describe('metrics with live aggregates', () => {
       expect(response.headers['x-data-status']).toBe('live');
       const body = response.json();
       expect(body.meta.dataStatus).toBe('live');
-      expect(body.meta.datasetVersion).toBe('live-v2');
+      expect(body.meta.datasetVersion).toBe('live-v3');
       expect(body.meta.lastUpdatedAt).toBe(builtAt.toISOString());
       if (view === 'overview') {
         expect(body.tiles.transactions.value).toBe(1);
