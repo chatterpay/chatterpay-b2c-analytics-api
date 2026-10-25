@@ -1,6 +1,6 @@
-import type { RunSnapshot } from '../ingest/types.js';
+import type { CountryCount, RunSnapshot } from '../ingest/types.js';
 import { periodOf, type TimeWindow } from './calendar.js';
-import { type NetworkId, networkProfile } from './catalog.js';
+import { listNetworks, type NetworkId, networkProfile } from './catalog.js';
 import { addDecimals, shareOf } from './decimal.js';
 import { centsToUsd, moneyMetric } from './format.js';
 import type { ResolvedRange } from './ranges.js';
@@ -203,16 +203,69 @@ export function buildTopTokens(
 }
 
 /**
+ * Users per country of `all` over the visible networks, each user once. With every network of the
+ * catalog visible these are the `all` rows of the run. With some hidden they come from the counts
+ * per set of networks; a run stored before those were counted only serves a single visible network
+ * (its own rows), and `null` otherwise. The synthetic model has no identities, so its networks are
+ * added.
+ */
+function countriesOfAll(
+  run: RunSnapshot,
+  visible: ReadonlySet<NetworkId>,
+  synthetic: boolean
+): Array<Pick<CountryCount, 'country' | 'users'>> | null {
+  if (listNetworks().every((network) => visible.has(network.id))) {
+    return run.countries.filter((row) => row.network === null);
+  }
+  const byCountry = new Map<string, number>();
+  const add = (country: string, users: number): void => {
+    byCountry.set(country, (byCountry.get(country) ?? 0) + users);
+  };
+  if (run.countryCombinations !== undefined) {
+    for (const row of run.countryCombinations) {
+      if (row.networks.some((network) => visible.has(network))) {
+        add(row.country, row.users);
+      }
+    }
+  } else if (synthetic || visible.size === 1) {
+    for (const row of run.countries) {
+      if (row.network !== null && visible.has(row.network)) {
+        add(row.country, row.users);
+      }
+    }
+  } else {
+    return null;
+  }
+  return [...byCountry.entries()].map(([country, users]) => ({ country, users }));
+}
+
+/**
  * Builds the Top Countries block from the country counts of the last ingestion run.
  *
  * @param network - `all` or one network id.
  * @param now - Current hour, in hours since 1970-01-01T00:00Z.
+ * @param visible - Networks visible in the analytics, which `all` covers; every network of the
+ *   catalog when omitted.
  * @returns The block, countries by users descending, `Unknown` last.
  */
-export function buildTopCountries(network: NetworkId | 'all', now: number): TopCountriesBlock {
+export function buildTopCountries(
+  network: NetworkId | 'all',
+  now: number,
+  visible?: readonly NetworkId[]
+): TopCountriesBlock {
   const source = snapshotsFor('countries');
   const run = source.latestRun(now);
-  if (run === null) {
+  const rows =
+    run === null
+      ? null
+      : network === 'all'
+        ? countriesOfAll(
+            run,
+            new Set(visible ?? listNetworks().map((item) => item.id)),
+            source.kind === 'mock'
+          )
+        : run.countries.filter((row) => row.network === network);
+  if (run === null || rows === null) {
     return {
       source: source.kind,
       availability: 'unavailable',
@@ -223,16 +276,15 @@ export function buildTopCountries(network: NetworkId | 'all', now: number): TopC
       totalUsers: 0
     };
   }
-  const key = network === 'all' ? null : network;
-  const rows = run.countries.filter((row) => row.network === key && row.users > 0);
-  const total = sum(rows.map((row) => row.users));
+  const counted = rows.filter((row) => row.users > 0);
+  const total = sum(counted.map((row) => row.users));
   return {
     source: source.kind,
     availability: 'available',
     reason: null,
     asOf: asOfOf(source, run),
     method: 'phone_prefix',
-    items: rows
+    items: counted
       .sort(
         (left, right) =>
           Number(left.country === 'Unknown') - Number(right.country === 'Unknown') ||
