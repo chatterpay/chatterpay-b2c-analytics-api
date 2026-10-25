@@ -170,7 +170,12 @@ describe('runIngestion', () => {
     const report = await run(reader, repository);
 
     expect(report.sources.users.read).toBe(1);
-    expect(report.sources.catalog).toEqual({ tokens: 6, networks: 2 });
+    expect(report.sources.catalog).toEqual({
+      tokens: 6,
+      networks: 2,
+      retainedTokens: 0,
+      retainedNetworks: 0
+    });
     expect(repository.chainCopies[0]?.contracts).toEqual({ paymasterAddress: '0xPaymaster' });
   });
 });
