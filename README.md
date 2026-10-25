@@ -42,7 +42,7 @@ The contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml) (OpenAPI 3.
 |---|---|---|
 | `GET /healthz` | infrastructure | Liveness, no internal details |
 | `GET /readyz` | infrastructure | Readiness; 503 when the store does not answer |
-| `GET /v1/metrics/networks` | admin, viewer | Networks of the environment: id, label and family |
+| `GET /v1/metrics/networks` | admin, viewer | Networks the statistics show: id, label and family of the catalog networks no admin hid |
 | `GET /v1/metrics/overview?network&range` | admin, viewer | Volume, transactions, fees, active and new users; series and network breakdown; TVL, top tokens, top countries, volume by product |
 | `GET /v1/metrics/users?network&granularity` | admin, viewer | Daily/monthly/yearly active users, new and total users, retention cohorts; new wallets, retention at 1/3/6 months |
 | `GET /v1/metrics/revenue?network&range` | admin, viewer | Transfer and swap fees, volume, swap volume, network and asset breakdowns; average fee per transaction, Polymarket volume, fees by product, master wallets |
@@ -59,6 +59,22 @@ The contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml) (OpenAPI 3.
 | `POST /v1/team/invites/:id/resend` | admin | Simulates a new delivery of a pending invite; 409 when not pending |
 | `POST /v1/team/invites/:id/revoke` | admin | Revokes a pending invite; 409 when not pending |
 | `GET /v1/team/activity?limit` | admin | Login and team events, newest first; `limit` 1-100, default 50 |
+| `GET /v1/admin/networks` | admin | Every network of the catalog, hidden ones included: `id`, `chainId`, `label`, `family`, `analyticsEnabled`, `b2cEnabled` (informative), `sourcePresent`, with the policy `revision` |
+| `PATCH /v1/admin/networks/:chainId` | admin | Shows or hides a network in the statistics `{ analyticsEnabled, expectedRevision }`; 409 `CONFIG_CONFLICT` for a stale revision, 409 `LAST_ENABLED_NETWORK` when no network would stay visible, 404 for a chain id outside the catalog |
+
+### Network visibility
+
+Two independent flags apply to a network:
+
+- B2C `blockchains.enabled` and `tokens.enabled` decide whether B2C accepts new operations. The analytics read every document whatever its `enabled`: the ingestion copies the rows, users, tokens and networks of disabled networks, and their history stays valued. `GET /v1/admin/networks` shows the network flag as `b2cEnabled`, for information only.
+- `analyticsEnabled` decides whether the statistics include the network. It lives in the analytics database only (`analytics_settings`, document `network_visibility`: hidden chain ids and a revision), keyed by chain id; a network without an entry is visible, so a network imported from B2C, Scroll included, shows until an admin hides it.
+
+A hidden network is left out of `GET /v1/metrics/networks` and of `network=all` on every metrics endpoint (tiles, series, breakdowns, comparisons with the previous period, cohorts, TVL, top tokens, top countries and master wallets), and `network=<hidden id>` answers 400 exactly as an unknown network. Nothing is deleted and nothing is ingested again: the copies and aggregates keep every network, the filter applies when a response is built, so showing the network again restores its figures at once.
+
+- Each metrics request reads the policy from the analytics database once and builds every block with the same networks; a change applies to the next request of every instance. When the policy cannot be read the metrics and admin routes answer 503, never a dataset that could include a hidden network.
+- Changes are a compare-and-set on the revision, so of two admins acting on the same revision one succeeds and the other gets `CONFIG_CONFLICT`. At least one network of the catalog stays visible; the check runs in the same compare-and-set. Every change, refused ones included, goes to the activity log as `network_hidden` or `network_shown` with the network as target.
+- The catalog is the B2C `blockchains` networks plus the networks the analytics database retains for their history (`sourcePresent: false`), refreshed every 5 minutes and after each ingestion run. A refresh after which no network would be visible is refused and the previous catalog kept.
+- Top countries over several networks count each user once from the per-network-set counts of the run. A snapshot stored before those counts existed answers `unavailable` (`no_snapshot`) for `all` while some network is hidden and more than one is visible, until the next run.
 
 ### Metric blocks
 
@@ -145,11 +161,12 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 | `activity` | Login and team events | `at` |
 | `rate_limits` | Fixed-window counters | `reset_at_ttl` |
 | `ingest_state` | Ingestion checkpoints (`checkpoints`, with `walletsTrackingSince`), run lock (`lock`) and last aggregate build (`aggregates`, with the run status and the wallets per network) | default |
-| `ingest_snapshots` | One document per run, keyed by the run start: balance totals per network and asset, read coverage per network, master wallet balances, and user counts per network and country. No per-wallet balance and no phone number | default |
+| `ingest_snapshots` | One document per run, keyed by the run start: balance totals per network and asset, read coverage per network, master wallet balances, and user counts per network and country and per set of networks and country. No per-wallet balance and no phone number | default |
 | `wallet_first_seen` | First run that observed each wallet, keyed by chain id and address, with `bounded` (an earlier run had not seen it); inserted once, never updated | default |
 | `b2c_transactions` | Copy of the B2C `transactions` rows, keyed by the B2C `_id` | default |
 | `b2c_users` | Id, `creationDate` and wallets (chain id, address) of the B2C users; no phone, country, name or email | default |
-| `b2c_tokens` / `b2c_networks` | Copies of the B2C token list and of the networks with their public contract addresses | default |
+| `b2c_tokens` / `b2c_networks` | Copies of the B2C token list and of the networks with their family and public contract addresses, stamped `sourcePresent` and `lastSeenAt`. A copy the B2C database dropped stays, with `sourcePresent: false`, while copied rows use it | default |
+| `analytics_settings` | Analytics settings by `_id`; `network_visibility` holds the hidden chain ids, the revision and who changed it last | default |
 | `token_prices` | USD price per symbol and day from the provider | default |
 | `agg_hourly` / `agg_user_activity` / `agg_user_signups` | Aggregates of the last build: facts per network and hour, active hours per user, signups | default |
 
@@ -166,7 +183,7 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 1. Takes the lock in `ingest_state`; a run that finds it taken answers 200 with `status: locked`. The lock expires `INGEST_MAX_RUN_SECONDS` plus 5 minutes after it is taken.
 2. Copies B2C `transactions` rows with an `_id` above the checkpoint, in batches, saving the checkpoint after each batch. Copies are keyed by the B2C `_id`, so a repeated read replaces instead of duplicating.
 3. Reads again the rows inserted in the last `INGEST_REVISIT_HOURS`, for rows whose status changes after insertion (Polymarket orders).
-4. Replaces the copies of `users`, `tokens` and `blockchains`. The country of each phone number is counted per network and overall, and the number is dropped.
+4. Replaces the copies of `users`, `tokens` and `blockchains`, whatever their `enabled`. A network the B2C database dropped is kept, `sourcePresent: false`, while a copied transaction, user wallet or wallet observation is on it, and a token while a copied transaction on its chain uses its symbol; the report counts them as `retainedNetworks` and `retainedTokens`. The country of each phone number is counted per network, per set of networks and overall, and the number is dropped. A failed B2C read fails the run before anything is replaced.
 5. Records in `wallet_first_seen` every wallet not seen before. The first run sets `walletsTrackingSince`; its observations are unbounded, since the wallets may be older.
 6. With `PRICES_PROVIDER=coingecko`, requests one USD snapshot per UTC day for the non-stable tokens and the native coins of the EVM master wallets, in one request; the day is marked before the request, so a failing provider is asked once a day at most.
 7. With `BALANCES_PROVIDER=rpc`, reads the balances of every user wallet and master wallet, and stores the totals, with the country counts, in `ingest_snapshots`. Without it the run stores the country counts only.
@@ -178,9 +195,9 @@ Balance requests per run, bounded by `BALANCES_MAX_CALLS_PER_RUN` and `INGEST_MA
 
 - EVM network: `ceil((W × T + M × (T + 1)) / 200)` `eth_call` requests to Multicall3 `aggregate3` (`0xcA11bde05977b3631167028862bE2a173976CA11`), for `W` user wallets, `M` master wallets and `T` ERC-20 tokens with a contract and decimals.
 - Cardano network with a Koios endpoint: `ceil((W + M) / 50)` requests to `address_utxos`, plus one per additional page of 1000 UTxOs, at most 20 pages per batch. Blockfrost endpoints are `unsupported`.
-- A failed request or a spent budget leaves its wallets unread and lowers the coverage; the run continues. Error messages of the requests are not kept, since they can carry the endpoint key.
+- A failed request or a spent budget leaves its wallets unread and lowers the coverage; the run continues. An unreachable endpoint, such as the RPC of a network that was shut down, marks its network `failed` with no holdings, the balances source `partial` and the blocks that cover it `partial` (`partial_coverage`); the network is never read as zero. Error messages of the requests are not kept, since they can carry the endpoint key.
 
-With 1000 user wallets and 4 tokens on one EVM network, a run sends 20 `eth_call` requests; 1000 wallets on Cardano take 20 Koios requests when each batch fits in one page. The instance that ran the ingestion loads the new aggregates at once; the others within `METRICS_REFRESH_SECONDS`.
+With 1000 user wallets and 4 tokens on one EVM network, a run sends 20 `eth_call` requests; 1000 wallets on Cardano take 20 Koios requests when each batch fits in one page. The instance that ran the ingestion loads the new aggregates at once; the others within `METRICS_REFRESH_SECONDS`. After the run that instance logs the catalog size, the retained networks and how many networks the statistics show and hide (`catalogRetained`, `analyticsEnabled`, `analyticsDisabled`).
 
 Admitted callers: the Google-signed ID token in `Authorization: Bearer` is verified against Google's keys, with `iss` `https://accounts.google.com`, `aud` equal to `INGEST_OIDC_AUDIENCE`, `email` equal to `INGEST_SCHEDULER_SA_EMAIL` and `email_verified`. Cloud Run IAM admits the site service account too, which is why the API checks the identity itself; the site sends its identity in `X-Serverless-Authorization` and a session JWT in `Authorization`, so it never passes. Locally, `INGEST_DEV_TRIGGER=true` admits any caller.
 
