@@ -136,10 +136,13 @@ function newWallets(
   const wallets = byNetwork.reduce((sum, item) => sum + item.wallets, 0);
   const verified = byNetwork.reduce((sum, item) => sum + item.verifiedWallets, 0);
   const since = source.walletsTrackingSince();
+  // No wallet recorded by any ingestion (e.g. aggregates written before wallets were tracked): the
+  // zero counts would read as a measured absence of new wallets.
+  const recorded = wallets > 0;
   return {
     source: source.kind,
-    availability: verified < wallets ? 'partial' : 'available',
-    reason: verified < wallets ? 'unverified_wallets' : null,
+    availability: !recorded ? 'unavailable' : verified < wallets ? 'partial' : 'available',
+    reason: !recorded ? 'not_recorded' : verified < wallets ? 'unverified_wallets' : null,
     asOf: liveAsOf('wallets'),
     definition: 'first_verifiable_appearance',
     trackingSince: since?.toISOString() ?? null,
