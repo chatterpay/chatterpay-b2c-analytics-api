@@ -1,11 +1,19 @@
 import { randomUUID } from 'node:crypto';
-import { type Collection, type Db, MongoClient, MongoServerError, ObjectId } from 'mongodb';
+import {
+  type Collection,
+  type Db,
+  type Filter,
+  MongoClient,
+  MongoServerError,
+  ObjectId
+} from 'mongodb';
 import type { Role } from '../auth/principal.js';
 import { connectOrClose } from './connect-retry.js';
 import { assertIndexes, COLLECTIONS } from './mongo-schema.js';
 import { INITIAL_VISIBILITY, planVisibilityChange } from './network-visibility.js';
 import type {
   ActivatedMember,
+  ActivityCursor,
   ActivityEvent,
   Challenge,
   CreateInviteResult,
@@ -358,8 +366,25 @@ export class MongoStore implements Store {
     return toActivity(doc);
   }
 
-  async listActivity(limit: number): Promise<ActivityEvent[]> {
-    const events = await this.activity.find({}).sort({ at: -1, _id: -1 }).limit(limit).toArray();
+  async listActivity(limit: number, after?: ActivityCursor): Promise<ActivityEvent[]> {
+    // The filter follows the sort, so the `{ at: -1, _id: -1 }` index serves both. An id that is
+    // not an ObjectId cannot come from this collection; the page then starts at the older instants.
+    const filter: Filter<ActivityDoc> =
+      after === undefined
+        ? {}
+        : ObjectId.isValid(after.id)
+          ? {
+              $or: [
+                { at: { $lt: after.at } },
+                { at: after.at, _id: { $lt: new ObjectId(after.id) } }
+              ]
+            }
+          : { at: { $lt: after.at } };
+    const events = await this.activity
+      .find(filter)
+      .sort({ at: -1, _id: -1 })
+      .limit(limit)
+      .toArray();
     return events.map(toActivity);
   }
 
