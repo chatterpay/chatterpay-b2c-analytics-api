@@ -9,6 +9,7 @@ import type {
   BalanceSnapshot,
   CallBudget,
   ChainInfo,
+  CountryCombinationCount,
   CountryCount,
   DailyPrice,
   IngestedUser,
@@ -81,7 +82,14 @@ export interface IngestionReport {
       /** Users with a wallet on a catalog network, counted per country. */
       countedInCountries: number;
     };
-    catalog: { tokens: number; networks: number };
+    catalog: {
+      tokens: number;
+      networks: number;
+      /** Tokens the B2C database no longer lists, kept because copied rows still use them. */
+      retainedTokens: number;
+      /** Networks the B2C database no longer lists, kept because copied rows still use them. */
+      retainedNetworks: number;
+    };
     prices: {
       provider: string | null;
       calls: number;
@@ -110,7 +118,8 @@ function observationKey(chainId: string, address: string): string {
 }
 
 /**
- * Counts users per country: per catalog network of their wallets, and once across all of them.
+ * Counts users per country: per catalog network of their wallets, once across all of them, and
+ * per set of networks of their wallets, which lets a subset of the networks count each user once.
  * Users without a wallet on a catalog network are not counted.
  */
 function countCountries(
@@ -118,6 +127,7 @@ function countCountries(
   chains: readonly ChainInfo[]
 ): {
   rows: CountryCount[];
+  combinations: CountryCombinationCount[];
   counted: number;
 } {
   const networkOf = new Map(chains.map((chain) => [chain.chainId, chain.network]));
@@ -128,6 +138,7 @@ function countCountries(
     row.users += 1;
     counts.set(key, row);
   };
+  const combinations = new Map<string, CountryCombinationCount>();
   let counted = 0;
   for (const user of users) {
     const networks = new Set(
@@ -144,8 +155,13 @@ function countCountries(
     for (const network of networks) {
       add(network, user.country);
     }
+    const sorted = [...networks].sort();
+    const key = `${sorted.join(',')}|${user.country}`;
+    const row = combinations.get(key) ?? { networks: sorted, country: user.country, users: 0 };
+    row.users += 1;
+    combinations.set(key, row);
   }
-  return { rows: [...counts.values()], counted };
+  return { rows: [...counts.values()], combinations: [...combinations.values()], counted };
 }
 
 /** Copy of a user without the country, the only fields the analytics database keeps. */
@@ -180,8 +196,9 @@ function pricedSymbols(
  * 3. Reads again the rows inserted in the last `revisitHours` up to the checkpoint, to pick up
  *    status changes.
  * 4. Replaces the copies of the users (id, signup date, wallets), the tokens and the networks,
- *    counts users per country of their phone number, and records the wallets seen for the first
- *    time.
+ *    whatever their B2C `enabled` (networks and tokens the B2C database dropped are kept while
+ *    copied rows use them), counts users per country of their phone number, and records the
+ *    wallets seen for the first time.
  * 5. Requests at most one provider price snapshot per UTC day, within `maxProviderCallsPerRun`.
  * 6. Reads the balances of the user and master wallets, within `maxBalanceCallsPerRun`, and stores
  *    the run snapshot (balance sums and country counts).
@@ -206,7 +223,7 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
     sources: {
       transactions: { read: 0, revisited: 0, lastId: null },
       users: { read: 0, newWallets: 0, countedInCountries: 0 },
-      catalog: { tokens: 0, networks: 0 },
+      catalog: { tokens: 0, networks: 0, retainedTokens: 0, retainedNetworks: 0 },
       prices: { provider: deps.prices?.name ?? null, calls: 0, prices: 0, failed: false },
       balances: { status: 'disabled', calls: 0, failedCalls: 0, networks: [], masterWallets: 0 }
     },
@@ -280,8 +297,13 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
     report.sources.users.read = users.length;
 
     const [tokens, chains] = await Promise.all([reader.tokens(), reader.chains()]);
-    await repository.replaceCatalog(tokens, chains);
-    report.sources.catalog = { tokens: tokens.length, networks: chains.length };
+    const retained = await repository.replaceCatalog(tokens, chains, startedAt);
+    report.sources.catalog = {
+      tokens: tokens.length,
+      networks: chains.length,
+      retainedTokens: retained.tokens,
+      retainedNetworks: retained.networks
+    };
 
     const countries = countCountries(users, chains);
     report.sources.users.countedInCountries = countries.counted;
@@ -380,7 +402,12 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
         masterWallets: result.snapshot.masterWallets.length
       };
     }
-    await repository.saveSnapshot({ takenAt: startedAt, balances, countries: countries.rows });
+    await repository.saveSnapshot({
+      takenAt: startedAt,
+      balances,
+      countries: countries.rows,
+      countryCombinations: countries.combinations
+    });
 
     const [transactions, storedUsers, storedTokens, storedChains, prices, seen] = await Promise.all(
       [
