@@ -2,6 +2,7 @@ import { createPrivateKey } from 'node:crypto';
 import { z } from 'zod';
 import type { MasterWalletConfig } from '../ingest/snapshot.js';
 import { NETWORK_ID_PATTERN } from '../metrics/catalog.js';
+import type { UsdValuation } from '../metrics/types.js';
 
 /** Validated runtime configuration of the API process. */
 export interface AppEnv {
@@ -60,6 +61,13 @@ export interface AppEnv {
   BALANCES_MAX_CALLS_PER_RUN: number;
   /** Public addresses of the signers whose balances the snapshots read. */
   MASTER_WALLETS: MasterWalletConfig[];
+  /**
+   * USD valuation of balances and operations. `market`: stable tokens at 1 USD and the provider
+   * and swap prices of the symbol. `none`: the deployment reads test networks whose assets have no
+   * market value, so no USD figure is computed; amounts and counts are kept. It is set per
+   * deployment, not inferred from network names or symbols.
+   */
+  USD_VALUATION: UsdValuation;
   /** Seconds between checks for a newer aggregate build made by another instance. */
   METRICS_REFRESH_SECONDS: number;
 }
@@ -176,6 +184,7 @@ const envSchema: z.ZodType<AppEnv> = z
     BALANCES_PROVIDER: z.enum(['none', 'rpc']).default('none'),
     BALANCES_MAX_CALLS_PER_RUN: z.coerce.number().int().min(0).max(2000).default(100),
     MASTER_WALLETS: masterWalletsSchema.default([]),
+    USD_VALUATION: z.enum(['market', 'none']).default('market'),
     METRICS_REFRESH_SECONDS: z.coerce.number().int().min(30).max(86_400).default(300)
   })
   .superRefine((env, context) => {
