@@ -1,6 +1,6 @@
 import { isoDayOf } from '../metrics/calendar.js';
 import { type AggregationStats, aggregateActivity } from '../metrics/live.js';
-import type { IngestRunStatus } from '../metrics/types.js';
+import type { IngestRunStatus, UsdValuation } from '../metrics/types.js';
 import { type MasterWalletConfig, type NetworkRead, takeBalanceSnapshot } from './snapshot.js';
 import type {
   B2cActivityReader,
@@ -51,10 +51,33 @@ export interface IngestionDependencies {
   balances: BalanceReader | null;
   /** Configured signers whose balances the snapshot reads. */
   masterWallets: readonly MasterWalletConfig[];
+  /** USD valuation of balances and operations (`USD_VALUATION`); `market` when omitted. */
+  valuation?: UsdValuation;
   clock: () => Date;
   options: IngestionOptions;
-  /** Lock owner, unique per run. */
+  /** Lock owner, unique per run; it is also the id of the run in the report. */
   owner: string;
+}
+
+/**
+ * Milliseconds of each phase of a run, in order. A phase the run did not reach stays at zero; the
+ * time to take the lock is not in any phase.
+ */
+export interface IngestionPhases {
+  /** Copy of the B2C transactions above the checkpoint. */
+  copyTransactions: number;
+  /** Second read of the recent rows for status changes. */
+  revisit: number;
+  /** Users, tokens, networks, country counts and wallet observations. */
+  catalogUsers: number;
+  /** Daily price snapshot of the provider. */
+  prices: number;
+  /** Balance reads and the write of the run snapshot. */
+  snapshot: number;
+  /** Read of the copies and computation of the aggregates. */
+  aggregateRebuild: number;
+  /** Write of the aggregates and of the run status. */
+  persist: number;
 }
 
 /** Summary of one ingestion run, returned by the ingestion endpoint. */
@@ -65,8 +88,13 @@ export interface IngestionReport {
    * the next run continues. `locked`: another run holds the lock and nothing was done.
    */
   status: 'completed' | 'partial' | 'locked';
+  /** Id of the run, the owner of its lock. */
+  runId: string;
   startedAt: string;
   durationMs: number;
+  /** USD valuation the run applied. */
+  valuation: UsdValuation;
+  phasesMs: IngestionPhases;
   sources: {
     transactions: {
       read: number;
@@ -218,10 +246,22 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
   const { reader, repository, options } = deps;
   const startedAt = deps.clock();
   const deadline = startedAt.getTime() + options.maxRunMs;
+  const valuation = deps.valuation ?? 'market';
   const report: IngestionReport = {
     status: 'locked',
+    runId: deps.owner,
     startedAt: startedAt.toISOString(),
     durationMs: 0,
+    valuation,
+    phasesMs: {
+      copyTransactions: 0,
+      revisit: 0,
+      catalogUsers: 0,
+      prices: 0,
+      snapshot: 0,
+      aggregateRebuild: 0,
+      persist: 0
+    },
     sources: {
       transactions: { read: 0, revisited: 0, lastId: null },
       users: { read: 0, newWallets: 0, countedInCountries: 0 },
@@ -238,6 +278,12 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
   if (!(await repository.acquireLock(deps.owner, startedAt, options.lockTtlMs))) {
     return finish();
   }
+  let mark = deps.clock().getTime();
+  const lap = (phase: keyof IngestionPhases): void => {
+    const now = deps.clock().getTime();
+    report.phasesMs[phase] = now - mark;
+    mark = now;
+  };
 
   try {
     const checkpoints = await repository.readCheckpoints();
@@ -281,6 +327,7 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
         await repository.saveCheckpoints({ transactionsLastId: id });
       }
     );
+    lap('copyTransactions');
 
     if (options.revisitHours > 0 && checkpoint !== null && !stopped) {
       report.sources.transactions.revisited = await copy(
@@ -292,6 +339,7 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
         async () => {}
       );
     }
+    lap('revisit');
 
     const users = await reader.users();
     const copies = users.map(stripped);
@@ -345,6 +393,7 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
     if (trackingSince === null) {
       await repository.saveCheckpoints({ walletsTrackingSince: startedAt });
     }
+    lap('catalogUsers');
 
     const today = isoDayOf(Math.floor(startedAt.getTime() / (24 * HOUR_MS)));
     let pricesStatus: IngestRunStatus['sources']['prices'] =
@@ -376,6 +425,7 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
         }
       }
     }
+    lap('prices');
 
     let balances: BalanceSnapshot | null = null;
     if (deps.balances !== null && options.maxBalanceCallsPerRun > 0) {
@@ -401,7 +451,8 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
         users: copies,
         masterWallets: deps.masterWallets,
         prices: dayPrices,
-        budget: callBudget
+        budget: callBudget,
+        valuation
       });
       balances = result.snapshot;
       report.sources.balances = {
@@ -418,6 +469,7 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
       countries: countries.rows,
       countryCombinations: countries.combinations
     });
+    lap('snapshot');
 
     const [transactions, storedUsers, storedTokens, storedChains, prices, seen] = await Promise.all(
       [
@@ -435,8 +487,10 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
       tokens: storedTokens,
       chains: new Map(storedChains.map((chain) => [chain.chainId, chain.network])),
       prices,
-      observations: seen
+      observations: seen,
+      valuation
     });
+    lap('aggregateRebuild');
     const builtAt = deps.clock();
     report.status = stopped ? 'partial' : 'completed';
     await repository.saveAggregates(aggregates, builtAt, {
@@ -446,8 +500,10 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
         transactions: stopped ? 'partial' : 'complete',
         prices: pricesStatus,
         balances: report.sources.balances.status
-      }
+      },
+      valuation
     });
+    lap('persist');
     report.aggregates = { ...stats, builtAt: builtAt.toISOString() };
     return finish();
   } finally {
