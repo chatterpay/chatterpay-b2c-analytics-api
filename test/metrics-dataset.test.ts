@@ -9,12 +9,16 @@ import { buildUsers } from '../src/metrics/users.js';
 const NOW = new Date('2026-10-24T15:30:00.000Z');
 const RANGES: MetricsRange[] = ['today', 'week', 'month', 'year', 'ytd', 'all'];
 
-function cents(usd: string): number {
+/** Cents of a USD figure; the synthetic dataset values every operation, so `null` is a failure. */
+function cents(usd: string | null): number {
+  if (usd === null) {
+    throw new Error('the synthetic dataset left a USD figure without value');
+  }
   const [whole = '0', fraction = '0'] = usd.split('.');
   return Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
 }
 
-function sumCents(values: readonly string[]): number {
+function sumCents(values: readonly (string | null)[]): number {
   return values.reduce((sum, value) => sum + cents(value), 0);
 }
 
