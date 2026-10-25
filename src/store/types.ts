@@ -67,7 +67,9 @@ export type ActivityAction =
   | 'invite_revoked'
   | 'invite_accepted'
   | 'role_changed'
-  | 'member_removed';
+  | 'member_removed'
+  | 'network_hidden'
+  | 'network_shown';
 
 /** Activity log entry. Never carries codes or tokens. */
 export interface ActivityEvent {
@@ -75,7 +77,7 @@ export interface ActivityEvent {
   at: Date;
   actorId: string | null;
   action: ActivityAction;
-  /** Email the action applies to, when any. */
+  /** Email the action applies to, or the network as `Label (chainId)`; `null` when none. */
   target: string | null;
   outcome: 'success' | 'failure';
 }
@@ -114,6 +116,38 @@ export type MemberMutationResult =
   | { kind: 'not_found' }
   | { kind: 'last_admin' };
 
+/**
+ * Analytics visibility of the networks: the chain ids an admin hid from the statistics. A chain id
+ * absent from the list is visible. It never changes what the ingestion copies, and it is
+ * independent from the B2C `enabled` flags.
+ */
+export interface NetworkVisibility {
+  /** Hidden chain ids, sorted; they may include chain ids no longer in the catalog. */
+  disabledChainIds: string[];
+  /** Grows by one on every change; 0 while the policy was never changed. */
+  revision: number;
+  updatedAt: Date | null;
+  /** User id of the admin behind the last change. */
+  updatedBy: string | null;
+}
+
+/** Input of {@link Store.changeNetworkVisibility}. */
+export interface NetworkVisibilityChange {
+  chainId: string;
+  analyticsEnabled: boolean;
+  /** Revision the admin saw; any other current revision is a conflict. */
+  expectedRevision: number;
+  /** Chain ids of the catalog, at least one of which must stay visible. */
+  catalogChainIds: readonly string[];
+  actorId: string;
+}
+
+/** Outcome of a visibility change; every kind carries the policy as it stands after the call. */
+export type NetworkVisibilityResult =
+  | { kind: 'ok'; visibility: NetworkVisibility; changed: boolean }
+  | { kind: 'conflict'; visibility: NetworkVisibility }
+  | { kind: 'last_enabled'; visibility: NetworkVisibility };
+
 /** Member resolved at login, with the invite accepted on the way when there was one. */
 export interface ActivatedMember {
   user: User;
@@ -121,11 +155,12 @@ export interface ActivatedMember {
 }
 
 /**
- * Persistence of users, sessions, challenges, invites, activity and rate limit counters.
+ * Persistence of users, sessions, challenges, invites, activity, rate limit counters and the
+ * analytics visibility of the networks.
  *
  * Methods that check an invariant and write (invite creation, invite transitions, member role
- * changes and removal, challenge attempts and consumption, invite acceptance) are atomic: two
- * concurrent calls never both pass the check. Read methods report invites past `expiresAt` as
+ * changes and removal, challenge attempts and consumption, invite acceptance, network visibility
+ * changes) are atomic: two concurrent calls never both pass the check. Read methods report invites past `expiresAt` as
  * `expired`. Every method takes the current instant explicitly so callers control the clock.
  */
 export interface Store {
@@ -189,4 +224,17 @@ export interface Store {
 
   /** Fixed-window counter: counts one hit on `key` and reports whether it is within `limit`. */
   hit(key: string, limit: number, windowMs: number, now: Date): Promise<RateLimitResult>;
+
+  /** Current visibility policy; revision 0 and nothing hidden before the first change. */
+  networkVisibility(): Promise<NetworkVisibility>;
+  /**
+   * Shows or hides a network, as a compare-and-set on the revision: `conflict` when the current
+   * revision is not `expectedRevision`, `last_enabled` when no chain id of `catalogChainIds` would
+   * stay visible. Setting the state a network already has answers `ok` with `changed: false` and
+   * keeps the revision.
+   */
+  changeNetworkVisibility(
+    change: NetworkVisibilityChange,
+    now: Date
+  ): Promise<NetworkVisibilityResult>;
 }
