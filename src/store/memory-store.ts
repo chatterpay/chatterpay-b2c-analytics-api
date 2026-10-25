@@ -3,6 +3,7 @@ import type { Role } from '../auth/principal.js';
 import { INITIAL_VISIBILITY, planVisibilityChange } from './network-visibility.js';
 import type {
   ActivatedMember,
+  ActivityCursor,
   ActivityEvent,
   Challenge,
   CreateInviteResult,
@@ -283,13 +284,23 @@ export class MemoryStore implements Store {
     return last;
   }
 
-  async listActivity(limit: number): Promise<ActivityEvent[]> {
+  async listActivity(limit: number, after?: ActivityCursor): Promise<ActivityEvent[]> {
     // Reversed first so the stable sort keeps the latest insertion first among equal instants.
-    return [...this.activity]
-      .reverse()
-      .sort((a, b) => b.at.getTime() - a.at.getTime())
-      .slice(0, limit)
-      .map((event) => ({ ...event }));
+    const ordered = [...this.activity].reverse().sort((a, b) => b.at.getTime() - a.at.getTime());
+    let start = 0;
+    if (after !== undefined) {
+      // Events are never deleted, so the cursor event is found by id; an unknown id falls back to
+      // the events strictly older than its instant.
+      const index = ordered.findIndex((event) => event.id === after.id);
+      start =
+        index >= 0
+          ? index + 1
+          : ordered.findIndex((event) => event.at.getTime() < after.at.getTime());
+      if (start < 0) {
+        return [];
+      }
+    }
+    return ordered.slice(start, start + limit).map((event) => ({ ...event }));
   }
 
   async hit(key: string, limit: number, windowMs: number, now: Date): Promise<RateLimitResult> {
