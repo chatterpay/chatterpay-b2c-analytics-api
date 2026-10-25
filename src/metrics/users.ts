@@ -161,7 +161,11 @@ function newWallets(
  * month after its own is complete, so every rate compares cohorts that all had the chance to
  * return in that month.
  */
-function retentionSummary(networks: readonly NetworkId[], now: DayHour): RetentionSummaryBlock {
+function retentionSummary(
+  networks: readonly NetworkId[],
+  now: DayHour,
+  undatedUsers: number
+): RetentionSummaryBlock {
   const source = sourceFor('retention');
   const cohorts: RetentionSummaryBlock['cohorts'] = [];
   const totals = new Map<RetentionMonth['month'], { eligible: number; size: number; kept: number }>(
@@ -207,11 +211,13 @@ function retentionSummary(networks: readonly NetworkId[], now: DayHour): Retenti
     };
   });
   const available = months.filter((month) => month.availability === 'available').length;
+  // Users without a signup date are in no cohort, so complete rates still cover part of the users.
+  const allMonths = available === months.length;
   return {
     source: source.kind,
     availability:
-      available === months.length ? 'available' : available === 0 ? 'unavailable' : 'partial',
-    reason: available === months.length ? null : 'no_eligible_cohort',
+      allMonths && undatedUsers === 0 ? 'available' : available === 0 ? 'unavailable' : 'partial',
+    reason: !allMonths ? 'no_eligible_cohort' : undatedUsers > 0 ? 'undated_users' : null,
     asOf: liveAsOf('retention'),
     months,
     cohorts
@@ -248,6 +254,8 @@ export function buildUsers(
   const previous30 = shiftWindow(last30, -30);
   const active = sourceFor('activeUsers');
   const signups = sourceFor('signups');
+  const totalUsers = signups.totalUsersAcross(networks, point);
+  const undatedUsers = signups.undatedUsersAcross(networks);
 
   return {
     meta: {
@@ -272,10 +280,7 @@ export function buildUsers(
         signups.newUsersAcross(networks, last30),
         signups.newUsersAcross(networks, previous30)
       ),
-      totalUsers: countMetric(
-        signups.totalUsersAcross(networks, point),
-        signups.totalUsersAcross(networks, previous30.end)
-      )
+      totalUsers: countMetric(totalUsers, signups.totalUsersAcross(networks, previous30.end))
     },
     series: plan.buckets.map((bucket) => {
       const byNetwork = networks.map((id) => ({
@@ -298,6 +303,14 @@ export function buildUsers(
       totalUsers: signups.totalUsersAt(id, point)
     })),
     newWallets: newWallets(networks, plan, point, last30, previous30),
-    retentionSummary: retentionSummary(networks, point)
+    retentionSummary: retentionSummary(networks, point, undatedUsers),
+    signups: {
+      source: signups.kind,
+      availability: undatedUsers === 0 ? 'available' : 'partial',
+      reason: undatedUsers === 0 ? null : 'undated_users',
+      asOf: liveAsOf('signups'),
+      users: totalUsers,
+      undatedUsers
+    }
   };
 }
