@@ -100,15 +100,18 @@ function sumOrNull<T>(items: readonly T[], pick: (item: T) => number | null): nu
  * @param network - Network filter.
  * @param range - Time range.
  * @param now - Current instant; the dataset ends at its hour.
+ * @param visible - Networks visible in the analytics, which `all` covers; every network of the
+ *   catalog when omitted.
  * @returns The Overview response.
  */
 export function buildOverview(
   network: NetworkFilter,
   range: MetricsRange,
-  now: Date
+  now: Date,
+  visible?: readonly NetworkId[]
 ): OverviewResponse {
   const resolved = resolveRange(range, dayHourOf(now));
-  const networks = networksFor(network);
+  const networks = networksFor(network, visible);
   const totals = networks.map((id) => totalsFor(id, resolved.current, resolved.previous));
 
   const activity = sourceFor('activity');
@@ -173,7 +176,7 @@ export function buildOverview(
     })),
     tvl: buildTvl(networks, resolved),
     topTokens: buildTopTokens(networks, resolved),
-    topCountries: buildTopCountries(network, hourIndexOf(now)),
+    topCountries: buildTopCountries(network, hourIndexOf(now), visible),
     volumeByProduct: buildVolumeByProduct(activityTotals(totals.map((t) => t.facts)))
   };
 }
