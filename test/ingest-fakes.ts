@@ -143,6 +143,13 @@ export class FakeReader implements B2cActivityReader {
   async endpoints(): Promise<ChainEndpoint[]> {
     return this.endpointList;
   }
+
+  /** B2C `enabled` by chain id; `null` serves every network of `chainList` as enabled. */
+  enabledByChain: Map<string, boolean | null> | null = null;
+
+  async b2cEnabled(): Promise<Map<string, boolean | null>> {
+    return this.enabledByChain ?? new Map(this.chainList.map((chain) => [chain.chainId, true]));
+  }
 }
 
 /** In-memory {@link IngestRepository}. */
@@ -393,5 +400,56 @@ export class FakeBalanceReader implements BalanceReader {
 
   supportsCardano(url: string): boolean {
     return !url.includes('blockfrost');
+  }
+}
+
+/** One request made through the reader. */
+export interface ReaderCall {
+  family: 'evm' | 'cardano';
+  url: string;
+  holders: string[];
+}
+
+/**
+ * Balance reader that records every invocation and answers one unit (1.0 of a 6-decimal token)
+ * per ERC-20 query, nothing of the native coin, and 1 ADA per Cardano address.
+ */
+export class RecordingBalanceReader implements BalanceReader {
+  readonly calls: ReaderCall[] = [];
+
+  async evm(
+    url: string,
+    queries: readonly EvmBalanceQuery[],
+    budget: CallBudget
+  ): Promise<Array<bigint | null>> {
+    this.calls.push({
+      family: 'evm',
+      url,
+      holders: [...new Set(queries.map((query) => query.holder))]
+    });
+    budget.remaining -= 1;
+    budget.used += 1;
+    return queries.map((query) => (query.token === null ? 0n : 1_000_000n));
+  }
+
+  async cardano(
+    url: string,
+    addresses: readonly string[],
+    budget: CallBudget
+  ): Promise<Map<string, CardanoHoldings>> {
+    this.calls.push({ family: 'cardano', url, holders: [...addresses] });
+    budget.remaining -= 1;
+    budget.used += 1;
+    return new Map(
+      addresses.map((address) => [address, { lovelace: 1_000_000n, assets: new Map() }])
+    );
+  }
+
+  supportsCardano(): boolean {
+    return true;
+  }
+
+  urls(): string[] {
+    return this.calls.map((call) => call.url);
   }
 }
