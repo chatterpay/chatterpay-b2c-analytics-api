@@ -43,15 +43,15 @@ The contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml) (OpenAPI 3.
 | `GET /healthz` | infrastructure | Liveness, no internal details |
 | `GET /readyz` | infrastructure | Readiness; 503 when the store does not answer |
 | `GET /v1/metrics/networks` | admin, viewer | Networks of the environment: id, label and family |
-| `GET /v1/metrics/overview?network&range` | admin, viewer | Volume, transactions, fees, active and new users; series and network breakdown |
-| `GET /v1/metrics/users?network&granularity` | admin, viewer | Daily/monthly/yearly active users, new and total users, retention cohorts |
-| `GET /v1/metrics/revenue?network&range` | admin, viewer | Transfer and swap fees, volume, network and asset breakdowns |
+| `GET /v1/metrics/overview?network&range` | admin, viewer | Volume, transactions, fees, active and new users; series and network breakdown; TVL, top tokens, top countries, volume by product |
+| `GET /v1/metrics/users?network&granularity` | admin, viewer | Daily/monthly/yearly active users, new and total users, retention cohorts; new wallets, retention at 1/3/6 months |
+| `GET /v1/metrics/revenue?network&range` | admin, viewer | Transfer and swap fees, volume, swap volume, network and asset breakdowns; average fee per transaction, Polymarket volume, fees by product, master wallets |
 | `POST /v1/internal/ingest` | scheduler service account | One ingestion run; returns its summary. 503 when not configured, 401 for any other caller |
 | `POST /v1/auth/request-code` | public (BFF) | Opens a login challenge for an email; 202 `{ challengeId, expiresAt }` |
 | `POST /v1/auth/verify-code` | public (BFF) | Exchanges challenge, email and access code for `{ token, expiresAt, user }` |
 | `GET /v1/auth/me` | admin, viewer | Member and session expiry behind the bearer token |
 | `POST /v1/auth/logout` | admin, viewer | Revokes the session; 204 |
-| `GET /v1/team/members` | admin | Active members sorted by email |
+| `GET /v1/team/members` | admin | Active members sorted by email, with `name`, `lastLoginAt` and `lastActivityAt` |
 | `PATCH /v1/team/members/:id` | admin | Changes the role `{ role }`; 409 when no active admin would remain |
 | `DELETE /v1/team/members/:id` | admin | Removes the member and revokes its sessions; 204, 409 when no active admin would remain |
 | `GET /v1/team/invites` | admin | Invites, newest first |
@@ -59,6 +59,26 @@ The contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml) (OpenAPI 3.
 | `POST /v1/team/invites/:id/resend` | admin | Simulates a new delivery of a pending invite; 409 when not pending |
 | `POST /v1/team/invites/:id/revoke` | admin | Revokes a pending invite; 409 when not pending |
 | `GET /v1/team/activity?limit` | admin | Login and team events, newest first; `limit` 1-100, default 50 |
+
+### Metric blocks
+
+Blocks added to the datasets after the first version carry `source` (`mock` or `live`), `availability` (`available`, `partial` or `unavailable`), `reason` and `asOf`. An unavailable figure is `null`; it is never replaced by a figure of another meaning or by an estimate. `meta.ingest` holds the status of the run behind the live values per source: `transactions` (`complete`, `partial`), `prices` (`complete`, `failed`, `skipped`, `disabled`) and `balances` (`complete`, `partial`, `failed`, `disabled`); it is `null` when every value is synthetic.
+
+| Block | Field | Definition | Source | Availability |
+|---|---|---|---|---|
+| TVL | `overview.tvl` | USD value of the assets in user wallets, from the last balance snapshot taken through the end of the range; `previous` is the last snapshot inside the previous period; each series bucket takes the last snapshot inside it | Balance snapshot of each ingestion run | `unavailable` (`no_snapshot`, or `snapshots_disabled` when the last run took none) before the first snapshot, with `firstSnapshotAt`; there is no back-fill. `partial` (`partial_coverage`) when a selected network was not read completely, `partial` (`unpriced_assets`) when an asset had no price that day; `coverage` lists wallets, wallets read and unpriced assets |
+| Top tokens | `overview.topTokens` | Units and USD value per asset in user wallets, same snapshot as the TVL | Balance snapshot | As the TVL; an unpriced asset has `valueUsd: null` |
+| Top countries | `overview.topCountries` | Users with a wallet on the selected networks, each counted once, per country of the calling code of their phone number (`libphonenumber-js`); `Unknown` when the number gives no single country. The range does not apply | Country counts of the last ingestion run | `unavailable` (`no_snapshot`) before the first run. Phone numbers are read during the run and never stored; only the counts are |
+| Volume by product | `overview.volumeByProduct` | Volume and operations per product (`transfer`, `swap`, `polymarket`) in the range. A swap counts once, as a swap; the counted products add up to the volume tile | Activity aggregates | `polymarket` is `unavailable` (`not_recorded`), so the block is `partial` |
+| Swap volume | `revenue.tiles.swapVolumeUsd` | Input side of the counted swaps, in USD; the swap part of `volumeUsd` | Activity aggregates | Like the other tiles |
+| Polymarket volume | `revenue.polymarketVolume` | USD volume of Polymarket fills | None | Always `unavailable` (`not_recorded`): the B2C rows mark an order `completed` when the order book accepts it, carry the requested price times size rather than the filled amount, and carry `fee: 0`; the filled amounts are not recorded |
+| Average fee per transaction | `revenue.avgFeePerTransaction` | Recorded fees of the range divided by its counted transfers and swaps, in USD with 4 places, against the previous period. The fee rate is a separate figure and stays | Activity aggregates | `unavailable` (`no_transactions`) without operations |
+| Fees by product | `revenue.feesByProduct` | Recorded `fee` of the operations per product; not reconciled against charges or income | Activity aggregates | `polymarket` is `unavailable` (`not_recorded`) |
+| Master wallets | `revenue.masterWallets` | Public address, role, explorer link and balances of each signer configured in `MASTER_WALLETS` for the selected networks, from the last snapshot. Balances only: no fee or revenue is attributed to a signer | Balance snapshot | `unavailable` (`not_configured`) without configured wallets, as the TVL without a snapshot; per wallet `status` is `complete`, `failed` or `unsupported` |
+| New wallets | `users.newWallets` | Wallets per network counted at their first verifiable appearance (`definition: first_verifiable_appearance`): the earliest completed B2C operation that sent from or paid to the wallet, or the first ingestion run that saw the wallet when an earlier run had not. The tile compares the last 30 days with the 30 before; the series follows the granularity | Activity copies and `wallet_first_seen` | A wallet without either evidence is not counted; `coverage` gives wallets and verified wallets and the block is `partial` (`unverified_wallets`) while some are unverified. `trackingSince` is the first run that observed wallets |
+| Retention at 1/3/6 months | `users.retentionSummary` | Over the last 12 monthly cohorts, the share of users active in the 1st, 3rd and 6th month after the month they joined. A cohort counts for month N only when it has N complete months after its own; otherwise its `users` is `null` | Retention aggregates | A month without an eligible cohort with users is `unavailable` (`no_eligible_cohort`) |
+
+Snapshot TVL and balances use stable tokens at 1 USD and the provider price of the same UTC day for the rest; an older price is not used. User wallets hold the ERC-20 tokens of the B2C token list on EVM networks (the native coin of the account-abstraction wallets is not read) and ADA plus the listed native assets on Cardano. A wallet counts in a snapshot only when all its balances were read.
 
 Every error response has the shape `{ code, message, requestId }`. The `x-request-id` response header echoes a valid incoming id (8-64 characters, letters, digits and dashes) or a generated UUID. Auth, team and metrics responses carry `Cache-Control: private, no-store`. Request bodies are JSON only; unknown body or query properties answer 400 and path ids must be UUIDs.
 
@@ -75,6 +95,8 @@ Every error response has the shape `{ code, message, requestId }`. The `x-reques
 | 20 `request-code` | client IP | 15 min | 429 with `Retry-After` |
 | 30 `verify-code` | client IP | 15 min | 429 with `Retry-After` |
 | 5 attempts | challenge | challenge lifetime | 401, the challenge stops accepting codes |
+
+Members carry `name` when the `users` document of the member has a non-empty `name`, set by an operator; otherwise `null`, never derived from the email. `lastActivityAt` is the instant of the latest activity event the member performed, separate from `lastLoginAt`.
 
 Team rules: invites last 7 days and are reported `expired` afterwards; delivery is simulated (status `simulated`, `lastSentAt`, `resendCount`), no email is sent. Role changes and removals never leave the team without an active admin. The activity log records `login`, `login_failed` (only for emails of active members), `logout`, `invite_created`, `invite_resent`, `invite_revoked`, `invite_accepted`, `role_changed` and `member_removed`; it never holds codes or tokens.
 
@@ -107,6 +129,9 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 | `INGEST_MAX_RUN_SECONDS` | `480` | No batch starts after this; below the Cloud Run request timeout and the scheduler attempt deadline |
 | `PRICES_PROVIDER` | `none` | `coingecko` takes one daily USD snapshot of the non-stable tokens; `none` values them with swap-implied prices only |
 | `PRICES_MAX_CALLS_PER_RUN` | `1` | Ceiling on price provider requests per run, 0-5 |
+| `BALANCES_PROVIDER` | `none` | `rpc` takes a balance snapshot per run through the endpoints of the B2C `blockchains` collection (`rpc` on EVM, `providerUrl` on Cardano; HTTPS only, used in memory and never stored or logged); `none` takes no snapshot |
+| `BALANCES_MAX_CALLS_PER_RUN` | `100` | Ceiling on balance requests per run (`eth_call` batches and Koios pages), 0-2000; 0 disables the snapshot |
+| `MASTER_WALLETS` | `[]` | JSON array, at most 20, of `{ network, address, role, nativeSymbol? }`: network id, public address (`0x` plus 40 hex digits, or a Cardano `addr`/`addr_test` address), role shown with it, and the native coin symbol on EVM (default `ETH`). Unknown fields, private keys and seed phrases are rejected |
 | `METRICS_REFRESH_SECONDS` | `300` | How often an instance looks for a newer aggregate build |
 
 ## Persistence
@@ -119,9 +144,11 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 | `invites` | Simulated invites | `email_pending_unique` (unique `email` where `status` is `simulated`), `mutation_id_unique`, `created_at` |
 | `activity` | Login and team events | `at` |
 | `rate_limits` | Fixed-window counters | `reset_at_ttl` |
-| `ingest_state` | Ingestion checkpoints (`checkpoints`), run lock (`lock`) and last aggregate build (`aggregates`) | default |
+| `ingest_state` | Ingestion checkpoints (`checkpoints`, with `walletsTrackingSince`), run lock (`lock`) and last aggregate build (`aggregates`, with the run status and the wallets per network) | default |
+| `ingest_snapshots` | One document per run, keyed by the run start: balance totals per network and asset, read coverage per network, master wallet balances, and user counts per network and country. No per-wallet balance and no phone number | default |
+| `wallet_first_seen` | First run that observed each wallet, keyed by chain id and address, with `bounded` (an earlier run had not seen it); inserted once, never updated | default |
 | `b2c_transactions` | Copy of the B2C `transactions` rows, keyed by the B2C `_id` | default |
-| `b2c_users` | Id, `creationDate` and wallets (chain id, address) of the B2C users; no phone, name or email | default |
+| `b2c_users` | Id, `creationDate` and wallets (chain id, address) of the B2C users; no phone, country, name or email | default |
 | `b2c_tokens` / `b2c_networks` | Copies of the B2C token list and of the networks with their public contract addresses | default |
 | `token_prices` | USD price per symbol and day from the provider | default |
 | `agg_hourly` / `agg_user_activity` / `agg_user_signups` | Aggregates of the last build: facts per network and hour, active hours per user, signups | default |
@@ -139,11 +166,21 @@ Team rules: invites last 7 days and are reported `expired` afterwards; delivery 
 1. Takes the lock in `ingest_state`; a run that finds it taken answers 200 with `status: locked`. The lock expires `INGEST_MAX_RUN_SECONDS` plus 5 minutes after it is taken.
 2. Copies B2C `transactions` rows with an `_id` above the checkpoint, in batches, saving the checkpoint after each batch. Copies are keyed by the B2C `_id`, so a repeated read replaces instead of duplicating.
 3. Reads again the rows inserted in the last `INGEST_REVISIT_HOURS`, for rows whose status changes after insertion (Polymarket orders).
-4. Replaces the copies of `users`, `tokens` and `blockchains`.
-5. With `PRICES_PROVIDER=coingecko`, requests one USD snapshot per UTC day; the day is marked before the request, so a failing provider is asked once a day at most.
-6. Rebuilds every aggregate from the copies and records the build instant.
+4. Replaces the copies of `users`, `tokens` and `blockchains`. The country of each phone number is counted per network and overall, and the number is dropped.
+5. Records in `wallet_first_seen` every wallet not seen before. The first run sets `walletsTrackingSince`; its observations are unbounded, since the wallets may be older.
+6. With `PRICES_PROVIDER=coingecko`, requests one USD snapshot per UTC day for the non-stable tokens and the native coins of the EVM master wallets, in one request; the day is marked before the request, so a failing provider is asked once a day at most.
+7. With `BALANCES_PROVIDER=rpc`, reads the balances of every user wallet and master wallet, and stores the totals, with the country counts, in `ingest_snapshots`. Without it the run stores the country counts only.
+8. Rebuilds every aggregate from the copies and records the build instant and the run status per source.
 
-Steps 2 and 3 stop starting batches at `INGEST_MAX_TRANSACTIONS_PER_RUN` rows or `INGEST_MAX_RUN_SECONDS`; the run answers `status: partial` and the next run continues from the checkpoint. The instance that ran the ingestion loads the new aggregates at once; the others within `METRICS_REFRESH_SECONDS`.
+Steps 2 and 3 stop starting batches at `INGEST_MAX_TRANSACTIONS_PER_RUN` rows or `INGEST_MAX_RUN_SECONDS`; the run answers `status: partial` and the next run continues from the checkpoint. A run is idempotent per start instant: copies, observations and the snapshot are keyed, so a repeated write replaces or skips.
+
+Balance requests per run, bounded by `BALANCES_MAX_CALLS_PER_RUN` and `INGEST_MAX_RUN_SECONDS`, each with a 15 s timeout:
+
+- EVM network: `ceil((W × T + M × (T + 1)) / 200)` `eth_call` requests to Multicall3 `aggregate3` (`0xcA11bde05977b3631167028862bE2a173976CA11`), for `W` user wallets, `M` master wallets and `T` ERC-20 tokens with a contract and decimals.
+- Cardano network with a Koios endpoint: `ceil((W + M) / 50)` requests to `address_utxos`, plus one per additional page of 1000 UTxOs, at most 20 pages per batch. Blockfrost endpoints are `unsupported`.
+- A failed request or a spent budget leaves its wallets unread and lowers the coverage; the run continues. Error messages of the requests are not kept, since they can carry the endpoint key.
+
+With 1000 user wallets and 4 tokens on one EVM network, a run sends 20 `eth_call` requests; 1000 wallets on Cardano take 20 Koios requests when each batch fits in one page. The instance that ran the ingestion loads the new aggregates at once; the others within `METRICS_REFRESH_SECONDS`.
 
 Admitted callers: the Google-signed ID token in `Authorization: Bearer` is verified against Google's keys, with `iss` `https://accounts.google.com`, `aud` equal to `INGEST_OIDC_AUDIENCE`, `email` equal to `INGEST_SCHEDULER_SA_EMAIL` and `email_verified`. Cloud Run IAM admits the site service account too, which is why the API checks the identity itself; the site sends its identity in `X-Serverless-Authorization` and a session JWT in `Authorization`, so it never passes. Locally, `INGEST_DEV_TRIGGER=true` admits any caller.
 
@@ -156,7 +193,7 @@ Valuation and counting (`src/metrics/live.ts`):
 - Active users are the senders of counted operations (B2C user id, or the address when it belongs to no user). New and total users come from `users.creationDate` on each network of the user's wallets; wallets have no date of their own. Users without `creationDate` count in totals from the start.
 - User tiles, series totals and retention cohorts count a user id once across the selected networks; the `byNetwork` rows count per network, so a user with wallets on Base and Cardano appears in both rows and the rows can add up to more than the tile.
 
-`LIVE_METRIC_GROUPS` in `src/metrics/sources.ts` lists which metric groups (`activity`, `activeUsers`, `signups`, `retention`) are served from the aggregates once a build exists; the rest stay synthetic.
+`LIVE_METRIC_GROUPS` in `src/metrics/sources.ts` lists which metric groups (`activity`, `activeUsers`, `signups`, `retention`, `wallets`, `balances`, `countries`) are served from the aggregates and snapshots once a build exists; the rest stay synthetic. A live group without data answers `unavailable`; it does not fall back to synthetic values.
 
 ## Mock dataset
 
@@ -167,6 +204,7 @@ Valuation and counting (`src/metrics/live.ts`):
 - Every total equals the sum of its series, network breakdown and asset breakdown. Volume counts transfers plus the input side of swaps. Cardano networks have no swaps. Every network of a family uses the same activity template; after the first one, user counts are scaled by a factor derived from the id.
 - Amounts are USD decimal strings with 2 places, computed in integer cents. `changeRatio` is a decimal string with 4 places, `null` when the previous value is zero or absent.
 - The synthetic model has no user identities: each network is its own population, so user totals over several networks are the sums of the networks. Distinct active users of a window come from that model, bounded by the users that joined until then.
+- Dataset version `mock-v2`. Synthetic snapshots are taken daily at 03:00 UTC from the dataset start, with every network read completely; prices are seeded around 2500 USD for ETH/WETH, 60000 for WBTC and 0.45 for ADA. Countries follow fixed weights with an `Unknown` share. Every synthetic wallet has a first appearance. Synthetic master wallets have the role `Synthetic signer`, addresses that cannot belong to a signer and no explorer link.
 
 ## Deployment
 
@@ -177,7 +215,7 @@ Valuation and counting (`src/metrics/live.ts`):
 | `_SERVICE_NAME` | `chatterpay-analytics-back-develop` or `chatterpay-analytics-back-main` |
 | `_DEPLOY_REGION` / `_AR_HOSTNAME` / `_TRIGGER_ID` | Region, Artifact Registry host, trigger id |
 
-- Server variables (`LOG_LEVEL`, `BODY_LIMIT_BYTES`, `REQUEST_TIMEOUT_MS`, `JWT_KEY_ID`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SESSION_TTL_MINUTES`, `CHALLENGE_TTL_MINUTES`, `MONGO_DB_NAME` and the `INGEST_*`, `PRICES_*` and `METRICS_*` variables) are defined in the Cloud Run service YAML. The image only sets `NODE_ENV`, `HOST` and `PORT`; the deploy keeps the variables already defined on the service.
+- Server variables (`LOG_LEVEL`, `BODY_LIMIT_BYTES`, `REQUEST_TIMEOUT_MS`, `JWT_KEY_ID`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SESSION_TTL_MINUTES`, `CHALLENGE_TTL_MINUTES`, `MONGO_DB_NAME` and the `INGEST_*`, `PRICES_*`, `BALANCES_*`, `MASTER_WALLETS` and `METRICS_*` variables) are defined in the Cloud Run service YAML. The image only sets `NODE_ENV`, `HOST` and `PORT`; the deploy keeps the variables already defined on the service.
 - Secrets never enter the image: `DEMO_ACCESS_CODE`, `JWT_PRIVATE_KEY` and `MONGO_URI` come from Secret Manager through `secretKeyRef` in the Cloud Run service YAML. `MONGO_URI` reads `ANALYTICS_BACKEND_MONGO_CONN_STRING_DEV` / `_MAIN`: the connection string of a database user whose only role is `readWrite` on the analytics database of the same Atlas cluster as the backend.
 - The service name selects the VPC: `*-develop` deploys on `chatterpay-dev-vpc` / `chatterpay-dev-run`, `*-main` on `chatterpay-main-vpc` / `chatterpay-main-run`; any other name stops the build.
 - The service sits behind the HTTPS load balancer on `dev.back.analytics.chatterpay.net` and `back.analytics.chatterpay.net`, with ingress `internal-and-cloud-load-balancing`. The deploy uses `--no-allow-unauthenticated`: only the service account of the site has `roles/run.invoker`. The BFF sends a Google-signed ID token whose audience is the API domain, declared on the service as a custom audience (`run.googleapis.com/custom-audiences`).
