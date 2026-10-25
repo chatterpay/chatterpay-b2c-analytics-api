@@ -17,6 +17,8 @@ const apiErrorSchema = {
         'FORBIDDEN',
         'NOT_FOUND',
         'CONFLICT',
+        'CONFIG_CONFLICT',
+        'LAST_ENABLED_NETWORK',
         'PAYLOAD_TOO_LARGE',
         'RATE_LIMITED',
         'SERVICE_UNAVAILABLE',
