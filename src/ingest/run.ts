@@ -1,7 +1,7 @@
 import { isoDayOf } from '../metrics/calendar.js';
 import { type AggregationStats, aggregateActivity } from '../metrics/live.js';
 import type { IngestRunStatus } from '../metrics/types.js';
-import { type MasterWalletConfig, takeBalanceSnapshot } from './snapshot.js';
+import { type MasterWalletConfig, type NetworkRead, takeBalanceSnapshot } from './snapshot.js';
 import type {
   B2cActivityReader,
   B2cUserRecord,
@@ -15,7 +15,6 @@ import type {
   IngestedUser,
   IngestRepository,
   PriceProvider,
-  SnapshotNetwork,
   TokenInfo,
   TransactionCursor,
   WalletObservation
@@ -102,7 +101,8 @@ export interface IngestionReport {
       /** Requests sent (`eth_call` batches and Koios pages). */
       calls: number;
       failedCalls: number;
-      networks: SnapshotNetwork[];
+      /** Read of each network, with the instant of the snapshot it belongs to. */
+      networks: Array<NetworkRead & { takenAt: string }>;
       masterWallets: number;
     };
   };
@@ -201,7 +201,9 @@ function pricedSymbols(
  *    wallets seen for the first time.
  * 5. Requests at most one provider price snapshot per UTC day, within `maxProviderCallsPerRun`.
  * 6. Reads the balances of the user and master wallets, within `maxBalanceCallsPerRun`, and stores
- *    the run snapshot (balance sums and country counts).
+ *    the run snapshot (balance sums and country counts). Networks disabled in B2C and networks
+ *    only the analytics database retains get a row without any balance request; the analytics
+ *    visibility plays no part here.
  * 7. Rebuilds every aggregate from the copies and records the status of the run.
  *
  * Steps 2 and 3 stop starting batches at `maxTransactionsPerRun` rows or `maxRunMs`; the run then
@@ -305,7 +307,14 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
       retainedNetworks: retained.networks
     };
 
-    const countries = countCountries(users, chains);
+    // Networks only the analytics database retains stay in the catalog, so their users keep being
+    // counted per country; they come after the B2C networks, which keeps one row per network.
+    const listed = new Set(chains.map((chain) => chain.chainId));
+    const catalogChains = [
+      ...chains,
+      ...(await repository.chains()).filter((chain) => !listed.has(chain.chainId))
+    ];
+    const countries = countCountries(users, catalogChains);
     report.sources.users.countedInCountries = countries.counted;
 
     // Wallets of every network are observed, so a network added to the catalog later already has
@@ -386,7 +395,8 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
       const result = await takeBalanceSnapshot({
         reader: deps.balances,
         endpoints: await reader.endpoints(),
-        chains,
+        chains: catalogChains,
+        b2cEnabled: await reader.b2cEnabled(),
         tokens,
         users: copies,
         masterWallets: deps.masterWallets,
@@ -398,7 +408,7 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
         status: result.status,
         calls: callBudget.used,
         failedCalls: callBudget.failed,
-        networks: result.snapshot.networks,
+        networks: result.networks.map((row) => ({ ...row, takenAt: startedAt.toISOString() })),
         masterWallets: result.snapshot.masterWallets.length
       };
     }
