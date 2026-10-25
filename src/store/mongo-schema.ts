@@ -7,7 +7,12 @@ export const COLLECTIONS = {
   challenges: 'login_challenges',
   invites: 'invites',
   activity: 'activity',
-  rateLimits: 'rate_limits'
+  rateLimits: 'rate_limits',
+  /**
+   * Settings of the analytics, one document per setting keyed by `_id` (`network_visibility`).
+   * Reads and compare-and-set writes go by `_id`, so the collection needs no index of its own.
+   */
+  settings: 'analytics_settings'
 } as const;
 
 /** Index the store relies on: invariants (unique) and expiry (TTL). */
