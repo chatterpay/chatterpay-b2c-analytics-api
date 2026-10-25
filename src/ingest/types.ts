@@ -1,5 +1,5 @@
 import type { NetworkFamily, NetworkId } from '../metrics/catalog.js';
-import type { IngestRunStatus, NetworkReadStatus } from '../metrics/types.js';
+import type { IngestRunStatus, NetworkReadReason, NetworkReadStatus } from '../metrics/types.js';
 
 /**
  * Row of the B2C `transactions` collection, as copied into the analytics database. Every type and
@@ -133,12 +133,26 @@ export interface SnapshotHolding {
   valueCents: number | null;
 }
 
-/** Read of the user wallets of one network in a snapshot. */
+/**
+ * Read of the user wallets of one network in a snapshot. The optional fields are absent in
+ * snapshots stored before they were recorded.
+ */
 export interface SnapshotNetwork {
   network: NetworkId;
   status: NetworkReadStatus;
   wallets: number;
   walletsRead: number;
+  /** Balance requests sent for the network (`eth_call` batches or Koios pages). */
+  calls?: number;
+  /** Of those, the requests that failed. */
+  failedCalls?: number;
+  /**
+   * B2C `enabled` of the network at the run; `null` when the document has no boolean `enabled` or
+   * the B2C database no longer lists the network.
+   */
+  b2cEnabled?: boolean | null;
+  /** Why the network was not read, or not completely; `null` when it was read in full. */
+  reason?: NetworkReadReason | null;
 }
 
 /** Balances of one configured master wallet in a snapshot. */
@@ -216,6 +230,11 @@ export interface B2cActivityReader {
   chains(): Promise<ChainInfo[]>;
   /** Balance endpoints of the networks the catalog accepts; networks without one are absent. */
   endpoints(): Promise<ChainEndpoint[]>;
+  /**
+   * B2C `enabled` of the networks the catalog accepts, by chain id; `null` when the document has
+   * no boolean `enabled`. Networks the B2C database does not list are absent.
+   */
+  b2cEnabled(): Promise<Map<string, boolean | null>>;
 }
 
 /** Additive activity of one network in one UTC hour. Money in USD cents per asset. */
