@@ -3,6 +3,8 @@ import { type Role, requireRoles } from '../auth/principal.js';
 import { normalizeEmail } from '../config/env.js';
 import { ApiError } from '../errors/api-error.js';
 import type {
+  ActivityCursor,
+  ActivityEvent,
   Invite,
   InviteTransitionResult,
   MemberMutationResult,
@@ -34,13 +36,59 @@ const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const membersResponse = object({ items: arrayOf(teamMemberSchema) });
 const invitesResponse = object({ items: arrayOf(inviteSchema) });
-const activityResponse = object({ items: arrayOf(activityEventSchema) });
+const activityResponse = object({
+  items: arrayOf(activityEventSchema),
+  nextCursor: {
+    type: ['string', 'null'],
+    description: 'Cursor of the next page, for the `cursor` parameter; `null` on the last page.'
+  }
+});
+
+/** Largest activity page; the default page is smaller. */
+const ACTIVITY_MAX_LIMIT = 100;
 
 const activityQuery = {
   type: 'object',
   additionalProperties: false,
-  properties: { limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 } }
+  properties: {
+    limit: { type: 'integer', minimum: 1, maximum: ACTIVITY_MAX_LIMIT, default: 50 },
+    cursor: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 200,
+      pattern: '^[A-Za-z0-9_-]+$',
+      description: 'Opaque `nextCursor` of the previous page; omitted for the first page.'
+    }
+  }
 } as const;
+
+/** Ids of activity events: ObjectId hex in MongoDB, UUID in the memory store. */
+const EVENT_ID = /^(?:[0-9a-f]{24}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+/**
+ * Cursor of the page that follows `event`: its instant and id, base64url encoded. Clients treat it
+ * as opaque and send it back unchanged.
+ */
+function encodeActivityCursor(event: ActivityEvent): string {
+  return Buffer.from(`${event.at.toISOString()}|${event.id}`, 'utf8').toString('base64url');
+}
+
+/** Reads a cursor of {@link encodeActivityCursor}; 400 when it does not hold an instant and an id. */
+function decodeActivityCursor(cursor: string): ActivityCursor {
+  const [instant = '', id = '', ...rest] = Buffer.from(cursor, 'base64url')
+    .toString('utf8')
+    .split('|');
+  const at = new Date(instant);
+  if (
+    rest.length > 0 ||
+    !EVENT_ID.test(id) ||
+    Number.isNaN(at.getTime()) ||
+    at.toISOString() !== instant
+  ) {
+    throw new ApiError(400, 'BAD_REQUEST', 'Invalid activity cursor');
+  }
+  return { at, id };
+}
 
 const createInviteBody = object({
   email: emailSchema,
@@ -131,20 +179,28 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
     }
   );
 
-  app.get<{ Querystring: { limit: number } }>(
+  app.get<{ Querystring: { limit: number; cursor?: string } }>(
     '/activity',
     {
       schema: {
         operationId: 'listTeamActivity',
-        summary: 'Login and team management events, newest first',
+        summary: 'Login and team management events, newest first, one page per cursor',
         tags: ['team'],
         querystring: activityQuery,
         response: { 200: activityResponse, ...errorResponsesFor([400, 401, 403]) }
       }
     },
     async (request) => {
-      const events = await store.listActivity(request.query.limit);
-      return { items: await Promise.all(events.map((event) => toActivityEventBody(store, event))) };
+      const { limit, cursor } = request.query;
+      const after = cursor === undefined ? undefined : decodeActivityCursor(cursor);
+      // One event past the page tells whether another page exists without a count query.
+      const events = await store.listActivity(limit + 1, after);
+      const page = events.slice(0, limit);
+      const last = page.at(-1);
+      return {
+        items: await Promise.all(page.map((event) => toActivityEventBody(store, event))),
+        nextCursor: events.length > limit && last !== undefined ? encodeActivityCursor(last) : null
+      };
     }
   );
 
