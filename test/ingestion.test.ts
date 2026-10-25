@@ -300,7 +300,8 @@ describe('runIngestion snapshots', () => {
     expect(repository.stored?.run).toEqual({
       status: 'completed',
       finishedAt: NOW.toISOString(),
-      sources: { transactions: 'complete', prices: 'complete', balances: 'complete' }
+      sources: { transactions: 'complete', prices: 'complete', balances: 'complete' },
+      valuation: 'market'
     });
   });
 
