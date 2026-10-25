@@ -29,7 +29,12 @@ const reportSchema = object({
   sources: object({
     transactions: object({ read: count, revisited: count, lastId: nullableString }),
     users: object({ read: count, newWallets: count, countedInCountries: count }),
-    catalog: object({ tokens: count, networks: count }),
+    catalog: object({
+      tokens: count,
+      networks: count,
+      retainedTokens: count,
+      retainedNetworks: count
+    }),
     prices: object({
       provider: nullableString,
       calls: count,
