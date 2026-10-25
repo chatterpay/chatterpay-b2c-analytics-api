@@ -29,7 +29,16 @@ export interface IngestRunStatus {
     /** Balance snapshot of the run. */
     balances: 'complete' | 'partial' | 'failed' | 'disabled';
   };
+  /**
+   * USD valuation of the run (`USD_VALUATION`): `market` values balances and operations with
+   * stable and provider prices, `none` values nothing because the networks hold test assets
+   * without market value. Absent in runs stored before it was recorded, which valued at market.
+   */
+  valuation?: UsdValuation;
 }
+
+/** USD valuation policy of a deployment; see {@link IngestRunStatus.valuation}. */
+export type UsdValuation = 'market' | 'none';
 
 /** Fields shared by the `meta` object of every metrics response. */
 export interface MetricsMetaBase {
@@ -76,6 +85,22 @@ export interface MoneyMetric {
   changeRatio: string | null;
 }
 
+/**
+ * USD amount of counted operations with the coverage of its valuation. `available`: every
+ * operation of the figure has a USD value. `partial`: some have none; `value` is the subtotal of
+ * the valued ones, never the total. `unavailable`: none has one, or the deployment values nothing
+ * (`not_valued`); `value` is `null`. `previous` is `null` unless the previous period was valued
+ * completely, and `changeRatio` is `null` unless both periods were, so a change never compares a
+ * subtotal.
+ */
+export interface ValuedMoneyMetric {
+  value: string | null;
+  previous: string | null;
+  changeRatio: string | null;
+  availability: Availability;
+  reason: UnavailableReason | null;
+}
+
 /** Network label as shown in breakdowns. */
 export interface NetworkRef {
   network: NetworkId;
@@ -104,6 +129,12 @@ export type Availability = 'available' | 'partial' | 'unavailable';
  * - `not_read`: the snapshot holds no reading of the selected networks (disabled in B2C, no longer
  *   listed by it, without a supported endpoint, or every request failed). Earlier snapshots keep
  *   their own values; they are not served as the current one.
+ * - `not_valued`: the deployment does not value in USD (`USD_VALUATION=none`, test networks whose
+ *   assets have no market value); amounts and counts are kept.
+ * - `native_not_covered`: the native coin of an EVM network is not in the B2C token list, so the
+ *   user wallets were read without it.
+ * - `undated_users`: some users have no signup date; they count in the totals but in no signup
+ *   window or cohort.
  */
 export type UnavailableReason =
   | 'no_snapshot'
@@ -115,7 +146,10 @@ export type UnavailableReason =
   | 'no_transactions'
   | 'no_eligible_cohort'
   | 'not_configured'
-  | 'not_read';
+  | 'not_read'
+  | 'not_valued'
+  | 'native_not_covered'
+  | 'undated_users';
 
 /** Origin, availability and freshness of a block of a response. */
 export interface BlockStatus {
@@ -147,6 +181,13 @@ export type NetworkReadReason =
   | 'unsupported_provider'
   | 'read_incomplete';
 
+/**
+ * Whether the user wallets of a network were read with its native coin: `included` on Cardano
+ * (ADA comes with the UTxOs) and on EVM networks whose B2C token list carries the native coin,
+ * `not_listed` on EVM networks whose list does not.
+ */
+export type NativeCoverage = 'included' | 'not_listed';
+
 /** Wallets a balance snapshot covers. */
 export interface SnapshotCoverage {
   /** User wallets on the selected networks when the snapshot was taken. */
@@ -155,6 +196,37 @@ export interface SnapshotCoverage {
   walletsRead: number;
   /** Assets held without a USD price on the snapshot day; their value is not in the totals. */
   unpricedAssets: Array<{ network: NetworkId; asset: string }>;
+  /** Selected networks whose user wallets were read without the native coin. */
+  nativeNotCovered: NetworkId[];
+}
+
+/**
+ * Coverage of the USD valuation of the counted operations of the period. An operation is counted
+ * in `transactions` whatever its valuation; its amount or fee without a USD value is left out of
+ * the money figures instead of being taken as zero. A fee of zero is a measured zero.
+ */
+export interface ValuationBlock extends BlockStatus {
+  /** Counted transfers and swaps of the period. */
+  operations: number;
+  /** Operations whose amount has no USD value; their volume is not in the figures. */
+  unpricedVolume: number;
+  /** Operations with a fee other than zero that has no USD value; not in the fee figures. */
+  unpricedFees: number;
+  /** Assets of those operations per network, with how many of each were left out of each figure. */
+  unpricedAssets: Array<{
+    network: NetworkId;
+    asset: string;
+    unpricedVolume: number;
+    unpricedFees: number;
+  }>;
+}
+
+/** Users with and without a signup date; the latter are in no signup window or cohort. */
+export interface SignupsBlock extends BlockStatus {
+  /** Users of the selected networks through the current hour, each counted once. */
+  users: number;
+  /** Of those, users without `creationDate`. */
+  undatedUsers: number;
 }
 
 /** Total value of the assets held in user wallets, from the balance snapshots. */
@@ -339,28 +411,34 @@ export interface RetentionSummaryBlock extends BlockStatus {
 export interface OverviewResponse {
   meta: RangeMeta;
   tiles: {
-    volumeUsd: MoneyMetric;
+    volumeUsd: ValuedMoneyMetric;
     transactions: CountMetric;
-    feesUsd: MoneyMetric;
+    feesUsd: ValuedMoneyMetric;
     activeUsers: CountMetric;
     newUsers: CountMetric;
   };
   series: Array<
     Period & {
-      volumeUsd: string;
+      volumeUsd: string | null;
       transactions: number;
-      byNetwork: Array<{ network: NetworkId; volumeUsd: string; transactions: number }>;
+      byNetwork: Array<{ network: NetworkId; volumeUsd: string | null; transactions: number }>;
     }
   >;
   byNetwork: Array<
     NetworkRef & {
-      volumeUsd: string;
+      volumeUsd: string | null;
       transactions: number;
-      feesUsd: string;
+      feesUsd: string | null;
       activeUsers: number;
       newUsers: number;
     }
   >;
+  /**
+   * Valuation of the operations of the period. The series and `byNetwork` amounts are subtotals of
+   * the valued operations, `null` where operations exist and none is valued; `unpricedAssets` names
+   * the networks and assets they leave out.
+   */
+  valuation: ValuationBlock;
   tvl: TvlBlock;
   topTokens: TopTokensBlock;
   topCountries: TopCountriesBlock;
@@ -388,29 +466,43 @@ export interface UsersResponse {
   byNetwork: Array<NetworkRef & { activeUsers: number; totalUsers: number }>;
   newWallets: NewWalletsBlock;
   retentionSummary: RetentionSummaryBlock;
+  /** Signup dates behind `newUsers`, the series and the cohorts. */
+  signups: SignupsBlock;
 }
 
 /** Response of `GET /v1/metrics/revenue`. */
 export interface RevenueResponse {
   meta: RangeMeta;
   tiles: {
-    feesUsd: MoneyMetric;
-    transferFeesUsd: MoneyMetric;
-    swapFeesUsd: MoneyMetric;
-    volumeUsd: MoneyMetric;
+    feesUsd: ValuedMoneyMetric;
+    transferFeesUsd: ValuedMoneyMetric;
+    swapFeesUsd: ValuedMoneyMetric;
+    volumeUsd: ValuedMoneyMetric;
     /** Input side of the counted swaps, the same figure as the swap part of `volumeUsd`. */
-    swapVolumeUsd: MoneyMetric;
+    swapVolumeUsd: ValuedMoneyMetric;
   };
-  series: Array<Period & { feesUsd: string; transferFeesUsd: string; swapFeesUsd: string }>;
+  /** Subtotals of the valued operations, as the Overview series. */
+  series: Array<
+    Period & { feesUsd: string | null; transferFeesUsd: string | null; swapFeesUsd: string | null }
+  >;
+  /** Subtotals of the valued operations, as the Overview breakdown. */
   byNetwork: Array<
     NetworkRef & {
-      feesUsd: string;
-      transferFeesUsd: string;
-      swapFeesUsd: string;
-      volumeUsd: string;
+      feesUsd: string | null;
+      transferFeesUsd: string | null;
+      swapFeesUsd: string | null;
+      volumeUsd: string | null;
     }
   >;
-  byAsset: Array<{ network: NetworkId; asset: string; volumeUsd: string; feesUsd: string }>;
+  /** `volumeUsd` or `feesUsd` is `null` when an operation of the asset has no USD value for it. */
+  byAsset: Array<{
+    network: NetworkId;
+    asset: string;
+    volumeUsd: string | null;
+    feesUsd: string | null;
+  }>;
+  /** Valuation of the operations of the period; see {@link OverviewResponse.valuation}. */
+  valuation: ValuationBlock;
   avgFeePerTransaction: AverageFeeBlock;
   polymarketVolume: PolymarketVolumeBlock;
   feesByProduct: FeesByProductBlock;
