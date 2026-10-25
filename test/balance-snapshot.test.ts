@@ -56,6 +56,7 @@ function input(overrides: Partial<SnapshotInput> = {}): SnapshotInput {
       ['ADA', 0.5],
       ['ETH', 3000]
     ]),
+    b2cEnabled: new Map(CHAINS.map((chain) => [chain.chainId, true])),
     budget: budget(),
     ...overrides
   };
@@ -68,8 +69,26 @@ describe('takeBalanceSnapshot', () => {
     // The status covers the reads; an asset without price is left to the holdings figures.
     expect(status).toBe('complete');
     expect(snapshot.networks).toEqual([
-      { network: 'base-sepolia', status: 'complete', wallets: 2, walletsRead: 2 },
-      { network: 'cardano-preprod', status: 'complete', wallets: 1, walletsRead: 1 }
+      {
+        network: 'base-sepolia',
+        status: 'complete',
+        wallets: 2,
+        walletsRead: 2,
+        calls: 1,
+        failedCalls: 0,
+        b2cEnabled: true,
+        reason: null
+      },
+      {
+        network: 'cardano-preprod',
+        status: 'complete',
+        wallets: 1,
+        walletsRead: 1,
+        calls: 1,
+        failedCalls: 0,
+        b2cEnabled: true,
+        reason: null
+      }
     ]);
     expect(snapshot.holdings).toEqual([
       { network: 'base-sepolia', asset: 'USDC', amount: '3.0', valueCents: 300 },
@@ -90,7 +109,11 @@ describe('takeBalanceSnapshot', () => {
       network: 'base-sepolia',
       status: 'partial',
       wallets: 2,
-      walletsRead: 1
+      walletsRead: 1,
+      calls: 1,
+      failedCalls: 0,
+      b2cEnabled: true,
+      reason: 'read_incomplete'
     });
     expect(snapshot.holdings.find((holding) => holding.asset === 'USDC')?.valueCents).toBe(250);
     expect(snapshot.holdings.some((holding) => holding.asset === 'WBTC')).toBe(false);
