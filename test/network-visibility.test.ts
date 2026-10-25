@@ -609,8 +609,11 @@ describe('network visibility failures', () => {
         reason: 'read_incomplete'
       }
     ]);
+    // The Base Sepolia token list of the fixture has no native coin, so its wallets were read
+    // without it: a subtotal, never `available`.
     expect(buildOverview('all', 'month', NOW, ['base-sepolia']).tvl).toMatchObject({
-      availability: 'available',
+      availability: 'partial',
+      reason: 'native_not_covered',
       value: { value: '2.00' }
     });
   });
