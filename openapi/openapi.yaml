@@ -440,9 +440,40 @@ paths:
   /v1/team/invites:
     get:
       operationId: listTeamInvites
-      summary: Invites, newest first
+      summary: Invites of one view, newest first, one page per cursor, with the count
+        of each view
       tags:
         - team
+      parameters:
+        - schema:
+            type: string
+            enum:
+              - pending
+              - history
+            default: pending
+          in: query
+          name: view
+          required: false
+          description: "`pending`: invites that can still be resent, revoked or accepted.
+            `history`: accepted, revoked and expired invites."
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+          in: query
+          name: limit
+          required: false
+        - schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+            pattern: ^[A-Za-z0-9_-]+$
+          in: query
+          name: cursor
+          required: false
+          description: Opaque `nextCursor` of the previous page of the same view; omitted
+            for the first page.
       responses:
         "200":
           description: Default Response
@@ -453,6 +484,8 @@ paths:
                 additionalProperties: false
                 required:
                   - items
+                  - nextCursor
+                  - counts
                 properties:
                   items:
                     type: array
@@ -504,6 +537,33 @@ paths:
                         createdBy:
                           type: string
                           description: Email of the admin that created the invite.
+                  nextCursor:
+                    type:
+                      - "null"
+                      - string
+                    description: Cursor of the next page, for the `cursor` parameter; `null` on the
+                      last page.
+                  counts:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - pending
+                      - history
+                    properties:
+                      pending:
+                        type: integer
+                        minimum: 0
+                      history:
+                        type: integer
+                        minimum: 0
+                    description: Invites of each view at the time of the request, whatever page was
+                      asked.
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "401":
           description: Default Response
           content:
@@ -1180,6 +1240,7 @@ paths:
                   - tiles
                   - series
                   - byNetwork
+                  - valuation
                   - tvl
                   - topTokens
                   - topCountries
@@ -1222,6 +1283,7 @@ paths:
                               - status
                               - finishedAt
                               - sources
+                              - valuation
                             properties:
                               status:
                                 type: string
@@ -1258,6 +1320,11 @@ paths:
                                       - partial
                                       - failed
                                       - disabled
+                              valuation:
+                                type: string
+                                enum:
+                                  - market
+                                  - none
                           - type: "null"
                       generatedAt:
                         type: string
@@ -1331,9 +1398,13 @@ paths:
                           - value
                           - previous
                           - changeRatio
+                          - availability
+                          - reason
                         properties:
                           value:
-                            type: string
+                            type:
+                              - "null"
+                              - string
                             pattern: ^-?\d+\.\d+$
                           previous:
                             type:
@@ -1345,6 +1416,31 @@ paths:
                               - "null"
                               - string
                             pattern: ^-?\d+\.\d+$
+                          availability:
+                            type: string
+                            enum:
+                              - available
+                              - partial
+                              - unavailable
+                          reason:
+                            type:
+                              - "null"
+                              - string
+                            enum:
+                              - no_snapshot
+                              - snapshots_disabled
+                              - partial_coverage
+                              - unpriced_assets
+                              - unverified_wallets
+                              - not_recorded
+                              - no_transactions
+                              - no_eligible_cohort
+                              - not_configured
+                              - not_read
+                              - not_valued
+                              - native_not_covered
+                              - undated_users
+                              - null
                       transactions:
                         type: object
                         additionalProperties: false
@@ -1373,9 +1469,13 @@ paths:
                           - value
                           - previous
                           - changeRatio
+                          - availability
+                          - reason
                         properties:
                           value:
-                            type: string
+                            type:
+                              - "null"
+                              - string
                             pattern: ^-?\d+\.\d+$
                           previous:
                             type:
@@ -1387,6 +1487,31 @@ paths:
                               - "null"
                               - string
                             pattern: ^-?\d+\.\d+$
+                          availability:
+                            type: string
+                            enum:
+                              - available
+                              - partial
+                              - unavailable
+                          reason:
+                            type:
+                              - "null"
+                              - string
+                            enum:
+                              - no_snapshot
+                              - snapshots_disabled
+                              - partial_coverage
+                              - unpriced_assets
+                              - unverified_wallets
+                              - not_recorded
+                              - no_transactions
+                              - no_eligible_cohort
+                              - not_configured
+                              - not_read
+                              - not_valued
+                              - native_not_covered
+                              - undated_users
+                              - null
                       activeUsers:
                         type: object
                         additionalProperties: false
@@ -1448,7 +1573,9 @@ paths:
                           type: string
                           format: date-time
                         volumeUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                         transactions:
                           type: integer
@@ -1467,7 +1594,9 @@ paths:
                                 pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
                                 maxLength: 64
                               volumeUsd:
-                                type: string
+                                type:
+                                  - "null"
+                                  - string
                                 pattern: ^-?\d+\.\d+$
                               transactions:
                                 type: integer
@@ -1492,17 +1621,101 @@ paths:
                         label:
                           type: string
                         volumeUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                         transactions:
                           type: integer
                         feesUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                         activeUsers:
                           type: integer
                         newUsers:
                           type: integer
+                  valuation:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - operations
+                      - unpricedVolume
+                      - unpricedFees
+                      - unpricedAssets
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      operations:
+                        type: integer
+                        minimum: 0
+                      unpricedVolume:
+                        type: integer
+                        minimum: 0
+                      unpricedFees:
+                        type: integer
+                        minimum: 0
+                      unpricedAssets:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - network
+                            - asset
+                            - unpricedVolume
+                            - unpricedFees
+                          properties:
+                            network:
+                              type: string
+                              pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                              maxLength: 64
+                            asset:
+                              type: string
+                            unpricedVolume:
+                              type: integer
+                              minimum: 0
+                            unpricedFees:
+                              type: integer
+                              minimum: 0
                   tvl:
                     type: object
                     additionalProperties: false
@@ -1543,6 +1756,9 @@ paths:
                           - no_eligible_cohort
                           - not_configured
                           - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
                           - null
                       asOf:
                         anyOf:
@@ -1585,6 +1801,7 @@ paths:
                               - wallets
                               - walletsRead
                               - unpricedAssets
+                              - nativeNotCovered
                             properties:
                               wallets:
                                 type: integer
@@ -1607,6 +1824,12 @@ paths:
                                       maxLength: 64
                                     asset:
                                       type: string
+                              nativeNotCovered:
+                                type: array
+                                items:
+                                  type: string
+                                  pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                                  maxLength: 64
                           - type: "null"
                       series:
                         type: array
@@ -1719,6 +1942,9 @@ paths:
                           - no_eligible_cohort
                           - not_configured
                           - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
                           - null
                       asOf:
                         anyOf:
@@ -1794,6 +2020,9 @@ paths:
                           - no_eligible_cohort
                           - not_configured
                           - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
                           - null
                       asOf:
                         anyOf:
@@ -1864,6 +2093,9 @@ paths:
                           - no_eligible_cohort
                           - not_configured
                           - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
                           - null
                       asOf:
                         anyOf:
@@ -1910,6 +2142,9 @@ paths:
                                 - no_eligible_cohort
                                 - not_configured
                                 - not_read
+                                - not_valued
+                                - native_not_covered
+                                - undated_users
                                 - null
                             volumeUsd:
                               type:
@@ -1997,6 +2232,7 @@ paths:
                   - byNetwork
                   - newWallets
                   - retentionSummary
+                  - signups
                 properties:
                   meta:
                     type: object
@@ -2035,6 +2271,7 @@ paths:
                               - status
                               - finishedAt
                               - sources
+                              - valuation
                             properties:
                               status:
                                 type: string
@@ -2071,6 +2308,11 @@ paths:
                                       - partial
                                       - failed
                                       - disabled
+                              valuation:
+                                type: string
+                                enum:
+                                  - market
+                                  - none
                           - type: "null"
                       generatedAt:
                         type: string
@@ -2360,6 +2602,9 @@ paths:
                           - no_eligible_cohort
                           - not_configured
                           - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
                           - null
                       asOf:
                         anyOf:
@@ -2492,6 +2737,9 @@ paths:
                           - no_eligible_cohort
                           - not_configured
                           - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
                           - null
                       asOf:
                         anyOf:
@@ -2539,6 +2787,9 @@ paths:
                                 - no_eligible_cohort
                                 - not_configured
                                 - not_read
+                                - not_valued
+                                - native_not_covered
+                                - undated_users
                                 - null
                             eligibleCohorts:
                               type: integer
@@ -2590,6 +2841,58 @@ paths:
                                       - "null"
                                       - integer
                                     minimum: 0
+                  signups:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - users
+                      - undatedUsers
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      users:
+                        type: integer
+                        minimum: 0
+                      undatedUsers:
+                        type: integer
+                        minimum: 0
         "400":
           description: Default Response
           content:
@@ -2663,6 +2966,7 @@ paths:
                   - series
                   - byNetwork
                   - byAsset
+                  - valuation
                   - avgFeePerTransaction
                   - polymarketVolume
                   - feesByProduct
@@ -2705,6 +3009,7 @@ paths:
                               - status
                               - finishedAt
                               - sources
+                              - valuation
                             properties:
                               status:
                                 type: string
@@ -2741,6 +3046,11 @@ paths:
                                       - partial
                                       - failed
                                       - disabled
+                              valuation:
+                                type: string
+                                enum:
+                                  - market
+                                  - none
                           - type: "null"
                       generatedAt:
                         type: string
@@ -2814,9 +3124,13 @@ paths:
                           - value
                           - previous
                           - changeRatio
+                          - availability
+                          - reason
                         properties:
                           value:
-                            type: string
+                            type:
+                              - "null"
+                              - string
                             pattern: ^-?\d+\.\d+$
                           previous:
                             type:
@@ -2828,6 +3142,31 @@ paths:
                               - "null"
                               - string
                             pattern: ^-?\d+\.\d+$
+                          availability:
+                            type: string
+                            enum:
+                              - available
+                              - partial
+                              - unavailable
+                          reason:
+                            type:
+                              - "null"
+                              - string
+                            enum:
+                              - no_snapshot
+                              - snapshots_disabled
+                              - partial_coverage
+                              - unpriced_assets
+                              - unverified_wallets
+                              - not_recorded
+                              - no_transactions
+                              - no_eligible_cohort
+                              - not_configured
+                              - not_read
+                              - not_valued
+                              - native_not_covered
+                              - undated_users
+                              - null
                       transferFeesUsd:
                         type: object
                         additionalProperties: false
@@ -2835,9 +3174,13 @@ paths:
                           - value
                           - previous
                           - changeRatio
+                          - availability
+                          - reason
                         properties:
                           value:
-                            type: string
+                            type:
+                              - "null"
+                              - string
                             pattern: ^-?\d+\.\d+$
                           previous:
                             type:
@@ -2849,6 +3192,31 @@ paths:
                               - "null"
                               - string
                             pattern: ^-?\d+\.\d+$
+                          availability:
+                            type: string
+                            enum:
+                              - available
+                              - partial
+                              - unavailable
+                          reason:
+                            type:
+                              - "null"
+                              - string
+                            enum:
+                              - no_snapshot
+                              - snapshots_disabled
+                              - partial_coverage
+                              - unpriced_assets
+                              - unverified_wallets
+                              - not_recorded
+                              - no_transactions
+                              - no_eligible_cohort
+                              - not_configured
+                              - not_read
+                              - not_valued
+                              - native_not_covered
+                              - undated_users
+                              - null
                       swapFeesUsd:
                         type: object
                         additionalProperties: false
@@ -2856,9 +3224,13 @@ paths:
                           - value
                           - previous
                           - changeRatio
+                          - availability
+                          - reason
                         properties:
                           value:
-                            type: string
+                            type:
+                              - "null"
+                              - string
                             pattern: ^-?\d+\.\d+$
                           previous:
                             type:
@@ -2870,6 +3242,31 @@ paths:
                               - "null"
                               - string
                             pattern: ^-?\d+\.\d+$
+                          availability:
+                            type: string
+                            enum:
+                              - available
+                              - partial
+                              - unavailable
+                          reason:
+                            type:
+                              - "null"
+                              - string
+                            enum:
+                              - no_snapshot
+                              - snapshots_disabled
+                              - partial_coverage
+                              - unpriced_assets
+                              - unverified_wallets
+                              - not_recorded
+                              - no_transactions
+                              - no_eligible_cohort
+                              - not_configured
+                              - not_read
+                              - not_valued
+                              - native_not_covered
+                              - undated_users
+                              - null
                       volumeUsd:
                         type: object
                         additionalProperties: false
@@ -2877,9 +3274,13 @@ paths:
                           - value
                           - previous
                           - changeRatio
+                          - availability
+                          - reason
                         properties:
                           value:
-                            type: string
+                            type:
+                              - "null"
+                              - string
                             pattern: ^-?\d+\.\d+$
                           previous:
                             type:
@@ -2891,6 +3292,31 @@ paths:
                               - "null"
                               - string
                             pattern: ^-?\d+\.\d+$
+                          availability:
+                            type: string
+                            enum:
+                              - available
+                              - partial
+                              - unavailable
+                          reason:
+                            type:
+                              - "null"
+                              - string
+                            enum:
+                              - no_snapshot
+                              - snapshots_disabled
+                              - partial_coverage
+                              - unpriced_assets
+                              - unverified_wallets
+                              - not_recorded
+                              - no_transactions
+                              - no_eligible_cohort
+                              - not_configured
+                              - not_read
+                              - not_valued
+                              - native_not_covered
+                              - undated_users
+                              - null
                       swapVolumeUsd:
                         type: object
                         additionalProperties: false
@@ -2898,9 +3324,13 @@ paths:
                           - value
                           - previous
                           - changeRatio
+                          - availability
+                          - reason
                         properties:
                           value:
-                            type: string
+                            type:
+                              - "null"
+                              - string
                             pattern: ^-?\d+\.\d+$
                           previous:
                             type:
@@ -2912,6 +3342,31 @@ paths:
                               - "null"
                               - string
                             pattern: ^-?\d+\.\d+$
+                          availability:
+                            type: string
+                            enum:
+                              - available
+                              - partial
+                              - unavailable
+                          reason:
+                            type:
+                              - "null"
+                              - string
+                            enum:
+                              - no_snapshot
+                              - snapshots_disabled
+                              - partial_coverage
+                              - unpriced_assets
+                              - unverified_wallets
+                              - not_recorded
+                              - no_transactions
+                              - no_eligible_cohort
+                              - not_configured
+                              - not_read
+                              - not_valued
+                              - native_not_covered
+                              - undated_users
+                              - null
                   series:
                     type: array
                     items:
@@ -2931,13 +3386,19 @@ paths:
                           type: string
                           format: date-time
                         feesUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                         transferFeesUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                         swapFeesUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                   byNetwork:
                     type: array
@@ -2959,16 +3420,24 @@ paths:
                         label:
                           type: string
                         feesUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                         transferFeesUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                         swapFeesUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                         volumeUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                   byAsset:
                     type: array
@@ -2988,11 +3457,95 @@ paths:
                         asset:
                           type: string
                         volumeUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
                         feesUsd:
-                          type: string
+                          type:
+                            - "null"
+                            - string
                           pattern: ^-?\d+\.\d+$
+                  valuation:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - operations
+                      - unpricedVolume
+                      - unpricedFees
+                      - unpricedAssets
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      operations:
+                        type: integer
+                        minimum: 0
+                      unpricedVolume:
+                        type: integer
+                        minimum: 0
+                      unpricedFees:
+                        type: integer
+                        minimum: 0
+                      unpricedAssets:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - network
+                            - asset
+                            - unpricedVolume
+                            - unpricedFees
+                          properties:
+                            network:
+                              type: string
+                              pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                              maxLength: 64
+                            asset:
+                              type: string
+                            unpricedVolume:
+                              type: integer
+                              minimum: 0
+                            unpricedFees:
+                              type: integer
+                              minimum: 0
                   avgFeePerTransaction:
                     type: object
                     additionalProperties: false
@@ -3033,6 +3586,9 @@ paths:
                           - no_eligible_cohort
                           - not_configured
                           - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
                           - null
                       asOf:
                         anyOf:
@@ -3098,6 +3654,9 @@ paths:
                           - no_eligible_cohort
                           - not_configured
                           - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
                           - null
                       asOf:
                         anyOf:
@@ -3145,6 +3704,9 @@ paths:
                           - no_eligible_cohort
                           - not_configured
                           - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
                           - null
                       asOf:
                         anyOf:
@@ -3190,6 +3752,9 @@ paths:
                                 - no_eligible_cohort
                                 - not_configured
                                 - not_read
+                                - not_valued
+                                - native_not_covered
+                                - undated_users
                                 - null
                             feesUsd:
                               type:
@@ -3238,6 +3803,9 @@ paths:
                           - no_eligible_cohort
                           - not_configured
                           - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
                           - null
                       asOf:
                         anyOf:
@@ -3584,8 +4152,11 @@ paths:
                 additionalProperties: false
                 required:
                   - status
+                  - runId
                   - startedAt
                   - durationMs
+                  - valuation
+                  - phasesMs
                   - sources
                   - aggregates
                 properties:
@@ -3595,12 +4166,52 @@ paths:
                       - completed
                       - partial
                       - locked
+                  runId:
+                    type: string
                   startedAt:
                     type: string
                     format: date-time
                   durationMs:
                     type: integer
                     minimum: 0
+                  valuation:
+                    type: string
+                    enum:
+                      - market
+                      - none
+                  phasesMs:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - copyTransactions
+                      - revisit
+                      - catalogUsers
+                      - prices
+                      - snapshot
+                      - aggregateRebuild
+                      - persist
+                    properties:
+                      copyTransactions:
+                        type: integer
+                        minimum: 0
+                      revisit:
+                        type: integer
+                        minimum: 0
+                      catalogUsers:
+                        type: integer
+                        minimum: 0
+                      prices:
+                        type: integer
+                        minimum: 0
+                      snapshot:
+                        type: integer
+                        minimum: 0
+                      aggregateRebuild:
+                        type: integer
+                        minimum: 0
+                      persist:
+                        type: integer
+                        minimum: 0
                   sources:
                     type: object
                     additionalProperties: false
@@ -3725,6 +4336,7 @@ paths:
                                 - failedCalls
                                 - b2cEnabled
                                 - reason
+                                - native
                                 - takenAt
                               properties:
                                 network:
@@ -3763,6 +4375,11 @@ paths:
                                     - unsupported_provider
                                     - read_incomplete
                                     - null
+                                native:
+                                  type: string
+                                  enum:
+                                    - included
+                                    - not_listed
                                 takenAt:
                                   type: string
                                   format: date-time
@@ -3777,8 +4394,11 @@ paths:
                           - transfers
                           - swaps
                           - unpriced
+                          - unpricedFees
+                          - unverifiedSwaps
                           - outsideCatalog
                           - users
+                          - undatedUsers
                           - wallets
                           - verifiedWallets
                           - builtAt
@@ -3792,10 +4412,19 @@ paths:
                           unpriced:
                             type: integer
                             minimum: 0
+                          unpricedFees:
+                            type: integer
+                            minimum: 0
+                          unverifiedSwaps:
+                            type: integer
+                            minimum: 0
                           outsideCatalog:
                             type: integer
                             minimum: 0
                           users:
+                            type: integer
+                            minimum: 0
+                          undatedUsers:
                             type: integer
                             minimum: 0
                           wallets:
