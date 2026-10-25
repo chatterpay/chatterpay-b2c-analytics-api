@@ -3,6 +3,7 @@ import { type Collection, type Db, MongoClient, MongoServerError, ObjectId } fro
 import type { Role } from '../auth/principal.js';
 import { connectOrClose } from './connect-retry.js';
 import { assertIndexes, COLLECTIONS } from './mongo-schema.js';
+import { INITIAL_VISIBILITY, planVisibilityChange } from './network-visibility.js';
 import type {
   ActivatedMember,
   ActivityEvent,
@@ -11,6 +12,9 @@ import type {
   Invite,
   InviteTransitionResult,
   MemberMutationResult,
+  NetworkVisibility,
+  NetworkVisibilityChange,
+  NetworkVisibilityResult,
   NewInvite,
   RateLimitResult,
   Session,
@@ -29,6 +33,9 @@ interface CounterDoc {
   count: number;
   resetAt: Date;
 }
+type VisibilityDoc = NetworkVisibility & { _id: string };
+
+const VISIBILITY_ID = 'network_visibility';
 
 const DUPLICATE_KEY = 11000;
 const PENDING = 'simulated';
@@ -77,7 +84,10 @@ export interface MongoStoreOptions {
  * - challenge attempts, consumption and invite transitions are single conditional updates;
  * - the last active admin is protected by applying the change and undoing it when no active admin
  *   remains. Two concurrent changes that would each remove the last admin can both be undone; the
- *   team never ends without an admin.
+ *   team never ends without an admin;
+ * - the network visibility is one document replaced with a compare-and-set on its revision (the
+ *   first write is an insert, which the `_id` makes unique), so of two concurrent changes made on
+ *   the same revision one wins and the other is a conflict.
  */
 export class MongoStore implements Store {
   readonly kind: 'mongo' = 'mongo';
@@ -87,6 +97,7 @@ export class MongoStore implements Store {
   private readonly invites: Collection<InviteDoc>;
   private readonly activity: Collection<ActivityDoc>;
   private readonly counters: Collection<CounterDoc>;
+  private readonly settings: Collection<VisibilityDoc>;
 
   private constructor(
     private readonly client: MongoClient,
@@ -98,6 +109,7 @@ export class MongoStore implements Store {
     this.invites = db.collection<InviteDoc>(COLLECTIONS.invites);
     this.activity = db.collection<ActivityDoc>(COLLECTIONS.activity);
     this.counters = db.collection<CounterDoc>(COLLECTIONS.rateLimits);
+    this.settings = db.collection<VisibilityDoc>(COLLECTIONS.settings);
   }
 
   /**
@@ -389,6 +401,51 @@ export class MongoStore implements Store {
       allowed: false,
       retryAfterSeconds: Math.max(1, Math.ceil((counter.resetAt.getTime() - now.getTime()) / 1000))
     };
+  }
+
+  async networkVisibility(): Promise<NetworkVisibility> {
+    const doc = await this.settings.findOne({ _id: VISIBILITY_ID });
+    if (doc === null) {
+      return { ...INITIAL_VISIBILITY, disabledChainIds: [] };
+    }
+    return {
+      disabledChainIds: doc.disabledChainIds.map(String).sort(),
+      revision: doc.revision,
+      updatedAt: doc.updatedAt,
+      updatedBy: doc.updatedBy
+    };
+  }
+
+  async changeNetworkVisibility(
+    change: NetworkVisibilityChange,
+    now: Date
+  ): Promise<NetworkVisibilityResult> {
+    const current = await this.networkVisibility();
+    const plan = planVisibilityChange(current, change, now);
+    if (plan.kind === 'done') {
+      return plan.result;
+    }
+    let written: boolean;
+    if (current.revision === 0) {
+      try {
+        await this.settings.insertOne({ _id: VISIBILITY_ID, ...plan.next });
+        written = true;
+      } catch (error) {
+        if (!isDuplicateKey(error)) {
+          throw error;
+        }
+        written = false;
+      }
+    } else {
+      const result = await this.settings.updateOne(
+        { _id: VISIBILITY_ID, revision: current.revision },
+        { $set: plan.next }
+      );
+      written = result.matchedCount === 1;
+    }
+    return written
+      ? { kind: 'ok', visibility: plan.next, changed: true }
+      : { kind: 'conflict', visibility: await this.networkVisibility() };
   }
 
   private async insertUser(email: string, role: Role, now: Date): Promise<User> {
