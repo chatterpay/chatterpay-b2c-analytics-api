@@ -1,5 +1,5 @@
 import { dayHourOf, hourIndexOf, periodOf } from './calendar.js';
-import { type NetworkFilter, networkProfile, networksFor } from './catalog.js';
+import { type NetworkFilter, type NetworkId, networkProfile, networksFor } from './catalog.js';
 import { type Facts, feesCents, sumAssets, volumeCents } from './facts.js';
 import { centsToUsd, moneyMetric } from './format.js';
 import { buildMasterWallets } from './holdings.js';
@@ -38,15 +38,18 @@ function assetsOf(facts: Facts): string[] {
  * @param network - Network filter.
  * @param range - Time range.
  * @param now - Current instant; the dataset ends at its hour.
+ * @param visible - Networks visible in the analytics, which `all` covers; every network of the
+ *   catalog when omitted.
  * @returns The Revenue response.
  */
 export function buildRevenue(
   network: NetworkFilter,
   range: MetricsRange,
-  now: Date
+  now: Date,
+  visible?: readonly NetworkId[]
 ): RevenueResponse {
   const resolved = resolveRange(range, dayHourOf(now));
-  const networks = networksFor(network);
+  const networks = networksFor(network, visible);
   const activity = sourceFor('activity');
   const current = networks.map((id) => ({
     network: id,
