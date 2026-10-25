@@ -81,7 +81,10 @@ function memberOrThrow(result: MemberMutationResult): User {
  * Registers the team management endpoints under the plugin prefix. Admin only.
  *
  * Invite delivery is simulated: no email is sent and created or resent invites carry status
- * `simulated`. Role changes and removals never leave the team without an active admin (409).
+ * `simulated`. An admin cannot change their own role or remove themselves (403
+ * `CANNOT_CHANGE_OWN_ROLE`, `CANNOT_REMOVE_SELF`), whatever role the request asks for. Since the
+ * caller stays an admin, the store's last-admin check (409) only answers when two admins demote or
+ * remove each other at the same time.
  * Every response carries `Cache-Control: private, no-store`.
  *
  * @param app - Fastify instance (encapsulated by the prefix).
@@ -242,7 +245,7 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
     {
       schema: {
         operationId: 'changeTeamMemberRole',
-        summary: 'Change the role of an active member; keeps at least one active admin',
+        summary: 'Change the role of another active member; keeps at least one active admin',
         tags: ['team'],
         params: idParamsSchema,
         body: changeRoleBody,
@@ -250,10 +253,14 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
       }
     },
     async (request) => {
+      const actor = actorId(request);
+      if (request.params.id === actor) {
+        throw new ApiError(403, 'CANNOT_CHANGE_OWN_ROLE', 'Members cannot change their own role');
+      }
       const user = memberOrThrow(await store.changeRole(request.params.id, request.body.role));
       await store.appendActivity({
         at: clock(),
-        actorId: actorId(request),
+        actorId: actor,
         action: 'role_changed',
         target: user.email,
         outcome: 'success'
@@ -267,7 +274,8 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
     {
       schema: {
         operationId: 'removeTeamMember',
-        summary: 'Remove an active member and revoke its sessions; keeps at least one active admin',
+        summary:
+          'Remove another active member and revoke its sessions; keeps at least one active admin',
         tags: ['team'],
         params: idParamsSchema,
         response: {
@@ -278,10 +286,14 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
     },
     async (request, reply) => {
       const now = clock();
+      const actor = actorId(request);
+      if (request.params.id === actor) {
+        throw new ApiError(403, 'CANNOT_REMOVE_SELF', 'Members cannot remove themselves');
+      }
       const user = memberOrThrow(await store.removeUser(request.params.id, now));
       await store.appendActivity({
         at: now,
-        actorId: actorId(request),
+        actorId: actor,
         action: 'member_removed',
         target: user.email,
         outcome: 'success'
