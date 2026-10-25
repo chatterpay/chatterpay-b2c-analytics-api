@@ -24,6 +24,8 @@ components:
             - BAD_REQUEST
             - UNAUTHORIZED
             - FORBIDDEN
+            - CANNOT_CHANGE_OWN_ROLE
+            - CANNOT_REMOVE_SELF
             - NOT_FOUND
             - CONFLICT
             - CONFIG_CONFLICT
@@ -907,7 +909,7 @@ paths:
   /v1/team/members/{id}:
     patch:
       operationId: changeTeamMemberRole
-      summary: Change the role of an active member; keeps at least one active admin
+      summary: Change the role of another active member; keeps at least one active admin
       tags:
         - team
       requestBody:
@@ -1008,8 +1010,8 @@ paths:
                 $ref: "#/components/schemas/ApiError"
     delete:
       operationId: removeTeamMember
-      summary: Remove an active member and revoke its sessions; keeps at least one
-        active admin
+      summary: Remove another active member and revoke its sessions; keeps at least
+        one active admin
       tags:
         - team
       parameters:
