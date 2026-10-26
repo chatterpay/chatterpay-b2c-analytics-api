@@ -61,6 +61,24 @@ export interface MetricsMetaBase {
 /** `meta` of Overview and Revenue. */
 export interface RangeMeta extends MetricsMetaBase {
   range: MetricsRange;
+  tokenScope: TokenScope;
+}
+
+/**
+ * Tokens an admin hid from the statistics (`/v1/admin/tokens`) among the selected networks. They
+ * are left out of every money figure, of Top tokens, of the asset breakdowns and of the master
+ * wallet balances before anything is added; users, signups, wallets and countries keep counting
+ * them, because those figures have no token.
+ */
+export interface TokenScope {
+  /** Hidden tokens of the selected networks, by network and catalog symbol. */
+  hidden: Array<{ network: NetworkId; asset: string }>;
+  /**
+   * `filtered` when the transaction counts leave the hidden tokens out too; `unfiltered` when the
+   * build behind them has no count per asset (builds stored before it was recorded, synthetic
+   * data), so they still count the operations of hidden tokens.
+   */
+  operationCounts: 'filtered' | 'unfiltered';
 }
 
 /** `meta` of Users. */
@@ -137,6 +155,8 @@ export type Availability = 'available' | 'partial' | 'unavailable';
  *   without it.
  * - `undated_users`: some users have no signup date; they count in the totals but in no signup
  *   window or cohort.
+ * - `undated_accounts`: some Polymarket accounts have no creation date; they count in the total
+ *   but in no creation window.
  */
 export type UnavailableReason =
   | 'no_snapshot'
@@ -151,7 +171,8 @@ export type UnavailableReason =
   | 'not_read'
   | 'not_valued'
   | 'native_not_covered'
-  | 'undated_users';
+  | 'undated_users'
+  | 'undated_accounts';
 
 /** Origin, availability and freshness of a block of a response. */
 export interface BlockStatus {
@@ -293,6 +314,11 @@ export interface TokenHolding {
   valueUsd: string | null;
   /** Ratio of the priced total with 4 places; `null` when unpriced or the total is zero. */
   share: string | null;
+  /**
+   * The same asset per selected network that holds it: the row adds tokens of the same symbol on
+   * different networks, each a token of its own. `valueUsd` is `null` when unpriced.
+   */
+  networks: Array<{ network: NetworkId; amount: string; valueUsd: string | null }>;
 }
 
 /** Assets held in user wallets, by USD value, from the same snapshot as the TVL. */
@@ -300,6 +326,21 @@ export interface TopTokensBlock extends BlockStatus {
   items: TokenHolding[];
   /** Sum of the priced items; `null` when there is no snapshot. */
   totalUsd: string | null;
+}
+
+/**
+ * Tokens moved by the counted operations of the period, per network and asset: flows, not
+ * balances. `operations` counts transfers plus swaps on their input side; `volumeUsd` is `null`
+ * when an operation of the asset has no USD value. `unavailable` (`not_recorded`) when the build
+ * has no count per asset.
+ */
+export interface TradedTokensBlock extends BlockStatus {
+  items: Array<{
+    network: NetworkId;
+    asset: string;
+    operations: number;
+    volumeUsd: string | null;
+  }>;
 }
 
 /** Users per country, estimated from the calling code of their phone number. */
@@ -360,6 +401,27 @@ export interface AverageFeeBlock extends BlockStatus {
 /** USD volume of the Polymarket product in the range. */
 export interface PolymarketVolumeBlock extends BlockStatus {
   valueUsd: string | null;
+}
+
+/**
+ * Users with a Polymarket account linked, from the counts of the last ingestion run. A linked
+ * account is a Polygon address stored for the user; it proves neither trading nor a fee, so it
+ * never enters the volume or fee figures. The account lives outside the networks of the catalog,
+ * so the counts cover every user whatever the network filter (`scope: all_networks`).
+ */
+export interface PolymarketAccountsBlock extends BlockStatus {
+  scope: 'all_networks';
+  /** Users whose account has a valid Polygon address; `null` when no run counted them. */
+  accounts: number | null;
+  /** Users with an account whose address is missing or not an EVM address; not in `accounts`. */
+  invalidAccounts: number;
+  /** Of `accounts`, accounts without a creation date; they are in no creation window. */
+  undatedAccounts: number;
+  /**
+   * Accounts created inside the period, against the previous period; `null` when no run counted
+   * them. Accounts without a creation date are in neither.
+   */
+  newAccounts: CountMetric | null;
 }
 
 /** Balance of one asset of a master wallet. */
@@ -468,6 +530,7 @@ export interface OverviewResponse {
   valuation: ValuationBlock;
   tvl: TvlBlock;
   topTokens: TopTokensBlock;
+  tradedTokens: TradedTokensBlock;
   topCountries: TopCountriesBlock;
   volumeByProduct: VolumeByProductBlock;
 }
@@ -532,6 +595,7 @@ export interface RevenueResponse {
   valuation: ValuationBlock;
   avgFeePerTransaction: AverageFeeBlock;
   polymarketVolume: PolymarketVolumeBlock;
+  polymarketAccounts: PolymarketAccountsBlock;
   feesByProduct: FeesByProductBlock;
   masterWallets: MasterWalletsBlock;
 }
