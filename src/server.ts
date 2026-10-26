@@ -75,7 +75,10 @@ function ingestionHandle(
           reader: networks.activity(),
           repository,
           prices: env.PRICES_PROVIDER === 'coingecko' ? coingeckoPriceProvider() : null,
-          balances: env.BALANCES_PROVIDER === 'rpc' ? rpcBalanceReader() : null,
+          balances:
+            env.BALANCES_PROVIDER === 'rpc'
+              ? rpcBalanceReader(fetch, Date.now, env.CARDANO_PROVIDER_API_KEY)
+              : null,
           masterWallets: env.MASTER_WALLETS,
           valuation: env.USD_VALUATION,
           clock: () => new Date(),
