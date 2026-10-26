@@ -1729,6 +1729,7 @@ paths:
                       - coverage
                       - series
                       - byNetwork
+                      - lastComplete
                     properties:
                       source:
                         type: string
@@ -1905,6 +1906,21 @@ paths:
                                 - unsupported_provider
                                 - read_incomplete
                                 - null
+                      lastComplete:
+                        anyOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - asOf
+                              - valueUsd
+                            properties:
+                              asOf:
+                                type: string
+                                format: date-time
+                              valueUsd:
+                                type: string
+                                pattern: ^-?\d+\.\d+$
+                          - type: "null"
                   topTokens:
                     type: object
                     additionalProperties: false
