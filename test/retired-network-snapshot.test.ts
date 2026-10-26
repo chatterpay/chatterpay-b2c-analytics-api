@@ -426,7 +426,7 @@ describe('balance collection policy of the analytics', () => {
         if (url === SCROLL_RPC) {
           throw new TypeError('fetch failed');
         }
-        return multicallAnswer(init.body);
+        return multicallAnswer(init.body ?? '');
       },
       () => DAY_TWO.getTime()
     );
@@ -459,7 +459,7 @@ describe('balance collection policy of the analytics', () => {
           clock += 15_000;
           throw new DOMException('The operation timed out.', 'TimeoutError');
         }
-        return multicallAnswer(init.body);
+        return multicallAnswer(init.body ?? '');
       },
       () => clock
     );
