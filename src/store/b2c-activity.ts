@@ -270,8 +270,9 @@ export class MongoB2cActivityReader implements B2cActivityReader {
   }
 
   /**
-   * B2C `enabled` of the catalog networks, read on every run so the balance snapshot follows a
-   * network closed to new B2C operations without a deploy.
+   * B2C `enabled` of the catalog networks, read on every run and recorded with the balance
+   * snapshot for information; it does not decide which networks are read. A network absent from
+   * the map is one the B2C database no longer lists.
    */
   async b2cEnabled(): Promise<Map<string, boolean | null>> {
     const documents = await this.db
