@@ -7,6 +7,7 @@ import type {
   IngestCheckpoints,
   IngestedTransaction,
   IngestedUser,
+  IngestNetworkSettings,
   IngestRepository,
   LiveAggregates,
   NetworkWallets,
@@ -17,8 +18,10 @@ import type {
   UserSignup,
   WalletObservation
 } from '../ingest/types.js';
+import type { NetworkId } from '../metrics/catalog.js';
 import type { IngestRunStatus } from '../metrics/types.js';
 import { connectOrClose } from './connect-retry.js';
+import { COLLECTIONS, NETWORK_SETTINGS_ID } from './mongo-schema.js';
 
 /**
  * Collections of the ingestion in the analytics database. Copies are keyed by the B2C id and
@@ -70,6 +73,12 @@ type NetworkDoc = Omit<ChainInfo, 'family'> &
   SourceStamp & { _id: string; family?: ChainInfo['family'] };
 type PriceDoc = DailyPrice & { _id: string };
 type SnapshotDoc = RunSnapshot & { _id: string };
+/** Fields of the network settings document the ingestion reads; any of them may be absent. */
+interface NetworkSettingsDoc {
+  _id: string;
+  disabledChainIds?: unknown;
+  uncollectedChainIds?: unknown;
+}
 type ObservationDoc = WalletObservation & { _id: string };
 type Stamped<T> = T & { _id: string; builtAt: Date };
 
@@ -82,6 +91,11 @@ export interface MongoIngestRepositoryOptions {
 function strip<T extends { _id: string; builtAt?: Date }>(doc: T): Omit<T, '_id' | 'builtAt'> {
   const { _id, builtAt, ...rest } = doc;
   return rest;
+}
+
+/** Chain ids of a settings field written by an operator; anything but an array reads as none. */
+function chainIdsOf(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String).sort() : [];
 }
 
 /**
@@ -340,6 +354,29 @@ export class MongoIngestRepository implements IngestRepository {
       snapshot,
       { upsert: true }
     );
+  }
+
+  async networkSettings(): Promise<IngestNetworkSettings> {
+    const doc = await this.collection<NetworkSettingsDoc>(COLLECTIONS.settings).findOne({
+      _id: NETWORK_SETTINGS_ID
+    });
+    return {
+      hiddenChainIds: chainIdsOf(doc?.disabledChainIds),
+      uncollectedChainIds: chainIdsOf(doc?.uncollectedChainIds)
+    };
+  }
+
+  async lastBalanceSuccess(): Promise<Map<NetworkId, Date>> {
+    // `reason: null` matches rows stored before the reason was recorded as well.
+    const rows = await this.collection<SnapshotDoc>(INGEST_COLLECTIONS.snapshots)
+      .aggregate<{ _id: NetworkId; at: Date }>([
+        { $match: { 'balances.networks.status': 'complete' } },
+        { $unwind: '$balances.networks' },
+        { $match: { 'balances.networks.status': 'complete', 'balances.networks.reason': null } },
+        { $group: { _id: '$balances.networks.network', at: { $max: '$takenAt' } } }
+      ])
+      .toArray();
+    return new Map(rows.map((row) => [row._id, row.at]));
   }
 
   async walletObservations(): Promise<WalletObservation[]> {
