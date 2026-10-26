@@ -1,18 +1,14 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { requireRoles } from '../auth/principal.js';
 import { ApiError } from '../errors/api-error.js';
-import {
-  NETWORK_ID_PATTERN,
-  type NetworkDefinition,
-  type NetworkFilter,
-  type NetworkId
-} from '../metrics/catalog.js';
+import { NETWORK_ID_PATTERN, type NetworkFilter, type NetworkId } from '../metrics/catalog.js';
 import { buildOverview } from '../metrics/overview.js';
 import { buildRevenue } from '../metrics/revenue.js';
+import type { HiddenAssets } from '../metrics/token-scope.js';
 import type { MetricsRange, UsersGranularity } from '../metrics/types.js';
 import { buildUsers } from '../metrics/users.js';
 import type { Store } from '../store/types.js';
-import { visibleCatalog } from './network-scope.js';
+import { type StatisticsScope, statisticsScope } from './network-scope.js';
 import { arrayOf, errorResponses, object } from './schemas.js';
 
 /** Options of the metrics routes. */
@@ -23,15 +19,23 @@ export interface MetricsRoutesOptions {
   store: Store;
 }
 
-/** Visible networks of each request, resolved once by the pre-handler. */
-const scopes = new WeakMap<FastifyRequest, readonly NetworkDefinition[]>();
+/** Visible networks and hidden tokens of each request, resolved once by the pre-handler. */
+const scopes = new WeakMap<FastifyRequest, StatisticsScope>();
 
-function visibleIds(request: FastifyRequest): readonly NetworkId[] {
-  const visible = scopes.get(request);
-  if (visible === undefined) {
+function scopeOf(request: FastifyRequest): StatisticsScope {
+  const scope = scopes.get(request);
+  if (scope === undefined) {
     throw new Error('Network scope not resolved');
   }
-  return visible.map((network) => network.id);
+  return scope;
+}
+
+function visibleIds(request: FastifyRequest): readonly NetworkId[] {
+  return scopeOf(request).networks.map((network) => network.id);
+}
+
+function hiddenOf(request: FastifyRequest): HiddenAssets {
+  return scopeOf(request).hidden;
 }
 
 const RANGE_ENUM = ['today', 'week', 'month', 'year', 'ytd', 'all'];
@@ -85,6 +89,7 @@ const reason = {
     'not_valued',
     'native_not_covered',
     'undated_users',
+    'undated_accounts',
     null
   ]
 } as const;
@@ -169,9 +174,31 @@ const tvlBlock = block({
 
 const topTokensBlock = block({
   items: arrayOf(
-    object({ asset: { type: 'string' }, amount, valueUsd: nullableDecimal, share: nullableRatio })
+    object({
+      asset: { type: 'string' },
+      amount,
+      valueUsd: nullableDecimal,
+      share: nullableRatio,
+      networks: arrayOf(object({ network, amount, valueUsd: nullableDecimal }))
+    })
   ),
   totalUsd: nullableDecimal
+});
+
+const tradedTokensBlock = block({
+  items: arrayOf(
+    object({ network, asset: { type: 'string' }, operations: count, volumeUsd: nullableDecimal })
+  )
+});
+
+const tokenScope = object({
+  hidden: arrayOf(object({ network, asset: { type: 'string' } })),
+  operationCounts: {
+    type: 'string',
+    enum: ['filtered', 'unfiltered'],
+    description:
+      'unfiltered when the build behind the transaction counts has no count per asset, so they still include the operations of hidden tokens.'
+  }
 });
 
 const topCountriesBlock = block({
@@ -214,6 +241,18 @@ const averageFeeBlock = block({
 });
 
 const polymarketVolumeBlock = block({ valueUsd: nullableDecimal });
+
+const polymarketAccountsBlock = block({
+  scope: {
+    type: 'string',
+    enum: ['all_networks'],
+    description: 'Polymarket accounts are Polygon wallets; the network filter does not apply.'
+  },
+  accounts: { type: ['integer', 'null'], minimum: 0 },
+  invalidAccounts: count,
+  undatedAccounts: count,
+  newAccounts: { anyOf: [countMetric, { type: 'null' }] }
+});
 
 const valuationBlock = block({
   operations: count,
@@ -318,7 +357,7 @@ const usersQuery = {
 } as const;
 
 const overviewResponse = object({
-  meta: meta({ range: { type: 'string', enum: RANGE_ENUM } }),
+  meta: meta({ range: { type: 'string', enum: RANGE_ENUM }, tokenScope }),
   tiles: object({
     volumeUsd: valuedMoneyMetric,
     transactions: countMetric,
@@ -351,6 +390,7 @@ const overviewResponse = object({
   valuation: valuationBlock,
   tvl: tvlBlock,
   topTokens: topTokensBlock,
+  tradedTokens: tradedTokensBlock,
   topCountries: topCountriesBlock,
   volumeByProduct: volumeByProductBlock
 });
@@ -406,7 +446,7 @@ const networksResponse = object({
 });
 
 const revenueResponse = object({
-  meta: meta({ range: { type: 'string', enum: RANGE_ENUM } }),
+  meta: meta({ range: { type: 'string', enum: RANGE_ENUM }, tokenScope }),
   tiles: object({
     feesUsd: valuedMoneyMetric,
     transferFeesUsd: valuedMoneyMetric,
@@ -444,6 +484,7 @@ const revenueResponse = object({
   valuation: valuationBlock,
   avgFeePerTransaction: averageFeeBlock,
   polymarketVolume: polymarketVolumeBlock,
+  polymarketAccounts: polymarketAccountsBlock,
   feesByProduct: feesByProductBlock,
   masterWallets: masterWalletsBlock
 });
@@ -463,7 +504,9 @@ const revenueResponse = object({
  * (tiles, series, breakdowns, comparisons with the previous period and cohorts) and answer 400 as
  * unknown networks when requested by id. The policy is read from the analytics database on every
  * request; when it cannot be read the routes answer 503 instead of serving networks that may be
- * hidden.
+ * hidden. Tokens an admin hid (`/v1/admin/tokens`) leave the money figures, the token blocks and,
+ * when the build counts operations per asset, the transaction counts of Overview and Revenue
+ * (`meta.tokenScope`); Users has no token figure.
  *
  * @param app - Fastify instance (encapsulated by the prefix).
  * @param options - Clock used to anchor the dataset and store of the visibility policy.
@@ -481,7 +524,8 @@ export async function metricsRoutes(
   });
   app.addHook<{ Querystring: { network?: string } }>('preHandler', async (request) => {
     // One read of the policy per request, so every block of a response uses the same networks.
-    const visible = await visibleCatalog(options.store, request);
+    const scope = await statisticsScope(options.store, request);
+    const visible = scope.networks;
     const requested = request.query.network;
     // A hidden network answers exactly like an unknown one, so its data cannot be requested.
     if (
@@ -491,7 +535,7 @@ export async function metricsRoutes(
     ) {
       throw new ApiError(400, 'BAD_REQUEST', 'Unknown network');
     }
-    scopes.set(request, visible);
+    scopes.set(request, scope);
   });
 
   app.get(
@@ -505,7 +549,7 @@ export async function metricsRoutes(
       }
     },
     async (request) => ({
-      networks: (scopes.get(request) ?? []).map(({ id, label, family }) => ({ id, label, family }))
+      networks: scopeOf(request).networks.map(({ id, label, family }) => ({ id, label, family }))
     })
   );
 
@@ -527,7 +571,8 @@ export async function metricsRoutes(
           request.query.network,
           request.query.range,
           options.clock(),
-          visibleIds(request)
+          visibleIds(request),
+          hiddenOf(request)
         )
       )
   );
@@ -573,7 +618,8 @@ export async function metricsRoutes(
           request.query.network,
           request.query.range,
           options.clock(),
-          visibleIds(request)
+          visibleIds(request),
+          hiddenOf(request)
         )
       )
   );
