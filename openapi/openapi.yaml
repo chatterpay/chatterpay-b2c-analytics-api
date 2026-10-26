@@ -1871,6 +1871,7 @@ paths:
                             - share
                             - status
                             - reason
+                            - lastSuccessAt
                           properties:
                             network:
                               type: string
@@ -1901,11 +1902,20 @@ paths:
                                 - string
                               enum:
                                 - b2c_disabled
+                                - collection_off
                                 - source_absent
                                 - no_endpoint
                                 - unsupported_provider
+                                - rpc_failed
+                                - budget_exhausted
+                                - deadline_reached
                                 - read_incomplete
                                 - null
+                            lastSuccessAt:
+                              anyOf:
+                                - type: string
+                                  format: date-time
+                                - type: "null"
                       lastComplete:
                         anyOf:
                           - type: object
@@ -4345,17 +4355,29 @@ paths:
                               additionalProperties: false
                               required:
                                 - network
+                                - chainId
                                 - status
                                 - wallets
                                 - walletsRead
                                 - calls
                                 - failedCalls
                                 - b2cEnabled
+                                - analyticsVisible
+                                - collectBalances
+                                - endpointPresent
+                                - attempted
                                 - reason
                                 - native
+                                - unpricedAssets
+                                - startedAt
+                                - finishedAt
+                                - durationMs
                                 - takenAt
+                                - lastSuccessAt
                               properties:
                                 network:
+                                  type: string
+                                chainId:
                                   type: string
                                 status:
                                   type: string
@@ -4380,15 +4402,35 @@ paths:
                                   type:
                                     - "null"
                                     - boolean
+                                  description: "Informative: whether B2C takes new operations; it does not gate
+                                    reads."
+                                analyticsVisible:
+                                  type: boolean
+                                  description: Analytics visibility; reported only, hidden networks are read as
+                                    well.
+                                collectBalances:
+                                  type: boolean
+                                  description: false when the analytics settings stop the balance reads
+                                    (uncollectedChainIds).
+                                endpointPresent:
+                                  type: boolean
+                                  description: Whether B2C lists an HTTPS endpoint; the URL is never reported.
+                                attempted:
+                                  type: boolean
+                                  description: Whether the balance reads were started.
                                 reason:
                                   type:
                                     - "null"
                                     - string
                                   enum:
                                     - b2c_disabled
+                                    - collection_off
                                     - source_absent
                                     - no_endpoint
                                     - unsupported_provider
+                                    - rpc_failed
+                                    - budget_exhausted
+                                    - deadline_reached
                                     - read_incomplete
                                     - null
                                 native:
@@ -4396,9 +4438,28 @@ paths:
                                   enum:
                                     - included
                                     - not_listed
+                                unpricedAssets:
+                                  type: integer
+                                  minimum: 0
+                                startedAt:
+                                  type: string
+                                  format: date-time
+                                finishedAt:
+                                  type: string
+                                  format: date-time
+                                durationMs:
+                                  type: integer
+                                  minimum: 0
                                 takenAt:
                                   type: string
                                   format: date-time
+                                lastSuccessAt:
+                                  type:
+                                    - "null"
+                                    - string
+                                  format: date-time
+                                  description: Start of the last run that read every user wallet of the network;
+                                    not a current balance.
                           masterWallets:
                             type: integer
                             minimum: 0
