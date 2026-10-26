@@ -9,6 +9,7 @@ import { type IngestionReport, runIngestion } from './ingest/run.js';
 import { failedRunEvent, type IngestRunEvent, ingestRunEvent } from './ingest/run-event.js';
 import { listNetworks, type NetworkDefinition, setNetworks } from './metrics/catalog.js';
 import { resetFactsCaches } from './metrics/facts.js';
+import { setTokens } from './metrics/tokens.js';
 import type { IngestionHandle } from './routes/ingest.js';
 import { B2cNetworkSource, databaseFromUri, mergeCatalog } from './store/b2c-networks.js';
 import { type ConnectAttempt, connectWithRetry } from './store/connect-retry.js';
@@ -117,7 +118,8 @@ function ingestionHandle(
  * succeed or the process does not start. The connections are retried until `STARTUP_CONNECT_MS`
  * after startup. The catalog is the B2C networks plus the networks the analytics database retains
  * for their history. Later reads that fail keep the previous catalog, and so does a read after
- * which no network would be visible.
+ * which no network would be visible. The tokens the admin can hide are the token copies of the
+ * analytics database, retained ones included, read with the catalog.
  *
  * Live metrics are the last aggregate build of the analytics database, loaded at startup, after
  * each ingestion run of this instance and every `METRICS_REFRESH_SECONDS` (another instance may
@@ -167,6 +169,13 @@ async function main(): Promise<void> {
   if (networks !== null) {
     setNetworks(await loadCatalog(networks));
   }
+  // Token copies of the analytics database, retained ones included, for the token policy.
+  const loadTokens = async (): Promise<void> => {
+    if (ingest !== null) {
+      setTokens(await ingest.tokens());
+    }
+  };
+  await loadTokens();
 
   let loadedAt: Date | null = null;
   const refreshLive = async (): Promise<void> => {
@@ -218,6 +227,7 @@ async function main(): Promise<void> {
               // A run can retain a network the B2C database dropped; the catalog follows at once.
               try {
                 await applyCatalog(await loadCatalog(networks));
+                await loadTokens();
                 const catalog = listNetworks();
                 const visible = visibleNetworks(catalog, await store.networkVisibility()).length;
                 app.log.info(
@@ -263,6 +273,7 @@ async function main(): Promise<void> {
       : setInterval(() => {
           loadCatalog(networks)
             .then(applyCatalog)
+            .then(loadTokens)
             .catch((error: unknown) => {
               app.log.warn({ err: error }, 'network catalog refresh failed');
             });
