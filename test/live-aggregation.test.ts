@@ -158,6 +158,15 @@ describe('aggregateActivity', () => {
     expect(facts.newUsers).toBe(1);
   });
 
+  it('counts the operations per asset, a swap under its input asset', () => {
+    const source = liveSourceFrom(build().aggregates);
+    const facts = source.facts('base-sepolia', dayWindow(DAY, DAY));
+
+    expect(facts.transfersByAsset).toEqual({ USDT: 1, WETH: 1 });
+    expect(facts.swapsByAsset).toEqual({ WETH: 1, USDC: 1 });
+    expect(source.countsByAsset()).toBe(true);
+  });
+
   it('cuts windows by hour', () => {
     const source = liveSourceFrom(build().aggregates);
     const tenOClock = { start: { day: DAY, hour: 10 }, end: { day: DAY, hour: 10 } };
