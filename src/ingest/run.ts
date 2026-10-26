@@ -14,6 +14,7 @@ import type {
   DailyPrice,
   IngestedUser,
   IngestRepository,
+  PolymarketAccountCounts,
   PriceProvider,
   TokenInfo,
   TransactionCursor,
@@ -108,6 +109,8 @@ export interface IngestionReport {
       newWallets: number;
       /** Users with a wallet on a catalog network, counted per country. */
       countedInCountries: number;
+      /** Users with a Polymarket account with a valid address. */
+      polymarketAccounts: number;
     };
     catalog: {
       tokens: number;
@@ -203,7 +206,46 @@ function countCountries(
   return { rows: [...counts.values()], combinations: [...combinations.values()], counted };
 }
 
-/** Copy of a user without the country, the only fields the analytics database keeps. */
+/**
+ * Counts the Polymarket accounts of the users: valid ones (an EVM `polygon_address`), invalid
+ * ones and, of the valid ones, how many were created in each hour. A user has at most one account,
+ * so each counts once whatever its wallets.
+ */
+function countPolymarket(users: readonly B2cUserRecord[]): PolymarketAccountCounts {
+  const perHour = new Map<number, number>();
+  const counts: PolymarketAccountCounts = {
+    accounts: 0,
+    invalid: 0,
+    undated: 0,
+    createdPerHour: []
+  };
+  for (const user of users) {
+    const account = user.polymarket ?? null;
+    if (account === null) {
+      continue;
+    }
+    if (!account.validAddress) {
+      counts.invalid += 1;
+      continue;
+    }
+    counts.accounts += 1;
+    if (account.createdAt === null) {
+      counts.undated += 1;
+      continue;
+    }
+    const hour = Math.floor(account.createdAt.getTime() / HOUR_MS);
+    perHour.set(hour, (perHour.get(hour) ?? 0) + 1);
+  }
+  counts.createdPerHour = [...perHour.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([hour, accounts]) => ({ hour, accounts }));
+  return counts;
+}
+
+/**
+ * Copy of a user without the country and the Polymarket account, the only fields the analytics
+ * database keeps per user.
+ */
 function stripped(user: B2cUserRecord): IngestedUser {
   return { id: user.id, createdAt: user.createdAt, wallets: user.wallets };
 }
@@ -236,11 +278,11 @@ function pricedSymbols(
  *    status changes.
  * 4. Replaces the copies of the users (id, signup date, wallets), the tokens and the networks,
  *    whatever their B2C `enabled` (networks and tokens the B2C database dropped are kept while
- *    copied rows use them), counts users per country of their phone number, and records the
- *    wallets seen for the first time.
+ *    copied rows use them), counts users per country of their phone number and Polymarket
+ *    accounts per creation hour, and records the wallets seen for the first time.
  * 5. Requests at most one provider price snapshot per UTC day, within `maxProviderCallsPerRun`.
  * 6. Reads the balances of the user and master wallets, within `maxBalanceCallsPerRun`, and stores
- *    the run snapshot (balance sums and country counts). Every network with an endpoint is read,
+ *    the run snapshot (balance sums, country counts and Polymarket account counts). Every network with an endpoint is read,
  *    whatever its B2C `enabled` and its analytics visibility; networks whose balance reads the
  *    analytics settings stop and networks only the analytics database retains get a row without
  *    any balance request.
@@ -276,7 +318,7 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
     },
     sources: {
       transactions: { read: 0, revisited: 0, lastId: null },
-      users: { read: 0, newWallets: 0, countedInCountries: 0 },
+      users: { read: 0, newWallets: 0, countedInCountries: 0, polymarketAccounts: 0 },
       catalog: { tokens: 0, networks: 0, retainedTokens: 0, retainedNetworks: 0 },
       prices: { provider: deps.prices?.name ?? null, calls: 0, prices: 0, failed: false },
       balances: { status: 'disabled', calls: 0, failedCalls: 0, networks: [], masterWallets: 0 }
@@ -376,6 +418,8 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
     ];
     const countries = countCountries(users, catalogChains);
     report.sources.users.countedInCountries = countries.counted;
+    const polymarket = countPolymarket(users);
+    report.sources.users.polymarketAccounts = polymarket.accounts;
 
     // Wallets of every network are observed, so a network added to the catalog later already has
     // the first observation of its wallets.
@@ -490,7 +534,8 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
       takenAt: startedAt,
       balances,
       countries: countries.rows,
-      countryCombinations: countries.combinations
+      countryCombinations: countries.combinations,
+      polymarket
     });
     lap('snapshot');
 
