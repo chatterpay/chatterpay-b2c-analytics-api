@@ -251,8 +251,9 @@ async function readCardano(
  * native coin once per address. A network row records whether its user wallets were read with the
  * native coin (`native`). A wallet is counted only when all its balances were read, so a failed
  * batch or an exhausted budget lowers the coverage instead of understating a total. A network
- * without endpoint, or with a provider the reader does not speak, is `unsupported`. Values use the price of the snapshot day; an asset without one has no value,
- * and with `valuation: none` no asset has one.
+ * without endpoint, or with a provider the reader does not speak, is `unsupported`. Values use the
+ * price of the snapshot day; an asset without one has no value, and with `valuation: none` no
+ * asset has one.
  *
  * No request is sent for a network whose B2C document has `enabled: false` or that the B2C
  * database no longer lists, whatever its endpoint: it is `unsupported` with the reason, and its
