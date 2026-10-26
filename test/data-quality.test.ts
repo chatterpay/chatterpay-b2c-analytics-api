@@ -24,6 +24,7 @@ import {
   FakeBalanceReader,
   FakeReader,
   MemoryIngestRepository,
+  RecordingBalanceReader,
   TOKEN_ADDRESSES,
   TOKENS,
   transaction
@@ -429,7 +430,8 @@ describe('price identity', () => {
         ['84532', true],
         [SCROLL_CHAIN, true]
       ]),
-      budget: { remaining: 10, deadline: Number.MAX_SAFE_INTEGER, used: 0, failed: 0 }
+      budget: { remaining: 10, deadline: Number.MAX_SAFE_INTEGER, used: 0, failed: 0 },
+      takenAt: NOW
     });
 
     expect(snapshot.holdings).toEqual([
@@ -621,7 +623,8 @@ describe('native coin coverage of the TVL', () => {
       masterWallets: [{ network: 'base-sepolia', address: '0xUser1', role: 'Backend signer' }],
       prices: new Map([['ETH', 3000]]),
       b2cEnabled: new Map([['84532', true]]),
-      budget: { remaining: 10, deadline: Number.MAX_SAFE_INTEGER, used: 0, failed: 0 }
+      budget: { remaining: 10, deadline: Number.MAX_SAFE_INTEGER, used: 0, failed: 0 },
+      takenAt: NOW
     });
 
     expect(snapshot.holdings).toEqual([
@@ -639,7 +642,7 @@ describe('native coin coverage of the TVL', () => {
 
     async function snapshotOf(
       reader: FakeBalanceReader,
-      overrides: { signer?: string; enabled?: boolean } = {}
+      overrides: { signer?: string; enabled?: boolean; named?: boolean } = {}
     ) {
       const { takeBalanceSnapshot } = await import('../src/ingest/snapshot.js');
       const budget = { remaining: 10, deadline: Number.MAX_SAFE_INTEGER, used: 0, failed: 0 };
@@ -654,12 +657,13 @@ describe('native coin coverage of the TVL', () => {
             network: 'base-sepolia',
             address: overrides.signer ?? SIGNER,
             role: 'Backend signer',
-            nativeSymbol: 'ETH'
+            ...(overrides.named === false ? {} : { nativeSymbol: 'ETH' })
           }
         ],
         prices: new Map([['ETH', 3000]]),
         b2cEnabled: new Map([['84532', overrides.enabled ?? true]]),
-        budget
+        budget,
+        takenAt: NOW
       });
       return { ...result, budget };
     }
@@ -750,19 +754,47 @@ describe('native coin coverage of the TVL', () => {
       ]);
     });
 
-    it('sends no request for the network once B2C disables it', async () => {
-      const reader = new FakeBalanceReader({ '0xuser1|native': 1n });
+    it('reads the network, native coin included, once B2C disables it', async () => {
+      const reader = new FakeBalanceReader({ '0xuser1|native': 1_000_000_000_000_000_000n });
 
       const { snapshot, networks, budget } = await snapshotOf(reader, { enabled: false });
 
-      expect(reader.requests).toBe(0);
-      expect(budget.used).toBe(0);
+      expect(reader.requests).toBe(1);
+      expect(budget.used).toBe(1);
       expect(networks[0]).toMatchObject({
-        status: 'unsupported',
-        calls: 0,
-        reason: 'b2c_disabled'
+        status: 'complete',
+        calls: 1,
+        b2cEnabled: false,
+        reason: null,
+        native: 'included'
       });
-      expect(snapshot.holdings).toEqual([]);
+      expect(snapshot.holdings).toEqual([
+        { network: 'base-sepolia', asset: 'ETH', amount: '1.0', valueCents: 300_000 }
+      ]);
+    });
+
+    it('reads no native coin of the user wallets when the master wallet states no symbol', async () => {
+      const reader = new FakeBalanceReader({
+        '0xuser1|native': 1_000_000_000_000_000_000n,
+        [`${SIGNER}|native`]: 2_000_000_000_000_000_000n
+      });
+      const queried: string[] = [];
+      const evm = reader.evm.bind(reader);
+      reader.evm = async (url, queries, budget) => {
+        queried.push(...queries.map((query) => `${query.holder}|${query.token ?? 'native'}`));
+        return evm(url, queries, budget);
+      };
+
+      const { snapshot, networks } = await snapshotOf(reader, { named: false });
+
+      // An EVM network is not assumed to use ETH: the users are read without a native coin.
+      expect(networks[0]).toMatchObject({ status: 'complete', native: 'not_listed' });
+      expect(queried).not.toContain('0xuser1|native');
+      expect(snapshot.holdings.some((holding) => holding.asset === 'ETH')).toBe(false);
+      // The master wallet keeps its own balance, under the default symbol of its configuration.
+      expect(snapshot.masterWallets[0]?.balances).toEqual([
+        { asset: 'ETH', amount: '2.0', valueCents: 600_000 }
+      ]);
     });
   });
 });
@@ -893,6 +925,89 @@ describe('ingestion run event', () => {
       'complete'
     ]);
     expect(text).not.toMatch(/0x|addr_|https?:|rpc|\+549/i);
+  });
+
+  it('reports each network with its policy, read and coverage, and no endpoint or address', async () => {
+    const at = new Date('2026-10-24T03:00:00.000Z');
+    const users: IngestedUser[] = [
+      ...USERS,
+      {
+        id: 'u3',
+        createdAt: null,
+        wallets: [{ chainId: '900000000001', address: 'addr_test1qpuserwallet' }]
+      }
+    ];
+    const repository = new MemoryIngestRepository();
+    repository.settings = { hiddenChainIds: ['84532'], uncollectedChainIds: ['900000000001'] };
+    const report = await runIngestion({
+      reader: new FakeReader([], users),
+      repository,
+      prices: null,
+      // The Base Sepolia node answers nothing.
+      balances: new RecordingBalanceReader(new Set([ENDPOINTS[0]?.url ?? ''])),
+      masterWallets: [],
+      clock: () => at,
+      options: {
+        batchSize: 10,
+        maxTransactionsPerRun: 100,
+        revisitHours: 0,
+        maxProviderCallsPerRun: 0,
+        maxBalanceCallsPerRun: 10,
+        maxRunMs: 60_000,
+        lockTtlMs: 120_000
+      },
+      owner: 'test-run'
+    });
+
+    const event = ingestRunEvent(report, null);
+    const shared = {
+      startedAt: at.toISOString(),
+      finishedAt: at.toISOString(),
+      durationMs: 0,
+      takenAt: at.toISOString(),
+      lastSuccessAt: null,
+      unpricedAssets: 0
+    };
+
+    expect(event.status).toBe('completed');
+    expect(event.balances).toMatchObject({ status: 'failed', calls: 1, failedCalls: 1 });
+    expect(event.balances?.networks).toEqual([
+      {
+        network: 'base-sepolia',
+        chainId: '84532',
+        status: 'failed',
+        reason: 'rpc_failed',
+        b2cEnabled: true,
+        analyticsVisible: false,
+        collectBalances: true,
+        endpointPresent: true,
+        attempted: true,
+        wallets: 2,
+        walletsRead: 0,
+        calls: 1,
+        failedCalls: 1,
+        native: 'not_listed',
+        ...shared
+      },
+      {
+        network: 'cardano-preprod',
+        chainId: '900000000001',
+        status: 'unsupported',
+        reason: 'collection_off',
+        b2cEnabled: true,
+        analyticsVisible: true,
+        collectBalances: false,
+        endpointPresent: true,
+        attempted: false,
+        wallets: 1,
+        walletsRead: 0,
+        calls: 0,
+        failedCalls: 0,
+        native: 'included',
+        ...shared
+      }
+    ]);
+    expect(JSON.stringify(event)).not.toMatch(/0x|addr_|https?:|key-in-path|koios|\+549/i);
   });
 
   it('records only the class of the error of a failed run', () => {
