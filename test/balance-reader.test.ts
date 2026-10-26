@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeAggregate3,
   encodeAggregate3,
+  isBlockfrost,
   KOIOS_BATCH_SIZE,
   MULTICALL_BATCH_SIZE,
   MULTICALL3_ADDRESS,
@@ -38,14 +39,24 @@ function budget(remaining: number, deadline = NOW + 60_000): CallBudget {
 
 interface Sent {
   url: string;
+  method: string;
+  headers: Record<string, string>;
   body: { params?: Array<{ data?: string }>; _addresses?: string[] };
 }
 
 /** Fetch fake: `answer` receives each request in order and returns status and JSON body. */
 function fakeFetch(answer: (sent: Sent, index: number) => { status: number; json: unknown }) {
   const sent: Sent[] = [];
-  const impl = async (url: string, init: { body: string }) => {
-    const request = { url, body: JSON.parse(init.body) as Sent['body'] };
+  const impl = async (
+    url: string,
+    init: { method: string; headers: Record<string, string>; body?: string }
+  ) => {
+    const request = {
+      url,
+      method: init.method,
+      headers: init.headers,
+      body: (init.body === undefined ? {} : JSON.parse(init.body)) as Sent['body']
+    };
     sent.push(request);
     const { status, json } = answer(request, sent.length - 1);
     return new Response(JSON.stringify(json), { status });
@@ -267,10 +278,67 @@ describe('rpcBalanceReader.cardano', () => {
     expect(spent).toMatchObject({ used: 2, failed: 1 });
   });
 
-  it('reads Koios endpoints only', () => {
-    const reader = rpcBalanceReader();
+  it('reads Blockfrost only with a project key, telling the provider by its host', () => {
+    const withoutKey = rpcBalanceReader();
+    const withKey = rpcBalanceReader(fetch, Date.now, 'project-key');
 
-    expect(reader.supportsCardano('https://preprod.koios.rest/api/v1')).toBe(true);
-    expect(reader.supportsCardano('https://cardano-preprod.blockfrost.io/api/v0')).toBe(false);
+    expect(withoutKey.supportsCardano('https://preprod.koios.rest/api/v1')).toBe(true);
+    expect(withoutKey.supportsCardano('https://cardano-preprod.blockfrost.io/api/v0')).toBe(false);
+    expect(withKey.supportsCardano('https://cardano-preprod.blockfrost.io/api/v0')).toBe(true);
+    expect(isBlockfrost('https://koios.test/api/v1?via=blockfrost')).toBe(false);
+  });
+
+  it('reads each address from Blockfrost with the project key, an unseen address as empty', async () => {
+    const fetch = fakeFetch((request) =>
+      request.url.endsWith('/addr_new')
+        ? { status: 404, json: { status_code: 404 } }
+        : {
+            status: 200,
+            json: {
+              amount: [
+                { unit: 'lovelace', quantity: '2500000' },
+                { unit: `${UNIT_POLICY}5553`, quantity: '7' }
+              ]
+            }
+          }
+    );
+    const spent = budget(5);
+
+    const holdings = await rpcBalanceReader(fetch.impl, () => NOW, 'project-key').cardano(
+      'https://cardano-preprod.blockfrost.io/api/v0/',
+      [ADDRESS, 'addr_new'],
+      spent
+    );
+
+    expect(fetch.sent.map((request) => [request.method, request.url])).toEqual([
+      ['GET', `https://cardano-preprod.blockfrost.io/api/v0/addresses/${ADDRESS}`],
+      ['GET', 'https://cardano-preprod.blockfrost.io/api/v0/addresses/addr_new']
+    ]);
+    expect(fetch.sent[0]?.headers.project_id).toBe('project-key');
+    expect(holdings.get(ADDRESS)?.lovelace).toBe(2_500_000n);
+    expect(holdings.get(ADDRESS)?.assets.get(`${UNIT_POLICY}5553`)).toBe(7n);
+    expect(holdings.get('addr_new')).toEqual({ lovelace: 0n, assets: new Map() });
+    expect(spent).toMatchObject({ used: 2, failed: 0 });
+  });
+
+  it('leaves Blockfrost addresses unread after two failures in a row and without a key', async () => {
+    const fetch = fakeFetch(() => ({ status: 403, json: {} }));
+    const spent = budget(5);
+
+    const failed = await rpcBalanceReader(fetch.impl, () => NOW, 'bad-key').cardano(
+      'https://cardano-preprod.blockfrost.io/api/v0',
+      [ADDRESS, 'addr_b', 'addr_c'],
+      spent
+    );
+    const keyless = await rpcBalanceReader(fetch.impl, () => NOW).cardano(
+      'https://cardano-preprod.blockfrost.io/api/v0',
+      [ADDRESS],
+      spent
+    );
+
+    expect(failed.size).toBe(0);
+    expect(keyless.size).toBe(0);
+    expect(fetch.sent).toHaveLength(2);
+    expect(spent).toMatchObject({ used: 2, failed: 2 });
   });
 });
