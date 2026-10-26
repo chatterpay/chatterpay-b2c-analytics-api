@@ -1,13 +1,18 @@
+import type { TimeWindow } from './calendar.js';
+import type { NetworkId } from './catalog.js';
 import { shareOf, tenThousandthsToUsd } from './decimal.js';
 import { type Facts, sumAssets } from './facts.js';
-import { centsToUsd, changeRatio } from './format.js';
-import { liveAsOf, sourceFor } from './sources.js';
+import { centsToUsd, changeRatio, countMetric } from './format.js';
+import type { ResolvedRange } from './ranges.js';
+import { liveAsOf, snapshotsFor, sourceFor } from './sources.js';
 import type {
   Availability,
   AverageFeeBlock,
   BlockStatus,
   FeesByProductBlock,
+  PolymarketAccountsBlock,
   PolymarketVolumeBlock,
+  TradedTokensBlock,
   UnavailableReason,
   VolumeByProductBlock
 } from './types.js';
@@ -235,4 +240,128 @@ export function buildAverageFee(
  */
 export function buildPolymarketVolume(): PolymarketVolumeBlock {
   return { ...activityStatus('unavailable'), valueUsd: null };
+}
+
+/**
+ * Builds the most traded tokens: counted transfers and swaps per network and asset in the range, a
+ * swap under its input asset, by operations descending. `volumeUsd` is the transfer plus swap
+ * volume of the asset, `null` when an operation of it has no USD value; the block is then
+ * `partial` (`unpriced_assets`). Balances are a different figure: see Top Tokens. A build without
+ * the operations per asset (builds stored before they were counted, synthetic data) answers
+ * `unavailable` (`not_recorded`) instead of ranking by volume.
+ *
+ * @param items - Facts of each selected network over the range, hidden tokens already left out.
+ * @param countsByAsset - Whether the source counts operations per asset.
+ * @returns The block.
+ */
+export function buildTradedTokens(
+  items: ReadonlyArray<{ network: NetworkId; facts: Facts }>,
+  countsByAsset: boolean
+): TradedTokensBlock {
+  const status = {
+    source: sourceFor('activity').kind,
+    asOf: liveAsOf('activity')
+  };
+  if (!countsByAsset) {
+    return { ...status, availability: 'unavailable', reason: 'not_recorded', items: [] };
+  }
+  const order = new Map(items.map((item, index) => [item.network, index]));
+  const rows = items.flatMap(({ network, facts }) => {
+    const transfers = facts.transfersByAsset ?? {};
+    const swaps = facts.swapsByAsset ?? {};
+    return [...new Set([...Object.keys(transfers), ...Object.keys(swaps)])].map((asset) => {
+      const unpriced =
+        (facts.unpriced.transferVolume[asset] ?? 0) + (facts.unpriced.swapVolume[asset] ?? 0);
+      const cents = (facts.transferVolume[asset] ?? 0) + (facts.swapVolume[asset] ?? 0);
+      return {
+        network,
+        asset,
+        operations: (transfers[asset] ?? 0) + (swaps[asset] ?? 0),
+        volumeUsd: unpriced > 0 ? null : centsToUsd(cents)
+      };
+    });
+  });
+  const counted = rows
+    .filter((row) => row.operations > 0)
+    .sort(
+      (left, right) =>
+        right.operations - left.operations ||
+        (order.get(left.network) ?? 0) - (order.get(right.network) ?? 0) ||
+        left.asset.localeCompare(right.asset)
+    );
+  const unpriced = counted.some((row) => row.volumeUsd === null);
+  return {
+    ...status,
+    availability: unpriced ? 'partial' : 'available',
+    reason: unpriced ? 'unpriced_assets' : null,
+    items: counted
+  };
+}
+
+function hourSpan(window: TimeWindow): { first: number; last: number } {
+  return {
+    first: window.start.day * 24 + window.start.hour,
+    last: window.end.day * 24 + window.end.hour
+  };
+}
+
+function createdIn(
+  perHour: ReadonlyArray<{ hour: number; accounts: number }>,
+  window: TimeWindow
+): number {
+  const { first, last } = hourSpan(window);
+  return perHour.reduce(
+    (sum, item) => sum + (item.hour >= first && item.hour <= last ? item.accounts : 0),
+    0
+  );
+}
+
+/**
+ * Builds the Polymarket accounts block from the last ingestion run: users whose B2C document has a
+ * `polymarket_account` with a valid Polygon address. An account is a Polygon wallet outside the
+ * networks of the catalog, so the counts cover every user whatever the network filter
+ * (`scope: all_networks`). Accounts are not volume: orders keep the amount requested and no
+ * executed amount or fee, so Polymarket volume and fees stay `not_recorded`. `newAccounts`
+ * counts creation dates inside the period and the previous one; accounts without a creation date
+ * leave the block `partial` (`undated_accounts`). No address is exposed.
+ *
+ * @param resolved - Range windows.
+ * @param now - Current hour, in hours since 1970-01-01T00:00Z.
+ * @returns The block; `unavailable` (`no_snapshot`) when no run counted the accounts.
+ */
+export function buildPolymarketAccounts(
+  resolved: ResolvedRange,
+  now: number
+): PolymarketAccountsBlock {
+  const source = snapshotsFor('countries');
+  const run = source.latestRun(now);
+  const counts = run?.polymarket;
+  if (run === null || counts === undefined) {
+    return {
+      source: source.kind,
+      availability: 'unavailable',
+      reason: 'no_snapshot',
+      asOf: null,
+      scope: 'all_networks',
+      accounts: null,
+      invalidAccounts: 0,
+      undatedAccounts: 0,
+      newAccounts: null
+    };
+  }
+  const previous = resolved.previous;
+  return {
+    source: source.kind,
+    availability: counts.undated > 0 ? 'partial' : 'available',
+    reason: counts.undated > 0 ? 'undated_accounts' : null,
+    asOf: source.kind === 'live' ? run.takenAt.toISOString() : null,
+    scope: 'all_networks',
+    accounts: counts.accounts,
+    invalidAccounts: counts.invalid,
+    undatedAccounts: counts.undated,
+    newAccounts: countMetric(
+      createdIn(counts.createdPerHour, resolved.current),
+      previous === null ? null : createdIn(counts.createdPerHour, previous)
+    )
+  };
 }
