@@ -21,7 +21,10 @@ export interface MasterWalletConfig {
   address: string;
   /** Role shown with the wallet, such as `Backend signer`. */
   role: string;
-  /** Symbol of the native coin on EVM networks; `ETH` when absent. */
+  /**
+   * Symbol of the native coin on EVM networks. The balance of the wallet itself takes `ETH` when
+   * absent; the user wallets of the network are read with the native coin only when it is stated.
+   */
   nativeSymbol?: string | undefined;
 }
 
@@ -38,20 +41,38 @@ export interface SnapshotInput {
   /**
    * B2C `enabled` by chain id of the networks the B2C database lists; `null` when the document has
    * no boolean `enabled`. A chain of `chains` absent from it is a network the B2C database dropped.
+   * The value is recorded, never used to decide what is read.
    */
   b2cEnabled: ReadonlyMap<string, boolean | null>;
+  /** Chain ids whose balances the analytics settings do not read; none when omitted. */
+  uncollected?: ReadonlySet<string>;
   budget: CallBudget;
   /** `none` stores every balance without a USD value; `market` by default. */
   valuation?: UsdValuation;
+  /** Instant of the snapshot, the `lastSuccessAt` of the networks it reads in full. */
+  takenAt: Date;
+  /** `lastSuccessAt` of earlier runs by network, kept by a network not read in full now. */
+  lastSuccess?: ReadonlyMap<NetworkId, Date>;
+  /** Current epoch milliseconds, for the budget deadline and the duration per network. */
+  now?: () => number;
 }
 
-/** Read of one network with every field recorded. */
-export type NetworkRead = Required<SnapshotNetwork>;
+/** Read of one network with every stored field, plus the fields only the run report carries. */
+export type NetworkRead = Required<SnapshotNetwork> & {
+  chainId: string;
+  /** Whether B2C lists an HTTPS endpoint for the network; the URL itself is never reported. */
+  endpointPresent: boolean;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  /** Assets held by the user wallets of the network without a USD value. */
+  unpricedAssets: number;
+};
 
 /** Result of {@link takeBalanceSnapshot}. */
 export interface SnapshotResult {
   snapshot: BalanceSnapshot;
-  /** The same rows as `snapshot.networks`, typed with every field. */
+  /** The rows of `snapshot.networks`, typed with every field and the report-only ones. */
   networks: NetworkRead[];
   /** `complete` when every wallet was read, `failed` when none was, `partial` otherwise. */
   status: 'complete' | 'partial' | 'failed';
@@ -117,19 +138,14 @@ function evmNative(tokens: readonly TokenInfo[], chainId: string): Asset | null 
 
 /**
  * Native coin of an EVM chain from the analytics configuration, for a B2C token list that does not
- * carry it: the coin of the first master wallet configured for the network (`nativeSymbol`, `ETH`
- * by default), read in wei like the listed one. `null` without a master wallet on the network.
+ * carry it: the `nativeSymbol` of the first master wallet of the network that states one, read in
+ * wei like the listed one. `null` when none states one: an EVM network is not assumed to use ETH.
  */
 function configuredNative(masters: readonly MasterWalletConfig[]): Asset | null {
-  const wallet = masters[0];
-  return wallet === undefined
+  const symbol = masters.find((wallet) => wallet.nativeSymbol !== undefined)?.nativeSymbol;
+  return symbol === undefined
     ? null
-    : {
-        symbol: wallet.nativeSymbol ?? 'ETH',
-        stable: false,
-        decimals: EVM_NATIVE_DECIMALS,
-        key: null
-      };
+    : { symbol, stable: false, decimals: EVM_NATIVE_DECIMALS, key: null };
 }
 
 /** ADA plus the native assets of a Cardano chain listed in the B2C token list. */
@@ -184,6 +200,34 @@ function explorerAddressUrl(explorer: string, address: string): string | null {
 
 function statusOf(wallets: number, read: number): SnapshotNetwork['status'] {
   return read === wallets ? 'complete' : read === 0 ? 'failed' : 'partial';
+}
+
+/**
+ * Why a network whose reads were started left wallets unread. A node that answered none of its
+ * requests is `rpc_failed` even when the budget ran out after it; otherwise a spent budget or a
+ * passed deadline names the limit that stopped the reads.
+ */
+function unreadReason(
+  budget: CallBudget,
+  calls: number,
+  failed: number,
+  read: number,
+  now: number
+): NetworkReadReason {
+  if (read === 0 && calls > 0 && failed === calls) {
+    return 'rpc_failed';
+  }
+  if (budget.remaining <= 0) {
+    return 'budget_exhausted';
+  }
+  return now >= budget.deadline ? 'deadline_reached' : 'read_incomplete';
+}
+
+/** The fields of a network read that the snapshot stores. */
+function storedRow(row: NetworkRead): SnapshotNetwork {
+  const { chainId, endpointPresent, startedAt, finishedAt, durationMs, unpricedAssets, ...stored } =
+    row;
+  return stored;
 }
 
 /** Balances per wallet, keyed by asset index, for the wallets that were read completely. */
@@ -244,34 +288,41 @@ async function readCardano(
  * Reads the balances of every user wallet and master wallet of the catalog networks, once, and
  * sums the user wallets per network and asset. Per-wallet balances are not kept.
  *
- * User wallets hold the assets of the B2C token list (ERC-20 tokens with a contract on EVM, plus
- * the native coin when the list carries it or, failing that, when a master wallet of the network
- * names it; ADA and the listed native assets on Cardano); master wallets always hold the native
- * coin. Every address is read once, a master wallet that is also a user wallet included, and the
- * native coin once per address. A network row records whether its user wallets were read with the
- * native coin (`native`). A wallet is counted only when all its balances were read, so a failed
- * batch or an exhausted budget lowers the coverage instead of understating a total. A network
- * without endpoint, or with a provider the reader does not speak, is `unsupported`. Values use the
- * price of the snapshot day; an asset without one has no value, and with `valuation: none` no
- * asset has one.
+ * User wallets hold the assets of the B2C token list, tokens with `enabled: false` included
+ * (ERC-20 tokens with a contract on EVM, plus the native coin when the list carries it or, failing
+ * that, when a master wallet of the network states its `nativeSymbol`; ADA and the listed native
+ * assets on Cardano); master wallets always hold the native coin, and their balances never count
+ * in the user totals. Every address is read once, a master wallet that is also a user wallet
+ * included, and the native coin once per address. A network row records whether its user wallets
+ * were read with the native coin (`native`). A wallet is counted only when all its balances were
+ * read, so a failed batch or an exhausted budget lowers the coverage instead of understating a
+ * total. A network without endpoint, or with a provider the reader does not speak, is
+ * `unsupported`. Values use the price of the snapshot day; an asset without one has no value, and
+ * with `valuation: none` no asset has one.
  *
- * No request is sent for a network whose B2C document has `enabled: false` or that the B2C
- * database no longer lists, whatever its endpoint: it is `unsupported` with the reason, and its
- * earlier snapshots stay as they were. A document without a boolean `enabled` is read like an
- * enabled one, because nothing in it tells a retired network from an active one; its row carries
- * `b2cEnabled: null`.
+ * B2C `enabled` plays no part: a network closed to new B2C operations is read through its endpoint
+ * like any other, and its row records `b2cEnabled`. No request is sent for a network in
+ * `uncollected` (`collection_off`) or that the B2C database no longer lists (`source_absent`,
+ * whatever endpoint is passed): it is `unsupported` with the reason, and its earlier snapshots stay
+ * as they were. A network whose reads were started and left wallets unread records the cause:
+ * `rpc_failed`, `budget_exhausted`, `deadline_reached` or `read_incomplete`. Networks are read one
+ * after the other within the shared budget; the reader bounds the requests a failing node takes.
+ * `lastSuccessAt` is `takenAt` for a network read in full and its earlier value otherwise.
  *
- * @param input - Reader, endpoints, catalog, users, master wallets, prices, B2C status and budget.
+ * @param input - Reader, endpoints, catalog, users, master wallets, prices, B2C status, settings,
+ *   budget and instant.
  * @returns The snapshot and its overall status.
  */
 export async function takeBalanceSnapshot(input: SnapshotInput): Promise<SnapshotResult> {
   const valuation = input.valuation ?? 'market';
+  const now = input.now ?? Date.now;
   const endpoints = new Map(input.endpoints.map((endpoint) => [endpoint.chainId, endpoint]));
   const networks: NetworkRead[] = [];
   const holdings: SnapshotHolding[] = [];
   const masterWallets: MasterWalletReading[] = [];
 
   for (const chain of input.chains) {
+    const startedAt = now();
     const endpoint = endpoints.get(chain.chainId);
     const evm = endpoint?.family !== 'cardano';
     const normalize = (address: string): string => (evm ? address.toLowerCase() : address);
@@ -287,10 +338,11 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
     const masters = input.masterWallets.filter((wallet) => wallet.network === chain.network);
     const listed = input.b2cEnabled.has(chain.chainId);
     const b2cEnabled = input.b2cEnabled.get(chain.chainId) ?? null;
-    const skipped: NetworkReadReason | null = !listed
-      ? 'source_absent'
-      : b2cEnabled === false
-        ? 'b2c_disabled'
+    const collectBalances = input.uncollected?.has(chain.chainId) !== true;
+    const skipped: NetworkReadReason | null = !collectBalances
+      ? 'collection_off'
+      : !listed
+        ? 'source_absent'
         : null;
     const supported =
       skipped === null &&
@@ -328,6 +380,9 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
     }
 
     const read = holders.filter((holder) => balances.has(holder));
+    const calls = input.budget.used - callsBefore;
+    const failedCalls = input.budget.failed - failedBefore;
+    const finishedAt = now();
     const reason: NetworkReadReason | null =
       skipped ??
       (endpoint === undefined
@@ -335,34 +390,47 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
         : !supported
           ? 'unsupported_provider'
           : read.length < holders.length
-            ? 'read_incomplete'
+            ? unreadReason(input.budget, calls, failedCalls, read.length, finishedAt)
             : null);
+    const held = assets.flatMap((asset, index): SnapshotHolding[] => {
+      let raw = 0n;
+      for (const holder of read) {
+        raw += balances.get(holder)?.[index] ?? 0n;
+      }
+      return raw > 0n
+        ? [
+            {
+              network: chain.network,
+              asset: asset.symbol,
+              amount: formatUnits(raw, asset.decimals),
+              valueCents: centsOf(raw, asset, input.prices, valuation)
+            }
+          ]
+        : [];
+    });
+    holdings.push(...held);
     networks.push({
       network: chain.network,
+      chainId: chain.chainId,
       // The status describes the user wallets; a network without any has nothing left unread.
       status:
         supported || holders.length === 0 ? statusOf(holders.length, read.length) : 'unsupported',
       wallets: holders.length,
       walletsRead: read.length,
-      calls: input.budget.used - callsBefore,
-      failedCalls: input.budget.failed - failedBefore,
+      calls,
+      failedCalls,
       b2cEnabled,
+      collectBalances,
+      attempted: supported,
+      endpointPresent: listed && endpoint !== undefined,
       reason,
-      native: nativeCoverage
-    });
-    assets.forEach((asset, index) => {
-      let raw = 0n;
-      for (const holder of read) {
-        raw += balances.get(holder)?.[index] ?? 0n;
-      }
-      if (raw > 0n) {
-        holdings.push({
-          network: chain.network,
-          asset: asset.symbol,
-          amount: formatUnits(raw, asset.decimals),
-          valueCents: centsOf(raw, asset, input.prices, valuation)
-        });
-      }
+      native: nativeCoverage,
+      lastSuccessAt:
+        reason === null ? input.takenAt : (input.lastSuccess?.get(chain.network) ?? null),
+      startedAt: new Date(startedAt).toISOString(),
+      finishedAt: new Date(finishedAt).toISOString(),
+      durationMs: finishedAt - startedAt,
+      unpricedAssets: held.filter((holding) => holding.valueCents === null).length
     });
 
     masters.forEach((wallet, position) => {
@@ -405,7 +473,7 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
   const read = networks.reduce((sum, row) => sum + row.walletsRead, 0);
   const unread = networks.some((row) => row.status !== 'complete');
   return {
-    snapshot: { networks, holdings, masterWallets, valuation },
+    snapshot: { networks: networks.map(storedRow), holdings, masterWallets, valuation },
     networks,
     status: !unread ? 'complete' : wallets > 0 && read === 0 ? 'failed' : 'partial'
   };
