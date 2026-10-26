@@ -29,6 +29,7 @@ export interface AdminTokenBody {
   sourcePresent: boolean;
   analyticsEnabled: boolean;
   effectiveEnabled: boolean;
+  explorerUrl: string | null;
 }
 
 /** Network of the admin list: its catalog fields, its analytics visibility and its tokens. */
@@ -105,6 +106,11 @@ const adminNetworksResponse = object({
             type: 'boolean',
             description: 'Preference of the token itself; hiding its network does not change it.'
           },
+          explorerUrl: {
+            type: ['string', 'null'],
+            description:
+              'Token page in the network explorer; null for the native coin, a token without address or a network without explorer.'
+          },
           effectiveEnabled: {
             type: 'boolean',
             description:
@@ -131,6 +137,29 @@ function actorId(request: FastifyRequest): string {
     throw new ApiError(401, 'UNAUTHORIZED', 'Authentication required');
   }
   return request.principal.userId;
+}
+
+/**
+ * Token page of a token in the explorer of its network: `/token/` and the contract address on EVM
+ * networks, or the asset unit (policy id and asset name in hex) on Cardano.
+ *
+ * @param network - Network of the token, with its explorer origin.
+ * @param token - Token of the catalog.
+ * @returns The URL, or `null` for the native coin, a token without a valid address or a network
+ * without explorer.
+ */
+function tokenExplorerUrl(
+  network: NetworkDefinition,
+  token: Readonly<{ address: string; native: boolean }>
+): string | null {
+  const address = token.address.trim();
+  const valid =
+    network.family === 'evm'
+      ? /^0x[0-9a-fA-F]{40}$/.test(address)
+      : /^[0-9a-fA-F]{56,120}$/.test(address);
+  return network.explorer === null || token.native || !valid
+    ? null
+    : `${network.explorer}/token/${address}`;
 }
 
 function bodyOf(
@@ -163,7 +192,8 @@ function bodyOf(
           sourcePresent: token.sourcePresent,
           analyticsEnabled: !disabledTokens.has(token.id),
           effectiveEnabled:
-            visible && !(excluded.get(network.id)?.has(token.symbol.toUpperCase()) ?? false)
+            visible && !(excluded.get(network.id)?.has(token.symbol.toUpperCase()) ?? false),
+          explorerUrl: tokenExplorerUrl(network, token)
         }))
       };
     })
