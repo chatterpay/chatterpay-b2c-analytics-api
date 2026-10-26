@@ -33,6 +33,11 @@ export interface MetricsSource {
   readonly kind: 'mock' | 'live';
   /** Additive activity of a network inside a window. */
   facts(network: NetworkId, window: TimeWindow): Facts;
+  /**
+   * Whether every hour of the source counts its operations per asset, so the operations of a
+   * hidden token can leave the transaction counts.
+   */
+  countsByAsset(): boolean;
   /** Distinct active users of a network inside a window. */
   activeUsers(network: NetworkId, window: TimeWindow): number;
   /** Users of a network that joined through `point`, inclusive. */
@@ -92,6 +97,7 @@ const MOCK_START_DAY = dayNumberFromIso(DATASET_START_DAY);
 export const MOCK_SOURCE: MetricsSource = {
   kind: 'mock',
   facts: factsInWindow,
+  countsByAsset: () => false,
   activeUsers: activeUsersInWindow,
   totalUsersAt,
   retained: retainedUsers,
