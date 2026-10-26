@@ -319,14 +319,18 @@ export class MongoIngestRepository implements IngestRepository {
 
   async tokens(): Promise<TokenInfo[]> {
     const docs = await this.collection<TokenDoc>(INGEST_COLLECTIONS.tokens).find({}).toArray();
-    return docs.map(({ chainId, symbol, stable, address, decimals }) => ({
-      chainId,
-      symbol,
-      stable,
-      // Copies written before these fields were read have neither.
-      address: address ?? '',
-      decimals: decimals ?? null
-    }));
+    return docs.map(
+      ({ chainId, symbol, stable, address, decimals, b2cEnabled, sourcePresent }) => ({
+        chainId,
+        symbol,
+        stable,
+        // Copies written before these fields were read have none of them.
+        address: address ?? '',
+        decimals: decimals ?? null,
+        b2cEnabled: b2cEnabled ?? null,
+        sourcePresent: sourcePresent ?? true
+      })
+    );
   }
 
   async chains(): Promise<ChainInfo[]> {
