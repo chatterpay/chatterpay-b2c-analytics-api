@@ -131,8 +131,8 @@ export type Availability = 'available' | 'partial' | 'unavailable';
  *   their own values; they are not served as the current one.
  * - `not_valued`: the deployment does not value in USD (`USD_VALUATION=none`, test networks whose
  *   assets have no market value); amounts and counts are kept.
- * - `native_not_covered`: the native coin of an EVM network is not in the B2C token list, so the
- *   user wallets were read without it.
+ * - `native_not_covered`: the native coin of an EVM network is neither in the B2C token list nor
+ *   named by a master wallet of the network, so the user wallets were read without it.
  * - `undated_users`: some users have no signup date; they count in the totals but in no signup
  *   window or cohort.
  */
@@ -183,8 +183,9 @@ export type NetworkReadReason =
 
 /**
  * Whether the user wallets of a network were read with its native coin: `included` on Cardano
- * (ADA comes with the UTxOs) and on EVM networks whose B2C token list carries the native coin,
- * `not_listed` on EVM networks whose list does not.
+ * (ADA comes with the UTxOs) and on EVM networks whose B2C token list carries the native coin or
+ * that have a master wallet configured (`MASTER_WALLETS`, whose `nativeSymbol` names the coin),
+ * `not_listed` on EVM networks with neither.
  */
 export type NativeCoverage = 'included' | 'not_listed';
 
@@ -233,7 +234,9 @@ export interface SignupsBlock extends BlockStatus {
 export interface TvlBlock extends BlockStatus {
   /**
    * Last snapshot taken at or before the end of the period; `previous` is the last snapshot inside
-   * the previous period, `null` when there is none. `null` when no snapshot exists yet.
+   * the previous period, `null` when there is none. `null` when no snapshot exists yet. A `partial`
+   * value is the subtotal of what was read, not the total; `previous` and `changeRatio` are `null`
+   * unless both snapshots are complete, so a change never compares a subtotal.
    */
   value: MoneyMetric | null;
   /** First snapshot ever taken; earlier periods have no TVL. */
@@ -255,6 +258,13 @@ export interface TvlBlock extends BlockStatus {
       reason: NetworkReadReason | null;
     }
   >;
+  /**
+   * Only when the block is `unavailable` with `not_read`: the last earlier snapshot, through the
+   * end of the period, that read every selected network completely, with the native coin and a
+   * USD price for every held asset. A dated historical balance, never the current value; `null`
+   * when no snapshot qualifies.
+   */
+  lastComplete: { asOf: string; valueUsd: string } | null;
 }
 
 /** Balance of one asset across user wallets, from the snapshot behind the TVL. */
