@@ -53,12 +53,17 @@ export interface AppEnv {
   /** Ceiling on price provider requests per run. */
   PRICES_MAX_CALLS_PER_RUN: number;
   /**
-   * Reader of the balance snapshots; `rpc` reads through the `rpc` (EVM) and `providerUrl` (Koios,
-   * Cardano) of each network in the B2C `blockchains` collection, `none` takes no snapshot.
+   * Reader of the balance snapshots; `rpc` reads through the `rpc` (EVM) and `providerUrl` (Koios
+   * or Blockfrost, Cardano) of each network in the B2C `blockchains` collection, `none` takes no snapshot.
    */
   BALANCES_PROVIDER: 'none' | 'rpc';
-  /** Ceiling on balance requests (`eth_call` batches and Koios pages) per run. */
+  /** Ceiling on balance requests (`eth_call` batches, Koios pages, Blockfrost addresses) per run. */
   BALANCES_MAX_CALLS_PER_RUN: number;
+  /**
+   * Blockfrost project id, the variable the B2C backend uses for the same provider. Without it a
+   * Cardano network whose `providerUrl` is Blockfrost is not read (`unsupported_provider`).
+   */
+  CARDANO_PROVIDER_API_KEY: string | null;
   /** Public addresses of the signers whose balances the snapshots read. */
   MASTER_WALLETS: MasterWalletConfig[];
   /**
@@ -183,6 +188,7 @@ const envSchema: z.ZodType<AppEnv> = z
     PRICES_MAX_CALLS_PER_RUN: z.coerce.number().int().min(0).max(5).default(1),
     BALANCES_PROVIDER: z.enum(['none', 'rpc']).default('none'),
     BALANCES_MAX_CALLS_PER_RUN: z.coerce.number().int().min(0).max(2000).default(100),
+    CARDANO_PROVIDER_API_KEY: z.string().trim().min(1).max(256).nullable().default(null),
     MASTER_WALLETS: masterWalletsSchema.default([]),
     USD_VALUATION: z.enum(['market', 'none']).default('market'),
     METRICS_REFRESH_SECONDS: z.coerce.number().int().min(30).max(86_400).default(300)
