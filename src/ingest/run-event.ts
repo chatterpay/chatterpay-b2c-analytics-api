@@ -5,6 +5,7 @@ import type { IngestionPhases, IngestionReport } from './run.js';
 /**
  * Structured log line of one ingestion run. It carries counters, statuses and durations only: no
  * endpoint URL, connection string, credential, phone number, wallet address or per-person figure.
+ * Each network row says whether an endpoint exists (`endpointPresent`), never which one.
  */
 export interface IngestRunEvent {
   event: 'ingest_run';
@@ -34,14 +35,25 @@ export interface IngestRunEvent {
       Pick<
         IngestionReport['sources']['balances']['networks'][number],
         | 'network'
+        | 'chainId'
         | 'status'
         | 'reason'
         | 'b2cEnabled'
+        | 'analyticsVisible'
+        | 'collectBalances'
+        | 'endpointPresent'
+        | 'attempted'
         | 'wallets'
         | 'walletsRead'
         | 'calls'
         | 'failedCalls'
         | 'native'
+        | 'unpricedAssets'
+        | 'startedAt'
+        | 'finishedAt'
+        | 'durationMs'
+        | 'takenAt'
+        | 'lastSuccessAt'
       >
     >;
   } | null;
@@ -80,14 +92,25 @@ export function ingestRunEvent(report: IngestionReport, readbackMs: number | nul
       masterWallets: sources.balances.masterWallets,
       networks: sources.balances.networks.map((row) => ({
         network: row.network,
+        chainId: row.chainId,
         status: row.status,
         reason: row.reason,
         b2cEnabled: row.b2cEnabled,
+        analyticsVisible: row.analyticsVisible,
+        collectBalances: row.collectBalances,
+        endpointPresent: row.endpointPresent,
+        attempted: row.attempted,
         wallets: row.wallets,
         walletsRead: row.walletsRead,
         calls: row.calls,
         failedCalls: row.failedCalls,
-        native: row.native
+        native: row.native,
+        unpricedAssets: row.unpricedAssets,
+        startedAt: row.startedAt,
+        finishedAt: row.finishedAt,
+        durationMs: row.durationMs,
+        takenAt: row.takenAt,
+        lastSuccessAt: row.lastSuccessAt
       }))
     },
     aggregates:
