@@ -4300,6 +4300,7 @@ paths:
                               - b2cEnabled
                               - sourcePresent
                               - analyticsEnabled
+                              - explorerUrl
                               - effectiveEnabled
                             properties:
                               id:
@@ -4330,6 +4331,13 @@ paths:
                                 type: boolean
                                 description: Preference of the token itself; hiding its network does not change
                                   it.
+                              explorerUrl:
+                                type:
+                                  - "null"
+                                  - string
+                                description: Token page in the network explorer; null for the native coin, a
+                                  token without address or a network without
+                                  explorer.
                               effectiveEnabled:
                                 type: boolean
                                 description: "Whether the statistics include the token: false when it or its
@@ -4466,6 +4474,7 @@ paths:
                               - b2cEnabled
                               - sourcePresent
                               - analyticsEnabled
+                              - explorerUrl
                               - effectiveEnabled
                             properties:
                               id:
@@ -4496,6 +4505,13 @@ paths:
                                 type: boolean
                                 description: Preference of the token itself; hiding its network does not change
                                   it.
+                              explorerUrl:
+                                type:
+                                  - "null"
+                                  - string
+                                description: Token page in the network explorer; null for the native coin, a
+                                  token without address or a network without
+                                  explorer.
                               effectiveEnabled:
                                 type: boolean
                                 description: "Whether the statistics include the token: false when it or its
@@ -4651,6 +4667,7 @@ paths:
                               - b2cEnabled
                               - sourcePresent
                               - analyticsEnabled
+                              - explorerUrl
                               - effectiveEnabled
                             properties:
                               id:
@@ -4681,6 +4698,13 @@ paths:
                                 type: boolean
                                 description: Preference of the token itself; hiding its network does not change
                                   it.
+                              explorerUrl:
+                                type:
+                                  - "null"
+                                  - string
+                                description: Token page in the network explorer; null for the native coin, a
+                                  token without address or a network without
+                                  explorer.
                               effectiveEnabled:
                                 type: boolean
                                 description: "Whether the statistics include the token: false when it or its
