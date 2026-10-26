@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { Role } from '../auth/principal.js';
-import { INITIAL_VISIBILITY, planVisibilityChange } from './network-visibility.js';
+import {
+  INITIAL_VISIBILITY,
+  planTokenVisibilityChange,
+  planVisibilityChange
+} from './network-visibility.js';
 import type {
   ActivatedMember,
   ActivityCursor,
@@ -20,6 +24,8 @@ import type {
   RateLimitResult,
   Session,
   Store,
+  TokenVisibilityChange,
+  TokenVisibilityResult,
   User
 } from './types.js';
 
@@ -377,8 +383,24 @@ export class MemoryStore implements Store {
     return { kind: 'ok', visibility: this.visibilityCopy(), changed: true };
   }
 
+  async changeTokenVisibility(
+    change: TokenVisibilityChange,
+    now: Date
+  ): Promise<TokenVisibilityResult> {
+    const plan = planTokenVisibilityChange(this.visibilityCopy(), change, now);
+    if (plan.kind === 'done') {
+      return plan.result;
+    }
+    this.visibility = plan.next;
+    return { kind: 'ok', visibility: this.visibilityCopy(), changed: true };
+  }
+
   private visibilityCopy(): NetworkVisibility {
-    return { ...this.visibility, disabledChainIds: [...this.visibility.disabledChainIds] };
+    return {
+      ...this.visibility,
+      disabledChainIds: [...this.visibility.disabledChainIds],
+      disabledTokenIds: [...this.visibility.disabledTokenIds]
+    };
   }
 
   private activeUserByEmail(email: string): User | undefined {
