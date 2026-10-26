@@ -125,7 +125,7 @@ function previousValued(
  * the last ingestion run; each block states its own availability and the instant it reflects.
  *
  * Hidden tokens (`meta.tokenScope`) leave every money figure, the transaction counts when the
- * build counts operations per asset, TVL, Top Tokens and Most Traded Tokens before anything is
+ * build counts operations per asset, TVL, Top Tokens and Most Used Tokens before anything is
  * added; user and country figures have no token and keep counting them.
  *
  * @param network - Network filter.
