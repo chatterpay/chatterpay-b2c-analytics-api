@@ -23,7 +23,7 @@ export interface IngestRunEvent {
    */
   phasesMs: (IngestionPhases & { readback: number | null }) | null;
   transactions: { read: number; revisited: number } | null;
-  users: { read: number; newWallets: number; countedInCountries: number } | null;
+  users: IngestionReport['sources']['users'] | null;
   catalog: IngestionReport['sources']['catalog'] | null;
   prices: IngestionReport['sources']['prices'] | null;
   balances: {
