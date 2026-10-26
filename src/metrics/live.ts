@@ -83,7 +83,11 @@ interface Operation {
 }
 
 /** Hour of a build: its unpriced operations are always recorded. */
-type BuiltHour = HourlyFacts & { unpriced: UnpricedOperations };
+type BuiltHour = HourlyFacts & {
+  unpriced: UnpricedOperations;
+  transfersByAsset: Record<string, number>;
+  swapsByAsset: Record<string, number>;
+};
 
 function blankFacts(): Facts {
   return {
@@ -96,7 +100,9 @@ function blankFacts(): Facts {
     swapVolume: {},
     transferFees: {},
     swapFees: {},
-    unpriced: emptyUnpriced()
+    unpriced: emptyUnpriced(),
+    transfersByAsset: {},
+    swapsByAsset: {}
   };
 }
 
@@ -119,6 +125,15 @@ function addFacts(target: Facts, item: Facts): void {
   for (const key of MONEY_KEYS) {
     addRecord(target[key], item[key]);
     addRecord(target.unpriced[key], item.unpriced[key]);
+  }
+  // A span with one hour built without the counts per asset has none.
+  for (const key of ['transfersByAsset', 'swapsByAsset'] as const) {
+    const counts = item[key];
+    if (counts === undefined) {
+      delete target[key];
+    } else if (target[key] !== undefined) {
+      addRecord(target[key], counts);
+    }
   }
 }
 
@@ -462,7 +477,9 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
         swapVolume: {},
         transferFees: {},
         swapFees: {},
-        unpriced: emptyUnpriced()
+        unpriced: emptyUnpriced(),
+        transfersByAsset: {},
+        swapsByAsset: {}
       };
       hourly.set(key, facts);
     }
@@ -489,9 +506,11 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
     if (transfer) {
       stats.transfers += 1;
       facts.transfers += 1;
+      addTo(facts.transfersByAsset, operation.asset, 1);
     } else {
       stats.swaps += 1;
       facts.swaps += 1;
+      addTo(facts.swapsByAsset, operation.asset, 1);
     }
     if (valueUsd === null) {
       stats.unpriced += 1;
@@ -618,6 +637,8 @@ class LiveSource implements MetricsSource {
   /** Users without a signup date, per network; they count in totals from the start. */
   private readonly undated = new Map<NetworkId, string[]>();
   private readonly wallets = new Map<NetworkId, WalletCoverage>();
+  /** `false` when some stored hour was built without the counts per asset. */
+  private countedByAsset = true;
 
   /**
    * @param aggregates - Stored aggregates.
@@ -646,8 +667,17 @@ class LiveSource implements MetricsSource {
         transferFees: item.transferFees,
         swapFees: item.swapFees,
         // Builds stored before it was recorded valued those operations at zero.
-        unpriced: item.unpriced ?? emptyUnpriced()
+        unpriced: item.unpriced ?? emptyUnpriced(),
+        ...(item.transfersByAsset === undefined || item.swapsByAsset === undefined
+          ? {}
+          : {
+              transfersByAsset: { ...item.transfersByAsset },
+              swapsByAsset: { ...item.swapsByAsset }
+            })
       });
+      if (item.transfersByAsset === undefined || item.swapsByAsset === undefined) {
+        this.countedByAsset = false;
+      }
       this.hourly.set(item.network, series);
     }
     for (const item of aggregates.activity) {
@@ -699,6 +729,10 @@ class LiveSource implements MetricsSource {
       const hours = this.activity.get(network)?.get(user);
       return hours !== undefined && activeIn(hours, first, last);
     });
+  }
+
+  countsByAsset(): boolean {
+    return this.countedByAsset;
   }
 
   facts(network: NetworkId, window: TimeWindow): Facts {
