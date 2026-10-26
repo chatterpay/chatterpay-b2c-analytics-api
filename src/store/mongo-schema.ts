@@ -15,6 +15,15 @@ export const COLLECTIONS = {
   settings: 'analytics_settings'
 } as const;
 
+/**
+ * `_id` of the settings document of the networks: the hidden chain ids, the revision of the
+ * visibility policy and, written by an operator, `uncollectedChainIds`, the chain ids whose
+ * balances the ingestion does not read. Visibility changes `$set` their own fields only, so they
+ * keep `uncollectedChainIds`; an operator write bumps `revision`, so it conflicts with a
+ * concurrent visibility change instead of being lost.
+ */
+export const NETWORK_SETTINGS_ID = 'network_visibility';
+
 /** Index the store relies on: invariants (unique) and expiry (TTL). */
 export interface RequiredIndex {
   collection: string;
