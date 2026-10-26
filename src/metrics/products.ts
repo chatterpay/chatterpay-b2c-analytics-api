@@ -243,7 +243,7 @@ export function buildPolymarketVolume(): PolymarketVolumeBlock {
 }
 
 /**
- * Builds the most traded tokens: counted transfers and swaps per network and asset in the range, a
+ * Builds the most used tokens: counted transfers and swaps per network and asset in the range, a
  * swap under its input asset, by operations descending. `volumeUsd` is the transfer plus swap
  * volume of the asset, `null` when an operation of it has no USD value; the block is then
  * `partial` (`unpriced_assets`). Balances are a different figure: see Top Tokens. A build without
