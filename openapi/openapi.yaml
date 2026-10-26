@@ -756,11 +756,14 @@ paths:
                             - member_removed
                             - network_hidden
                             - network_shown
+                            - token_hidden
+                            - token_shown
                         target:
                           type:
                             - "null"
                             - string
-                          description: Email the action applies to, or the network as "Label (chainId)".
+                          description: Email the action applies to, the network as "Label (chainId)" or
+                            the token as "SYMBOL on Label (tokenId)".
                         outcome:
                           type: string
                           enum:
@@ -1243,6 +1246,7 @@ paths:
                   - valuation
                   - tvl
                   - topTokens
+                  - tradedTokens
                   - topCountries
                   - volumeByProduct
                 properties:
@@ -1258,6 +1262,7 @@ paths:
                       - currency
                       - network
                       - range
+                      - tokenScope
                       - period
                       - previousPeriod
                       - bucket
@@ -1346,6 +1351,36 @@ paths:
                           - year
                           - ytd
                           - all
+                      tokenScope:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - hidden
+                          - operationCounts
+                        properties:
+                          hidden:
+                            type: array
+                            items:
+                              type: object
+                              additionalProperties: false
+                              required:
+                                - network
+                                - asset
+                              properties:
+                                network:
+                                  type: string
+                                  pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                                  maxLength: 64
+                                asset:
+                                  type: string
+                          operationCounts:
+                            type: string
+                            enum:
+                              - filtered
+                              - unfiltered
+                            description: unfiltered when the build behind the transaction counts has no
+                              count per asset, so they still include the
+                              operations of hidden tokens.
                       period:
                         type: object
                         additionalProperties: false
@@ -1440,6 +1475,7 @@ paths:
                               - not_valued
                               - native_not_covered
                               - undated_users
+                              - undated_accounts
                               - null
                       transactions:
                         type: object
@@ -1511,6 +1547,7 @@ paths:
                               - not_valued
                               - native_not_covered
                               - undated_users
+                              - undated_accounts
                               - null
                       activeUsers:
                         type: object
@@ -1678,6 +1715,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -1760,6 +1798,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -1971,6 +2010,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -1987,6 +2027,7 @@ paths:
                             - amount
                             - valueUsd
                             - share
+                            - networks
                           properties:
                             asset:
                               type: string
@@ -2003,11 +2044,104 @@ paths:
                                 - "null"
                                 - string
                               pattern: ^\d+\.\d{4}$
+                            networks:
+                              type: array
+                              items:
+                                type: object
+                                additionalProperties: false
+                                required:
+                                  - network
+                                  - amount
+                                  - valueUsd
+                                properties:
+                                  network:
+                                    type: string
+                                    pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                                    maxLength: 64
+                                  amount:
+                                    type: string
+                                    pattern: ^\d+(\.\d+)?$
+                                  valueUsd:
+                                    type:
+                                      - "null"
+                                      - string
+                                    pattern: ^-?\d+\.\d+$
                       totalUsd:
                         type:
                           - "null"
                           - string
                         pattern: ^-?\d+\.\d+$
+                  tradedTokens:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - items
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
+                          - undated_accounts
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - network
+                            - asset
+                            - operations
+                            - volumeUsd
+                          properties:
+                            network:
+                              type: string
+                              pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                              maxLength: 64
+                            asset:
+                              type: string
+                            operations:
+                              type: integer
+                              minimum: 0
+                            volumeUsd:
+                              type:
+                                - "null"
+                                - string
+                              pattern: ^-?\d+\.\d+$
                   topCountries:
                     type: object
                     additionalProperties: false
@@ -2049,6 +2183,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -2122,6 +2257,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -2171,6 +2307,7 @@ paths:
                                 - not_valued
                                 - native_not_covered
                                 - undated_users
+                                - undated_accounts
                                 - null
                             volumeUsd:
                               type:
@@ -2631,6 +2768,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -2766,6 +2904,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -2816,6 +2955,7 @@ paths:
                                 - not_valued
                                 - native_not_covered
                                 - undated_users
+                                - undated_accounts
                                 - null
                             eligibleCohorts:
                               type: integer
@@ -2907,6 +3047,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -2995,6 +3136,7 @@ paths:
                   - valuation
                   - avgFeePerTransaction
                   - polymarketVolume
+                  - polymarketAccounts
                   - feesByProduct
                   - masterWallets
                 properties:
@@ -3010,6 +3152,7 @@ paths:
                       - currency
                       - network
                       - range
+                      - tokenScope
                       - period
                       - previousPeriod
                       - bucket
@@ -3098,6 +3241,36 @@ paths:
                           - year
                           - ytd
                           - all
+                      tokenScope:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - hidden
+                          - operationCounts
+                        properties:
+                          hidden:
+                            type: array
+                            items:
+                              type: object
+                              additionalProperties: false
+                              required:
+                                - network
+                                - asset
+                              properties:
+                                network:
+                                  type: string
+                                  pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                                  maxLength: 64
+                                asset:
+                                  type: string
+                          operationCounts:
+                            type: string
+                            enum:
+                              - filtered
+                              - unfiltered
+                            description: unfiltered when the build behind the transaction counts has no
+                              count per asset, so they still include the
+                              operations of hidden tokens.
                       period:
                         type: object
                         additionalProperties: false
@@ -3192,6 +3365,7 @@ paths:
                               - not_valued
                               - native_not_covered
                               - undated_users
+                              - undated_accounts
                               - null
                       transferFeesUsd:
                         type: object
@@ -3242,6 +3416,7 @@ paths:
                               - not_valued
                               - native_not_covered
                               - undated_users
+                              - undated_accounts
                               - null
                       swapFeesUsd:
                         type: object
@@ -3292,6 +3467,7 @@ paths:
                               - not_valued
                               - native_not_covered
                               - undated_users
+                              - undated_accounts
                               - null
                       volumeUsd:
                         type: object
@@ -3342,6 +3518,7 @@ paths:
                               - not_valued
                               - native_not_covered
                               - undated_users
+                              - undated_accounts
                               - null
                       swapVolumeUsd:
                         type: object
@@ -3392,6 +3569,7 @@ paths:
                               - not_valued
                               - native_not_covered
                               - undated_users
+                              - undated_accounts
                               - null
                   series:
                     type: array
@@ -3534,6 +3712,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -3615,6 +3794,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -3683,6 +3863,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -3694,6 +3875,96 @@ paths:
                           - "null"
                           - string
                         pattern: ^-?\d+\.\d+$
+                  polymarketAccounts:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - source
+                      - availability
+                      - reason
+                      - asOf
+                      - scope
+                      - accounts
+                      - invalidAccounts
+                      - undatedAccounts
+                      - newAccounts
+                    properties:
+                      source:
+                        type: string
+                        enum:
+                          - mock
+                          - live
+                      availability:
+                        type: string
+                        enum:
+                          - available
+                          - partial
+                          - unavailable
+                      reason:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - no_snapshot
+                          - snapshots_disabled
+                          - partial_coverage
+                          - unpriced_assets
+                          - unverified_wallets
+                          - not_recorded
+                          - no_transactions
+                          - no_eligible_cohort
+                          - not_configured
+                          - not_read
+                          - not_valued
+                          - native_not_covered
+                          - undated_users
+                          - undated_accounts
+                          - null
+                      asOf:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                      scope:
+                        type: string
+                        enum:
+                          - all_networks
+                        description: Polymarket accounts are Polygon wallets; the network filter does
+                          not apply.
+                      accounts:
+                        type:
+                          - "null"
+                          - integer
+                        minimum: 0
+                      invalidAccounts:
+                        type: integer
+                        minimum: 0
+                      undatedAccounts:
+                        type: integer
+                        minimum: 0
+                      newAccounts:
+                        anyOf:
+                          - type: object
+                            additionalProperties: false
+                            required:
+                              - value
+                              - previous
+                              - changeRatio
+                            properties:
+                              value:
+                                type: integer
+                                minimum: 0
+                              previous:
+                                type:
+                                  - "null"
+                                  - integer
+                                minimum: 0
+                              changeRatio:
+                                type:
+                                  - "null"
+                                  - string
+                                pattern: ^-?\d+\.\d+$
+                          - type: "null"
                   feesByProduct:
                     type: object
                     additionalProperties: false
@@ -3733,6 +4004,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -3781,6 +4053,7 @@ paths:
                                 - not_valued
                                 - native_not_covered
                                 - undated_users
+                                - undated_accounts
                                 - null
                             feesUsd:
                               type:
@@ -3832,6 +4105,7 @@ paths:
                           - not_valued
                           - native_not_covered
                           - undated_users
+                          - undated_accounts
                           - null
                       asOf:
                         anyOf:
@@ -3981,6 +4255,7 @@ paths:
                         - analyticsEnabled
                         - b2cEnabled
                         - sourcePresent
+                        - tokens
                       properties:
                         id:
                           type: string
@@ -4011,6 +4286,57 @@ paths:
                           type: boolean
                           description: false for a network the B2C database no longer lists, kept by the
                             analytics for its history.
+                        tokens:
+                          type: array
+                          items:
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - id
+                              - symbol
+                              - address
+                              - native
+                              - stable
+                              - b2cEnabled
+                              - sourcePresent
+                              - analyticsEnabled
+                              - effectiveEnabled
+                            properties:
+                              id:
+                                type: string
+                                pattern: ^[0-9]{1,30}:(native|0x[0-9a-f]{40}|[0-9a-f]{56,120}|symbol:[A-Z0-9._-]{1,32})$
+                                description: chainId:address in lower case, chainId:native for the native coin,
+                                  chainId:symbol:SYMBOL without an address.
+                              symbol:
+                                type: string
+                              address:
+                                type: string
+                                description: Public contract address; empty without one.
+                              native:
+                                type: boolean
+                              stable:
+                                type: boolean
+                              b2cEnabled:
+                                type:
+                                  - "null"
+                                  - boolean
+                                description: enabled of the B2C token document. Informative only; null when the
+                                  document has no such field.
+                              sourcePresent:
+                                type: boolean
+                                description: false for a token the B2C database no longer lists, kept for its
+                                  history and its preference.
+                              analyticsEnabled:
+                                type: boolean
+                                description: Preference of the token itself; hiding its network does not change
+                                  it.
+                              effectiveEnabled:
+                                type: boolean
+                                description: "Whether the statistics include the token: false when it or its
+                                  network is hidden. A hidden token stays
+                                  included while another token of the network
+                                  with the same symbol is shown, because their
+                                  operations are recorded by symbol."
         "401":
           description: Default Response
           content:
@@ -4095,6 +4421,7 @@ paths:
                         - analyticsEnabled
                         - b2cEnabled
                         - sourcePresent
+                        - tokens
                       properties:
                         id:
                           type: string
@@ -4125,6 +4452,242 @@ paths:
                           type: boolean
                           description: false for a network the B2C database no longer lists, kept by the
                             analytics for its history.
+                        tokens:
+                          type: array
+                          items:
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - id
+                              - symbol
+                              - address
+                              - native
+                              - stable
+                              - b2cEnabled
+                              - sourcePresent
+                              - analyticsEnabled
+                              - effectiveEnabled
+                            properties:
+                              id:
+                                type: string
+                                pattern: ^[0-9]{1,30}:(native|0x[0-9a-f]{40}|[0-9a-f]{56,120}|symbol:[A-Z0-9._-]{1,32})$
+                                description: chainId:address in lower case, chainId:native for the native coin,
+                                  chainId:symbol:SYMBOL without an address.
+                              symbol:
+                                type: string
+                              address:
+                                type: string
+                                description: Public contract address; empty without one.
+                              native:
+                                type: boolean
+                              stable:
+                                type: boolean
+                              b2cEnabled:
+                                type:
+                                  - "null"
+                                  - boolean
+                                description: enabled of the B2C token document. Informative only; null when the
+                                  document has no such field.
+                              sourcePresent:
+                                type: boolean
+                                description: false for a token the B2C database no longer lists, kept for its
+                                  history and its preference.
+                              analyticsEnabled:
+                                type: boolean
+                                description: Preference of the token itself; hiding its network does not change
+                                  it.
+                              effectiveEnabled:
+                                type: boolean
+                                description: "Whether the statistics include the token: false when it or its
+                                  network is hidden. A hidden token stays
+                                  included while another token of the network
+                                  with the same symbol is shown, because their
+                                  operations are recorded by symbol."
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/admin/tokens/{tokenId}:
+    patch:
+      operationId: changeAdminTokenVisibility
+      summary: Show or hide a token in the statistics; its network keeps its own
+        visibility
+      tags:
+        - admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - analyticsEnabled
+                - expectedRevision
+              properties:
+                analyticsEnabled:
+                  type: boolean
+                expectedRevision:
+                  type: integer
+                  minimum: 0
+      parameters:
+        - schema:
+            type: string
+            pattern: ^[0-9]{1,30}:(native|0x[0-9a-f]{40}|[0-9a-f]{56,120}|symbol:[A-Z0-9._-]{1,32})$
+            maxLength: 160
+          in: path
+          name: tokenId
+          required: true
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - revision
+                  - updatedAt
+                  - networks
+                properties:
+                  revision:
+                    type: integer
+                    minimum: 0
+                    description: Revision of the visibility policy; send it back as
+                      expectedRevision.
+                  updatedAt:
+                    type:
+                      - "null"
+                      - string
+                    format: date-time
+                  networks:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - id
+                        - chainId
+                        - label
+                        - family
+                        - analyticsEnabled
+                        - b2cEnabled
+                        - sourcePresent
+                        - tokens
+                      properties:
+                        id:
+                          type: string
+                          pattern: ^(?!all$)[a-z0-9]+(-[a-z0-9]+)*$
+                          maxLength: 64
+                        chainId:
+                          type: string
+                          pattern: ^[0-9]{1,30}$
+                        label:
+                          type: string
+                        family:
+                          type: string
+                          enum:
+                            - evm
+                            - cardano
+                        analyticsEnabled:
+                          type: boolean
+                          description: Whether the statistics of the analytics include the network.
+                        b2cEnabled:
+                          type:
+                            - "null"
+                            - boolean
+                          description: "enabled of the B2C document: whether B2C accepts new operations on
+                            the network. Informative only; null when the
+                            document has no such field or B2C no longer lists
+                            the network."
+                        sourcePresent:
+                          type: boolean
+                          description: false for a network the B2C database no longer lists, kept by the
+                            analytics for its history.
+                        tokens:
+                          type: array
+                          items:
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - id
+                              - symbol
+                              - address
+                              - native
+                              - stable
+                              - b2cEnabled
+                              - sourcePresent
+                              - analyticsEnabled
+                              - effectiveEnabled
+                            properties:
+                              id:
+                                type: string
+                                pattern: ^[0-9]{1,30}:(native|0x[0-9a-f]{40}|[0-9a-f]{56,120}|symbol:[A-Z0-9._-]{1,32})$
+                                description: chainId:address in lower case, chainId:native for the native coin,
+                                  chainId:symbol:SYMBOL without an address.
+                              symbol:
+                                type: string
+                              address:
+                                type: string
+                                description: Public contract address; empty without one.
+                              native:
+                                type: boolean
+                              stable:
+                                type: boolean
+                              b2cEnabled:
+                                type:
+                                  - "null"
+                                  - boolean
+                                description: enabled of the B2C token document. Informative only; null when the
+                                  document has no such field.
+                              sourcePresent:
+                                type: boolean
+                                description: false for a token the B2C database no longer lists, kept for its
+                                  history and its preference.
+                              analyticsEnabled:
+                                type: boolean
+                                description: Preference of the token itself; hiding its network does not change
+                                  it.
+                              effectiveEnabled:
+                                type: boolean
+                                description: "Whether the statistics include the token: false when it or its
+                                  network is hidden. A hidden token stays
+                                  included while another token of the network
+                                  with the same symbol is shown, because their
+                                  operations are recorded by symbol."
         "400":
           description: Default Response
           content:
@@ -4273,6 +4836,7 @@ paths:
                           - read
                           - newWallets
                           - countedInCountries
+                          - polymarketAccounts
                         properties:
                           read:
                             type: integer
@@ -4281,6 +4845,9 @@ paths:
                             type: integer
                             minimum: 0
                           countedInCountries:
+                            type: integer
+                            minimum: 0
+                          polymarketAccounts:
                             type: integer
                             minimum: 0
                       catalog:
