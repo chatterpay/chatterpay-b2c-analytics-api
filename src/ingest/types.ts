@@ -53,6 +53,36 @@ export interface IngestedUser {
 export interface B2cUserRecord extends IngestedUser {
   /** ISO 3166-1 alpha-2 code, or `Unknown` when the number gives no single country. */
   country: string;
+  /**
+   * Polymarket account of the user; `null` or absent when the document has none. Only counted,
+   * like the country: neither the address nor the date is stored per user.
+   */
+  polymarket?: PolymarketAccountRecord | null;
+}
+
+/**
+ * What the ingestion reads of `users.polymarket_account`: whether `polygon_address` is an EVM
+ * address and `created_at`. The encrypted API credentials and the signer are never read.
+ */
+export interface PolymarketAccountRecord {
+  validAddress: boolean;
+  /** `null` when the account has no `created_at`. */
+  createdAt: Date | null;
+}
+
+/**
+ * Polymarket accounts of the B2C users at an ingestion run. An account is a Polygon wallet outside
+ * the networks of the catalog, so the counts cover every user whatever the network filter.
+ */
+export interface PolymarketAccountCounts {
+  /** Users whose account has a valid `polygon_address`. */
+  accounts: number;
+  /** Users with an account whose `polygon_address` is missing or not an EVM address. */
+  invalid: number;
+  /** Of `accounts`, the accounts without `created_at`; they are in no creation window. */
+  undated: number;
+  /** Valid accounts per hour of `created_at`, in hours since 1970-01-01T00:00Z, ascending. */
+  createdPerHour: Array<{ hour: number; accounts: number }>;
 }
 
 /** Token of the B2C `tokens` collection. */
@@ -68,6 +98,17 @@ export interface TokenInfo {
   address: string;
   /** Decimals of the token; `null` when the document has none, which leaves it out of snapshots. */
   decimals: number | null;
+  /**
+   * `enabled` of the B2C document: whether B2C takes new operations in the token. Informative
+   * only; it plays no part in what is read or shown. `null` when the document has no boolean
+   * `enabled`; absent in copies written before it was read.
+   */
+  b2cEnabled?: boolean | null;
+  /**
+   * Whether the B2C database listed the token in the last run; `false` for a token kept for its
+   * history. Set by the analytics copy only.
+   */
+  sourcePresent?: boolean;
 }
 
 /**
@@ -228,6 +269,8 @@ export interface RunSnapshot {
   countries: CountryCount[];
   /** Absent in snapshots stored before the combinations were counted. */
   countryCombinations?: CountryCombinationCount[];
+  /** Absent in snapshots stored before the Polymarket accounts were counted. */
+  polymarket?: PolymarketAccountCounts;
 }
 
 /** Bounds of a read of B2C transactions, by id. */
@@ -293,6 +336,12 @@ export interface HourlyFacts {
    * stored before it was recorded, which valued those operations at zero.
    */
   unpriced?: UnpricedOperations;
+  /**
+   * Counted transfers and swaps of the hour per asset, which let a hidden token leave the counts.
+   * Absent in builds stored before it was recorded.
+   */
+  transfersByAsset?: Record<string, number>;
+  swapsByAsset?: Record<string, number>;
 }
 
 /** Hours in which a user started a counted operation on a network, ascending. */
