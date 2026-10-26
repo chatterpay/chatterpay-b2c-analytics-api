@@ -133,6 +133,7 @@ describe('balance snapshot of networks disabled in B2C', () => {
     const { networks, snapshot } = await takeBalanceSnapshot(snapshotInput(reader));
 
     expect(reader.urls()).toEqual([BASE_RPC, SCROLL_RPC]);
+    // The Scroll signer names the native coin the B2C list lacks.
     expect(networks.find((row) => row.network === 'scroll')).toEqual({
       network: 'scroll',
       status: 'complete',
@@ -142,7 +143,7 @@ describe('balance snapshot of networks disabled in B2C', () => {
       failedCalls: 0,
       b2cEnabled: true,
       reason: null,
-      native: 'not_listed'
+      native: 'included'
     });
     expect(snapshot.masterWallets).toMatchObject([{ network: 'scroll', status: 'complete' }]);
   });
@@ -170,13 +171,52 @@ describe('balance snapshot of networks disabled in B2C', () => {
       failedCalls: 0,
       b2cEnabled: false,
       reason: 'b2c_disabled',
-      native: 'not_listed'
+      native: 'included'
     });
     expect(snapshot.holdings.map((holding) => holding.network)).toEqual(['base-sepolia']);
     expect(snapshot.masterWallets).toMatchObject([
       { network: 'scroll', status: 'unsupported', balances: [] }
     ]);
     expect(status).toBe('partial');
+  });
+
+  it('sends no request for a disabled network whatever its catalog says of the native coin', async () => {
+    const disabled = new Map([
+      [BASE_CHAIN, true],
+      [SCROLL_CHAIN, false]
+    ]);
+    const withEth = new RecordingBalanceReader();
+    const withoutEth = new RecordingBalanceReader();
+
+    const listed = await takeBalanceSnapshot(
+      snapshotInput(withEth, {
+        tokens: [BASE_USDC, SCROLL_TOKEN, nativeOf(SCROLL_CHAIN)],
+        b2cEnabled: disabled
+      })
+    );
+    const unlisted = await takeBalanceSnapshot(
+      snapshotInput(withoutEth, { masterWallets: [], b2cEnabled: disabled })
+    );
+
+    expect(withEth.urls()).toEqual([BASE_RPC]);
+    expect(withoutEth.urls()).toEqual([BASE_RPC]);
+    expect(listed.networks.find((row) => row.network === 'scroll')).toMatchObject({
+      status: 'unsupported',
+      walletsRead: 0,
+      calls: 0,
+      reason: 'b2c_disabled',
+      native: 'included'
+    });
+    expect(unlisted.networks.find((row) => row.network === 'scroll')).toMatchObject({
+      status: 'unsupported',
+      walletsRead: 0,
+      calls: 0,
+      reason: 'b2c_disabled',
+      native: 'not_listed'
+    });
+    for (const { snapshot } of [listed, unlisted]) {
+      expect(snapshot.holdings.some((holding) => holding.network === 'scroll')).toBe(false);
+    }
   });
 
   it('sends no request for a network disabled in B2C without endpoint', async () => {
@@ -320,11 +360,16 @@ function activity() {
   ];
 }
 
-function b2cReader(scrollEnabled: boolean | null): FakeReader {
+function b2cReader(scrollEnabled: boolean | null, scrollNative = true): FakeReader {
   const reader = new FakeReader(
     activity(),
     USERS,
-    [BASE_USDC, nativeOf(BASE_CHAIN), SCROLL_TOKEN, nativeOf(SCROLL_CHAIN)],
+    [
+      BASE_USDC,
+      nativeOf(BASE_CHAIN),
+      SCROLL_TOKEN,
+      ...(scrollNative ? [nativeOf(SCROLL_CHAIN)] : [])
+    ],
     [BASE, SCROLL],
     [BASE_ENDPOINT, SCROLL_ENDPOINT]
   );
@@ -339,14 +384,15 @@ async function ingestAt(
   now: Date,
   reader: FakeReader,
   repository: MemoryIngestRepository,
-  balances: BalanceReader
+  balances: BalanceReader,
+  masterWallets: MasterWalletConfig[] = [SCROLL_SIGNER]
 ) {
   const report = await runIngestion({
     reader,
     repository,
     prices: null,
     balances,
-    masterWallets: [SCROLL_SIGNER],
+    masterWallets,
     clock: () => now,
     options: OPTIONS,
     owner: `retired-${now.toISOString()}`
@@ -461,8 +507,9 @@ describe('ingestion of a network disabled in B2C', () => {
     expect(all.tvl).toMatchObject({
       availability: 'partial',
       reason: 'partial_coverage',
-      value: { value: '2.00' },
-      coverage: { wallets: 4, walletsRead: 2 }
+      value: { value: '2.00', previous: null, changeRatio: null },
+      coverage: { wallets: 4, walletsRead: 2 },
+      lastComplete: null
     });
     expect(all.tvl.byNetwork.map((row) => [row.network, row.tvlUsd])).toEqual([
       ['base-sepolia', '2.00'],
@@ -492,6 +539,56 @@ describe('ingestion of a network disabled in B2C', () => {
     expect(observed).toEqual([
       expect.objectContaining({ tvlUsd: '2.00', asOf: DAY_ONE.toISOString() })
     ]);
+    expect(scroll.asOf).toBe(DAY_TWO.toISOString());
+    expect(scroll.lastComplete).toEqual({ asOf: DAY_ONE.toISOString(), valueUsd: '2.00' });
+  });
+
+  it('serves no dated history for Scroll when no earlier reading of it was complete', async () => {
+    const repository = new MemoryIngestRepository();
+    catalogWith(true);
+    // Without the native coin in its list nor a signer, the Scroll reading is a subtotal.
+    await ingestAt(DAY_ONE, b2cReader(true, false), repository, new RecordingBalanceReader(), []);
+    catalogWith(false);
+    const balances = new RecordingBalanceReader();
+    await ingestAt(DAY_TWO, b2cReader(false, false), repository, balances, []);
+
+    const scroll = buildOverview('scroll', 'month', DAY_TWO).tvl;
+
+    expect(balances.urls()).toEqual([BASE_RPC]);
+    expect(repository.snapshotCopies.get(DAY_ONE.getTime())?.balances?.networks).toContainEqual(
+      expect.objectContaining({ network: 'scroll', status: 'complete', native: 'not_listed' })
+    );
+    expect(scroll).toMatchObject({
+      availability: 'unavailable',
+      reason: 'not_read',
+      value: null,
+      lastComplete: null
+    });
+    expect(scroll.byNetwork).toMatchObject([{ network: 'scroll', reason: 'b2c_disabled' }]);
+  });
+
+  it('compares All networks only between complete snapshots', async () => {
+    const repository = new MemoryIngestRepository();
+    const yesterday = new Date('2026-10-23T03:00:00.000Z');
+    catalogWith(true);
+    await ingestAt(yesterday, b2cReader(true), repository, new RecordingBalanceReader());
+    catalogWith(false);
+    await ingestAt(DAY_TWO, b2cReader(false), repository, new RecordingBalanceReader());
+
+    const now = new Date('2026-10-24T12:00:00.000Z');
+    const all = buildOverview('all', 'today', now).tvl;
+    const base = buildOverview('base-sepolia', 'today', now).tvl;
+
+    // The previous day read Scroll as well: a change against it would compare a total with a
+    // subtotal of fewer networks.
+    expect(all).toMatchObject({
+      availability: 'partial',
+      value: { value: '2.00', previous: null, changeRatio: null }
+    });
+    expect(base).toMatchObject({
+      availability: 'available',
+      value: { value: '2.00', previous: '2.00', changeRatio: '0.0000' }
+    });
   });
 
   it('reads Scroll again once B2C enables it, without losing the earlier runs', async () => {
