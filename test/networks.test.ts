@@ -47,8 +47,14 @@ describe('B2C blockchains mapping', () => {
 
   it('maps documents to networks sorted by name, with evm as the default family', () => {
     const definitions = toNetworkDefinitions([
-      { name: 'Cardano Preprod', family: 'cardano', chainId: 900000000001, enabled: true },
-      { name: 'Base Sepolia', family: 'evm', chainId: 84532 },
+      {
+        name: 'Cardano Preprod',
+        family: 'cardano',
+        chainId: 900000000001,
+        enabled: true,
+        explorer: 'https://preprod.cardanoscan.io/transaction/'
+      },
+      { name: 'Base Sepolia', family: 'evm', chainId: 84532, explorer: 'http://basescan.test' },
       { name: 'Arbitrum Sepolia', chainId: 421614, enabled: false }
     ]);
 
@@ -59,7 +65,8 @@ describe('B2C blockchains mapping', () => {
         family: 'evm',
         chainId: '421614',
         b2cEnabled: false,
-        sourcePresent: true
+        sourcePresent: true,
+        explorer: null
       },
       {
         id: 'base-sepolia',
@@ -67,7 +74,8 @@ describe('B2C blockchains mapping', () => {
         family: 'evm',
         chainId: '84532',
         b2cEnabled: null,
-        sourcePresent: true
+        sourcePresent: true,
+        explorer: null
       },
       {
         id: 'cardano-preprod',
@@ -75,7 +83,8 @@ describe('B2C blockchains mapping', () => {
         family: 'cardano',
         chainId: '900000000001',
         b2cEnabled: true,
-        sourcePresent: true
+        sourcePresent: true,
+        explorer: 'https://preprod.cardanoscan.io'
       }
     ]);
   });
