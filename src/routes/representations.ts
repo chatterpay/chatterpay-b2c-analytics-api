@@ -32,7 +32,10 @@ export interface InviteBody {
   createdBy: string;
 }
 
-/** Activity event as exposed by the API; `actor` is an email, `target` an email or a network. */
+/**
+ * Activity event as exposed by the API; `actor` is an email, `target` an email, a network or a
+ * token.
+ */
 export interface ActivityEventBody {
   id: string;
   at: string;
@@ -118,12 +121,15 @@ export const activityEventSchema: Record<string, unknown> = object({
       'role_changed',
       'member_removed',
       'network_hidden',
-      'network_shown'
+      'network_shown',
+      'token_hidden',
+      'token_shown'
     ]
   },
   target: {
     type: ['string', 'null'],
-    description: 'Email the action applies to, or the network as "Label (chainId)".'
+    description:
+      'Email the action applies to, the network as "Label (chainId)" or the token as "SYMBOL on Label (tokenId)".'
   },
   outcome: { type: 'string', enum: ['success', 'failure'] }
 });
