@@ -6,6 +6,7 @@ import type {
   ChainEndpoint,
   ChainInfo,
   IngestedTransaction,
+  PolymarketAccountRecord,
   TokenInfo,
   TransactionCursor
 } from '../ingest/types.js';
@@ -28,13 +29,16 @@ const TRANSACTION_PROJECTION = {
 /**
  * Fields of a B2C `users` document that the ingestion reads. The phone number is read only to
  * derive the country of its calling code and is dropped right after; nothing else that identifies
- * a person is read.
+ * a person is read. Of the Polymarket account only the address and its creation date are read, to
+ * count accounts; the encrypted API credentials and the signer stay out of the projection.
  */
 const USER_PROJECTION = {
   creationDate: 1,
   phone_number: 1,
   'wallets.chain_id': 1,
-  'wallets.wallet_proxy': 1
+  'wallets.wallet_proxy': 1,
+  'polymarket_account.polygon_address': 1,
+  'polymarket_account.created_at': 1
 } as const;
 
 /** Country category of a phone number without a single country. */
@@ -96,11 +100,30 @@ export function toIngestedTransaction(document: MongoDocument): IngestedTransact
 }
 
 /**
+ * Polymarket account of a B2C `users` document.
+ *
+ * @param value - Raw `polymarket_account`, with the fields of the user projection.
+ * @returns Whether its `polygon_address` is an EVM address and its `created_at`; `null` when the
+ *   document has no account.
+ */
+export function polymarketAccountOf(value: unknown): PolymarketAccountRecord | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+  const account = value as MongoDocument;
+  const address = account.polygon_address;
+  return {
+    validAddress: typeof address === 'string' && /^0x[0-9a-fA-F]{40}$/.test(address),
+    createdAt: account.created_at instanceof Date ? account.created_at : null
+  };
+}
+
+/**
  * Maps a B2C `users` document to its ingested record.
  *
  * @param document - Document with the fields of the user projection.
- * @returns The record: id, signup date, wallets and the country of the phone number, never the
- *   number itself.
+ * @returns The record: id, signup date, wallets, the country of the phone number, never the
+ *   number itself, and whether the user has a Polymarket account.
  */
 export function toIngestedUser(document: MongoDocument): B2cUserRecord {
   const wallets: unknown = document.wallets;
@@ -108,6 +131,7 @@ export function toIngestedUser(document: MongoDocument): B2cUserRecord {
     id: String(document._id),
     createdAt: document.creationDate instanceof Date ? document.creationDate : null,
     country: countryOfPhone(document.phone_number),
+    polymarket: polymarketAccountOf(document.polymarket_account),
     wallets: Array.isArray(wallets)
       ? wallets
           .map((wallet: MongoDocument) => ({
@@ -172,7 +196,17 @@ export class MongoB2cActivityReader implements B2cActivityReader {
       .collection('tokens')
       .find(
         {},
-        { projection: { _id: 0, chain_id: 1, symbol: 1, type: 1, address: 1, decimals: 1 } }
+        {
+          projection: {
+            _id: 0,
+            chain_id: 1,
+            symbol: 1,
+            type: 1,
+            address: 1,
+            decimals: 1,
+            enabled: 1
+          }
+        }
       )
       .toArray();
     return documents
@@ -187,7 +221,8 @@ export class MongoB2cActivityReader implements B2cActivityReader {
           document.decimals >= 0 &&
           document.decimals <= 36
             ? document.decimals
-            : null
+            : null,
+        b2cEnabled: typeof document.enabled === 'boolean' ? document.enabled : null
       }))
       .filter((token) => token.chainId !== '' && token.symbol !== '');
   }
