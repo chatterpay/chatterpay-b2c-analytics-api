@@ -29,6 +29,12 @@ export interface Facts {
    * synthetic model values every operation, so its records are empty.
    */
   unpriced: UnpricedOperations;
+  /**
+   * Counted transfers and swaps per asset, a swap under its input asset. Absent when some hour of
+   * the span was built without them, and in the synthetic model.
+   */
+  transfersByAsset?: Record<string, number>;
+  swapsByAsset?: Record<string, number>;
 }
 
 type CountKey = 'newUsers' | 'newWallets' | 'activeUserDays' | 'transfers' | 'swaps';
