@@ -578,7 +578,10 @@ describe('network visibility failures', () => {
         status: 'failed',
         wallets: 2,
         walletsRead: 0,
-        reason: 'read_incomplete',
+        attempted: true,
+        endpointPresent: true,
+        reason: 'rpc_failed',
+        lastSuccessAt: null,
         takenAt: NOW.toISOString()
       }
     ]);
@@ -606,7 +609,8 @@ describe('network visibility failures', () => {
         tvlUsd: null,
         share: null,
         status: 'failed',
-        reason: 'read_incomplete'
+        reason: 'rpc_failed',
+        lastSuccessAt: null
       }
     ]);
     // The Base Sepolia token list of the fixture has no native coin, so its wallets were read
