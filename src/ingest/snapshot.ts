@@ -115,6 +115,23 @@ function evmNative(tokens: readonly TokenInfo[], chainId: string): Asset | null 
     : { symbol: token.symbol, stable: token.stable, decimals: EVM_NATIVE_DECIMALS, key: null };
 }
 
+/**
+ * Native coin of an EVM chain from the analytics configuration, for a B2C token list that does not
+ * carry it: the coin of the first master wallet configured for the network (`nativeSymbol`, `ETH`
+ * by default), read in wei like the listed one. `null` without a master wallet on the network.
+ */
+function configuredNative(masters: readonly MasterWalletConfig[]): Asset | null {
+  const wallet = masters[0];
+  return wallet === undefined
+    ? null
+    : {
+        symbol: wallet.nativeSymbol ?? 'ETH',
+        stable: false,
+        decimals: EVM_NATIVE_DECIMALS,
+        key: null
+      };
+}
+
 /** ADA plus the native assets of a Cardano chain listed in the B2C token list. */
 function cardanoAssets(tokens: readonly TokenInfo[], chainId: string): Asset[] {
   const listed = tokens.filter((token) => token.chainId === chainId);
@@ -228,13 +245,13 @@ async function readCardano(
  * sums the user wallets per network and asset. Per-wallet balances are not kept.
  *
  * User wallets hold the assets of the B2C token list (ERC-20 tokens with a contract on EVM, plus
- * the native coin when the list carries it; ADA and the listed native assets on Cardano); master
- * wallets always hold the native coin. Every address is read once, a master wallet that is also a
- * user wallet included, and the native coin once per address. A network row records whether its
- * user wallets were read with the native coin (`native`). A wallet is counted only when all its
- * balances were read, so a failed batch or an exhausted budget lowers the coverage instead of
- * understating a total. A network without endpoint, or with a provider the reader does not speak,
- * is `unsupported`. Values use the price of the snapshot day; an asset without one has no value,
+ * the native coin when the list carries it or, failing that, when a master wallet of the network
+ * names it; ADA and the listed native assets on Cardano); master wallets always hold the native
+ * coin. Every address is read once, a master wallet that is also a user wallet included, and the
+ * native coin once per address. A network row records whether its user wallets were read with the
+ * native coin (`native`). A wallet is counted only when all its balances were read, so a failed
+ * batch or an exhausted budget lowers the coverage instead of understating a total. A network
+ * without endpoint, or with a provider the reader does not speak, is `unsupported`. Values use the price of the snapshot day; an asset without one has no value,
  * and with `valuation: none` no asset has one.
  *
  * No request is sent for a network whose B2C document has `enabled: false` or that the B2C
@@ -278,7 +295,10 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
       skipped === null &&
       endpoint !== undefined &&
       (endpoint.family === 'evm' || input.reader.supportsCardano(endpoint.url));
-    const native = endpoint?.family === 'cardano' ? null : evmNative(input.tokens, chain.chainId);
+    const native =
+      endpoint?.family === 'cardano' || chain.family === 'cardano'
+        ? null
+        : (evmNative(input.tokens, chain.chainId) ?? configuredNative(masters));
     const assets =
       endpoint?.family === 'cardano'
         ? cardanoAssets(input.tokens, chain.chainId)
