@@ -99,9 +99,13 @@ const networkReadReason = {
   type: ['string', 'null'],
   enum: [
     'b2c_disabled',
+    'collection_off',
     'source_absent',
     'no_endpoint',
     'unsupported_provider',
+    'rpc_failed',
+    'budget_exhausted',
+    'deadline_reached',
     'read_incomplete',
     null
   ]
@@ -156,7 +160,8 @@ const tvlBlock = block({
       tvlUsd: nullableDecimal,
       share: nullableRatio,
       status: { type: 'string', enum: ['complete', 'partial', 'failed', 'unsupported'] },
-      reason: networkReadReason
+      reason: networkReadReason,
+      lastSuccessAt: nullableInstant
     })
   ),
   lastComplete: { anyOf: [object({ asOf: instant, valueUsd: decimal }), { type: 'null' }] }
