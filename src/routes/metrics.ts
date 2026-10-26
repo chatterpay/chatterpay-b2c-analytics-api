@@ -158,7 +158,8 @@ const tvlBlock = block({
       status: { type: 'string', enum: ['complete', 'partial', 'failed', 'unsupported'] },
       reason: networkReadReason
     })
-  )
+  ),
+  lastComplete: { anyOf: [object({ asOf: instant, valueUsd: decimal }), { type: 'null' }] }
 });
 
 const topTokensBlock = block({
