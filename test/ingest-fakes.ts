@@ -12,6 +12,7 @@ import type {
   IngestCheckpoints,
   IngestedTransaction,
   IngestedUser,
+  IngestNetworkSettings,
   IngestRepository,
   LiveAggregates,
   PriceProvider,
@@ -245,6 +246,30 @@ export class MemoryIngestRepository implements IngestRepository {
     this.snapshotCopies.set(snapshot.takenAt.getTime(), snapshot);
   }
 
+  /** Settings of the `network_visibility` document; nothing hidden and every network read. */
+  settings: IngestNetworkSettings = { hiddenChainIds: [], uncollectedChainIds: [] };
+
+  async networkSettings(): Promise<IngestNetworkSettings> {
+    return {
+      hiddenChainIds: [...this.settings.hiddenChainIds],
+      uncollectedChainIds: [...this.settings.uncollectedChainIds]
+    };
+  }
+
+  async lastBalanceSuccess(): Promise<Map<string, Date>> {
+    const last = new Map<string, Date>();
+    const rows = [...this.snapshotCopies.values()].flatMap((snapshot) =>
+      (snapshot.balances?.networks ?? []).map((row) => ({ row, at: snapshot.takenAt }))
+    );
+    for (const { row, at } of rows) {
+      const known = last.get(row.network);
+      if (row.status === 'complete' && (row.reason ?? null) === null && !(known && known > at)) {
+        last.set(row.network, at);
+      }
+    }
+    return last;
+  }
+
   async walletObservations(): Promise<WalletObservation[]> {
     return [...this.observations.values()];
   }
@@ -412,10 +437,13 @@ export interface ReaderCall {
 
 /**
  * Balance reader that records every invocation and answers one unit (1.0 of a 6-decimal token)
- * per ERC-20 query, nothing of the native coin, and 1 ADA per Cardano address.
+ * per ERC-20 query, nothing of the native coin, and 1 ADA per Cardano address. An EVM endpoint of
+ * `down` answers nothing: its request counts as sent and failed, as a node that was shut down.
  */
 export class RecordingBalanceReader implements BalanceReader {
   readonly calls: ReaderCall[] = [];
+
+  constructor(private readonly down: ReadonlySet<string> = new Set()) {}
 
   async evm(
     url: string,
@@ -429,6 +457,10 @@ export class RecordingBalanceReader implements BalanceReader {
     });
     budget.remaining -= 1;
     budget.used += 1;
+    if (this.down.has(url)) {
+      budget.failed += 1;
+      return queries.map(() => null);
+    }
     return queries.map((query) => (query.token === null ? 0n : 1_000_000n));
   }
 
