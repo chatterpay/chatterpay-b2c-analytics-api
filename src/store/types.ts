@@ -69,7 +69,9 @@ export type ActivityAction =
   | 'role_changed'
   | 'member_removed'
   | 'network_hidden'
-  | 'network_shown';
+  | 'network_shown'
+  | 'token_hidden'
+  | 'token_shown';
 
 /** Activity log entry. Never carries codes or tokens. */
 export interface ActivityEvent {
@@ -77,7 +79,10 @@ export interface ActivityEvent {
   at: Date;
   actorId: string | null;
   action: ActivityAction;
-  /** Email the action applies to, or the network as `Label (chainId)`; `null` when none. */
+  /**
+   * Email the action applies to, the network as `Label (chainId)` or the token as
+   * `SYMBOL on Label (tokenId)`; `null` when none.
+   */
   target: string | null;
   outcome: 'success' | 'failure';
 }
@@ -154,6 +159,12 @@ export type MemberMutationResult =
 export interface NetworkVisibility {
   /** Hidden chain ids, sorted; they may include chain ids no longer in the catalog. */
   disabledChainIds: string[];
+  /**
+   * Hidden token ids (`chainId:address`, see `tokenIdOf`), sorted; they may include tokens no
+   * longer in the catalog. Independent of `disabledChainIds`: hiding a network writes nothing here,
+   * so showing it again brings back the preferences of its tokens.
+   */
+  disabledTokenIds: string[];
   /** Grows by one on every change; 0 while the policy was never changed. */
   revision: number;
   updatedAt: Date | null;
@@ -172,11 +183,23 @@ export interface NetworkVisibilityChange {
   actorId: string;
 }
 
+/** Input of {@link Store.changeTokenVisibility}. */
+export interface TokenVisibilityChange {
+  tokenId: string;
+  analyticsEnabled: boolean;
+  /** Revision the admin saw; any other current revision is a conflict. */
+  expectedRevision: number;
+  actorId: string;
+}
+
 /** Outcome of a visibility change; every kind carries the policy as it stands after the call. */
 export type NetworkVisibilityResult =
   | { kind: 'ok'; visibility: NetworkVisibility; changed: boolean }
   | { kind: 'conflict'; visibility: NetworkVisibility }
   | { kind: 'last_enabled'; visibility: NetworkVisibility };
+
+/** Outcome of a token visibility change; tokens have no last-visible rule. */
+export type TokenVisibilityResult = Exclude<NetworkVisibilityResult, { kind: 'last_enabled' }>;
 
 /** Member resolved at login, with the invite accepted on the way when there was one. */
 export interface ActivatedMember {
@@ -286,4 +309,10 @@ export interface Store {
     change: NetworkVisibilityChange,
     now: Date
   ): Promise<NetworkVisibilityResult>;
+  /**
+   * Shows or hides a token, as a compare-and-set on the same revision as the networks: `conflict`
+   * when the current revision is not `expectedRevision`. Setting the state a token already has
+   * answers `ok` with `changed: false` and keeps the revision.
+   */
+  changeTokenVisibility(change: TokenVisibilityChange, now: Date): Promise<TokenVisibilityResult>;
 }
