@@ -153,10 +153,20 @@ export interface SnapshotNetwork {
   /** Of those, the requests that failed. */
   failedCalls?: number;
   /**
-   * B2C `enabled` of the network at the run; `null` when the document has no boolean `enabled` or
-   * the B2C database no longer lists the network.
+   * B2C `enabled` of the network at the run, informative only: it says whether B2C takes new
+   * operations and plays no part in what is read. `null` when the document has no boolean
+   * `enabled` or the B2C database no longer lists the network.
    */
   b2cEnabled?: boolean | null;
+  /** Whether the analytics settings let the run read the balances of the network. */
+  collectBalances?: boolean;
+  /** Whether the run sent, or tried to send within its budget, the balance reads of the network. */
+  attempted?: boolean;
+  /**
+   * Start of the last run, this one included, that read every user wallet of the network; `null`
+   * when none did. The date of an observation, never a current balance.
+   */
+  lastSuccessAt?: Date | null;
   /** Why the network was not read, or not completely; `null` when it was read in full. */
   reason?: NetworkReadReason | null;
   /**
@@ -326,6 +336,20 @@ export interface StoredAggregates extends LiveAggregates {
   snapshots: RunSnapshot[];
 }
 
+/**
+ * Settings of the analytics that the ingestion reads, by chain id, from the `network_visibility`
+ * document of `analytics_settings`.
+ */
+export interface IngestNetworkSettings {
+  /** Networks hidden from the statistics. Reported only: the run copies and reads them anyway. */
+  hiddenChainIds: string[];
+  /**
+   * Networks whose balances the run does not read, such as a network whose node was shut down.
+   * Absent from documents written before it existed, which read every network.
+   */
+  uncollectedChainIds: string[];
+}
+
 /** Copies kept by {@link IngestRepository.replaceCatalog} although the B2C database dropped them. */
 export interface CatalogRetention {
   networks: number;
@@ -363,6 +387,13 @@ export interface IngestRepository {
   savePrices(items: readonly DailyPrice[]): Promise<void>;
   /** Stores the snapshot of a run, keyed by `takenAt`, so a repeated write replaces it. */
   saveSnapshot(snapshot: RunSnapshot): Promise<void>;
+  /** Visibility and balance collection settings; by default nothing hidden, every network read. */
+  networkSettings(): Promise<IngestNetworkSettings>;
+  /**
+   * `takenAt` of the last stored snapshot that read every user wallet of each network: a row with
+   * `status: complete` and no reason. Networks never read in full are absent.
+   */
+  lastBalanceSuccess(): Promise<Map<NetworkId, Date>>;
   /** Wallet observations of every earlier run. */
   walletObservations(): Promise<WalletObservation[]>;
   /** Adds observations of wallets not seen before; known wallets keep their first observation. */
