@@ -17,6 +17,8 @@ import type {
   UnavailableReason
 } from './types.js';
 
+const HOUR_MS = 3_600_000;
+
 function firstHour(window: TimeWindow): number {
   return window.start.day * 24 + window.start.hour;
 }
@@ -132,6 +134,34 @@ function asOfOf(source: SnapshotSource, snapshot: RunSnapshot): string | null {
   return source.kind === 'live' ? snapshot.takenAt.toISOString() : null;
 }
 
+/** Whether a snapshot read every network of `networks` completely and valued all they held. */
+function readCompletely(snapshot: RunSnapshot, networks: ReadonlySet<NetworkId>): boolean {
+  return (
+    readsAny(snapshot, networks) &&
+    snapshotAvailability(snapshot, networks).availability === 'available'
+  );
+}
+
+/**
+ * Last snapshot through `lastHourOf` that read `networks` completely, stepping back one snapshot
+ * hour at a time; `null` when none did. Only the last snapshot of each hour is considered, as in
+ * {@link SnapshotSource.balancesBetween}.
+ */
+function lastCompleteSnapshot(
+  source: SnapshotSource,
+  networks: ReadonlySet<NetworkId>,
+  lastHourOf: number
+): RunSnapshot | null {
+  let found = source.balancesBetween(Number.NEGATIVE_INFINITY, lastHourOf);
+  while (found !== null && !readCompletely(found, networks)) {
+    found = source.balancesBetween(
+      Number.NEGATIVE_INFINITY,
+      Math.floor(found.takenAt.getTime() / HOUR_MS) - 1
+    );
+  }
+  return found;
+}
+
 /**
  * Builds the TVL block: the USD value of the assets in user wallets, from the last snapshot taken
  * through the end of the range. The comparison value is the last snapshot inside the previous
@@ -140,7 +170,10 @@ function asOfOf(source: SnapshotSource, snapshot: RunSnapshot): string | null {
  * gives `null` as well (`not_read`): an earlier reading is never served as the current balance.
  * So does a run that valued nothing (`not_valued`) or a snapshot whose held assets have no price
  * (`unpriced_assets`). User wallets read without the native coin leave it `partial`
- * (`native_not_covered`), never `available`.
+ * (`native_not_covered`), never `available`. A `partial` value is the subtotal of what was read,
+ * so it carries no comparison, and neither does a value whose previous snapshot was `partial`.
+ * When the block is `not_read`, `lastComplete` is the last earlier snapshot that read every
+ * selected network completely, as a dated historical balance; it is never the value.
  *
  * @param networks - Networks of the filter.
  * @param resolved - Range windows and buckets.
@@ -156,8 +189,12 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
     const found = source.balancesBetween(firstHour(bucket), lastHour(bucket));
     return {
       ...periodOf(bucket),
+      // A bucket whose held assets all lack a price has no value, not a value of zero.
       tvlUsd:
-        found === null || !readsAny(found, selected) || !isValued(found)
+        found === null ||
+        !readsAny(found, selected) ||
+        !isValued(found) ||
+        unpricedOnly(found, selected)
           ? null
           : centsToUsd(tvlCents(found, selected)),
       asOf: found === null ? null : found.takenAt.toISOString()
@@ -173,7 +210,8 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
       firstSnapshotAt: first?.toISOString() ?? null,
       coverage: null,
       series,
-      byNetwork: []
+      byNetwork: [],
+      lastComplete: null
     };
   }
   const previousWindow = resolved.previous;
@@ -189,18 +227,19 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
     ? snapshotAvailability(current, selected)
     : { availability: 'unavailable', reason: 'not_read' };
   const shown = status.availability !== 'unavailable';
+  const previousCents =
+    status.availability === 'available' && previous !== null && readCompletely(previous, selected)
+      ? tvlCents(previous, selected)
+      : null;
+  const historical =
+    status.reason === 'not_read'
+      ? lastCompleteSnapshot(source, selected, lastHour(resolved.current))
+      : null;
   return {
     source: kind,
     ...status,
     asOf: asOfOf(source, current),
-    value: shown
-      ? moneyMetric(
-          total,
-          previous === null || !readsAny(previous, selected) || !isValued(previous)
-            ? null
-            : tvlCents(previous, selected)
-        )
-      : null,
+    value: shown ? moneyMetric(total, previousCents) : null,
     firstSnapshotAt: first?.toISOString() ?? null,
     coverage: coverageOf(current, selected),
     series,
@@ -219,7 +258,14 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
           status: row.status,
           reason: row.reason ?? null
         };
-      })
+      }),
+    lastComplete:
+      historical === null
+        ? null
+        : {
+            asOf: historical.takenAt.toISOString(),
+            valueUsd: centsToUsd(tvlCents(historical, selected))
+          }
   };
 }
 
