@@ -15,6 +15,7 @@ import type {
   IngestNetworkSettings,
   IngestRepository,
   LiveAggregates,
+  PolymarketAccountRecord,
   PriceProvider,
   RunSnapshot,
   StoredAggregates,
@@ -109,7 +110,9 @@ export class FakeReader implements B2cActivityReader {
 
   constructor(
     public rows: IngestedTransaction[],
-    public userList: Array<IngestedUser & { country?: string }> = [],
+    public userList: Array<
+      IngestedUser & { country?: string; polymarket?: PolymarketAccountRecord | null }
+    > = [],
     public tokenList: TokenInfo[] = TOKENS,
     public chainList: ChainInfo[] = CHAINS,
     public endpointList: ChainEndpoint[] = ENDPOINTS
