@@ -47,8 +47,20 @@ const OPTIONS: IngestionOptions = {
 };
 
 const B2C_DOCUMENTS = [
-  { name: 'Base Sepolia', family: 'evm', chainId: 84532, enabled: true },
-  { name: 'Cardano Preprod', family: 'cardano', chainId: 900000000001, enabled: true },
+  {
+    name: 'Base Sepolia',
+    family: 'evm',
+    chainId: 84532,
+    enabled: true,
+    explorer: 'https://sepolia.basescan.org/'
+  },
+  {
+    name: 'Cardano Preprod',
+    family: 'cardano',
+    chainId: 900000000001,
+    enabled: true,
+    explorer: 'https://preprod.cardanoscan.io/transaction/'
+  },
   { name: 'Scroll', family: 'evm', chainId: 534352, enabled: false }
 ];
 
@@ -160,6 +172,7 @@ interface AdminToken {
   analyticsEnabled: boolean;
   effectiveEnabled: boolean;
   sourcePresent: boolean;
+  explorerUrl: string | null;
 }
 
 function tokensOf(body: { networks: Array<{ id: string; tokens: AdminToken[] }> }, id: string) {
@@ -381,15 +394,20 @@ describe('token visibility endpoints', () => {
       `84532:${TOKEN_ADDRESSES.WBTC}`,
       `84532:${TOKEN_ADDRESSES.WETH}`
     ]);
+    expect(tokensOf(admin, 'base-sepolia')[0]?.explorerUrl).toBe(
+      `https://sepolia.basescan.org/token/${TOKEN_ADDRESSES.USDC}`
+    );
     expect(tokensOf(admin, 'cardano-preprod')[0]).toMatchObject({
       id: '900000000001:native',
-      symbol: 'ADA'
+      symbol: 'ADA',
+      explorerUrl: null
     });
     expect(tokensOf(admin, 'scroll').find((token) => token.symbol === 'USDT')).toMatchObject({
       id: SCROLL_USDT_ID,
       analyticsEnabled: true,
       effectiveEnabled: true,
-      sourcePresent: true
+      sourcePresent: true,
+      explorerUrl: null
     });
   });
 
@@ -605,6 +623,93 @@ describe('token visibility endpoints', () => {
         updatedAt: NOW,
         updatedBy: 'b'
       }
+    });
+  });
+});
+
+describe('swaps under the token policy', () => {
+  const WETH_ID = `84532:${TOKEN_ADDRESSES.WETH}`;
+  const USDC_ID = `84532:${TOKEN_ADDRESSES.USDC}`;
+
+  beforeEach(() => {
+    setNetworks(toNetworkDefinitions(B2C_DOCUMENTS));
+    setTokens(TOKENS);
+    // A USDC -> WETH swap of 10 USDC and a 5 USDT transfer, both on Base Sepolia.
+    const rows = [
+      transaction(1, {
+        type: 'swap',
+        hash: '0xswap',
+        from: '0xBase',
+        to: '0xRouter',
+        token: 'USDC',
+        amount: 10,
+        fee: 0.1
+      }),
+      transaction(2, {
+        type: 'swap',
+        hash: '0xswap',
+        from: '0xRouter',
+        to: '0xBase',
+        token: 'WETH',
+        amount: 0.004,
+        fee: 0,
+        date: new Date('2026-10-12T10:00:00.010Z')
+      }),
+      transaction(3, { from: '0xBase', token: 'USDT', amount: 5, fee: 0.05 })
+    ];
+    const { aggregates } = aggregateActivity({
+      transactions: rows,
+      users: USERS,
+      tokens: TOKENS,
+      chains: new Map(CHAINS.map((chain) => [chain.chainId, chain.network])),
+      prices: []
+    });
+    setLiveSource(liveSourceFrom(aggregates), NOW);
+  });
+
+  function figures(hiddenIds: string[]) {
+    const hidden = hiddenAssets(hiddenIds, listNetworks());
+    const overview = buildOverview('base-sepolia', 'month', NOW, undefined, hidden);
+    const revenue = buildRevenue('base-sepolia', 'month', NOW, undefined, hidden);
+    return {
+      volume: overview.tiles.volumeUsd.value,
+      transactions: overview.tiles.transactions.value,
+      swapVolume: revenue.tiles.swapVolumeUsd.value,
+      fees: revenue.tiles.feesUsd.value,
+      byAsset: revenue.byAsset.map((row) => [row.asset, row.volumeUsd]),
+      traded: overview.tradedTokens.items.map((row) => [row.asset, row.operations])
+    };
+  }
+
+  it('counts a swap once, under the token it starts from', () => {
+    expect(figures([])).toEqual({
+      volume: '15.00',
+      transactions: 2,
+      swapVolume: '10.00',
+      fees: '0.15',
+      byAsset: [
+        ['USDC', '10.00'],
+        ['USDT', '5.00']
+      ],
+      traded: [
+        ['USDC', 1],
+        ['USDT', 1]
+      ]
+    });
+  });
+
+  it('keeps a swap whole when only the token it ends in is hidden', () => {
+    expect(figures([WETH_ID])).toEqual(figures([]));
+  });
+
+  it('leaves a swap out whole when the token it starts from is hidden', () => {
+    expect(figures([USDC_ID])).toEqual({
+      volume: '5.00',
+      transactions: 1,
+      swapVolume: '0.00',
+      fees: '0.05',
+      byAsset: [['USDT', '5.00']],
+      traded: [['USDT', 1]]
     });
   });
 });
