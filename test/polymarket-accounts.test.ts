@@ -92,6 +92,20 @@ describe('Polymarket accounts in the ingestion', () => {
     });
     expect(repository.userCopies.every((copy) => !('polymarket' in copy))).toBe(true);
   });
+
+  it('counts a user with several wallets once', async () => {
+    const owner: User = {
+      ...user('f', { validAddress: true, createdAt: new Date('2026-10-20T12:30:00.000Z') }),
+      wallets: [
+        { chainId: '84532', address: '0xf1' },
+        { chainId: '534351', address: '0xf2' }
+      ]
+    };
+
+    const { report } = await ingest([owner]);
+
+    expect(report.sources.users.polymarketAccounts).toBe(1);
+  });
 });
 
 describe('Polymarket accounts block', () => {
