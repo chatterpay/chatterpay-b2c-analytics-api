@@ -1,6 +1,8 @@
 import type { FastifyRequest } from 'fastify';
 import { ApiError } from '../errors/api-error.js';
 import { listNetworks, type NetworkDefinition } from '../metrics/catalog.js';
+import type { HiddenAssets } from '../metrics/token-scope.js';
+import { hiddenAssets } from '../metrics/tokens.js';
 import { visibleNetworks } from '../store/network-visibility.js';
 import type { NetworkVisibility, Store } from '../store/types.js';
 
@@ -40,10 +42,34 @@ export async function visibleCatalog(
   store: Store,
   request: FastifyRequest
 ): Promise<NetworkDefinition[]> {
-  const visible = visibleNetworks(listNetworks(), await readVisibility(store, request));
+  return (await statisticsScope(store, request)).networks;
+}
+
+/** Networks and tokens the statistics of one request cover. */
+export interface StatisticsScope {
+  /** Visible networks, in display order; at least one. */
+  networks: NetworkDefinition[];
+  /** Hidden tokens of the visible networks, by network and upper-case symbol. */
+  hidden: HiddenAssets;
+}
+
+/**
+ * Networks and hidden tokens the statistics of one request cover, from one read of the policy.
+ *
+ * @param store - Store holding the policy.
+ * @param request - Request, for its logger.
+ * @returns The scope.
+ * @throws {ApiError} 503 when the policy cannot be read or no network of the catalog is visible.
+ */
+export async function statisticsScope(
+  store: Store,
+  request: FastifyRequest
+): Promise<StatisticsScope> {
+  const policy = await readVisibility(store, request);
+  const visible = visibleNetworks(listNetworks(), policy);
   if (visible.length === 0) {
     request.log.error('no network of the catalog is visible');
     throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'No network is available');
   }
-  return visible;
+  return { networks: visible, hidden: hiddenAssets(policy.disabledTokenIds, visible) };
 }
