@@ -15,6 +15,7 @@ interface BlockchainDocument {
   family?: unknown;
   chainId?: unknown;
   enabled?: unknown;
+  explorer?: unknown;
 }
 
 /**
@@ -75,6 +76,26 @@ export function networkSlug(name: string): string {
 }
 
 /**
+ * Origin of an explorer URL such as `https://preprod.cardanoscan.io/transaction/`, so the token and
+ * address pages are built from the host alone. Only HTTPS is kept: the value ends in a link of the
+ * site.
+ *
+ * @param value - `explorer` of a B2C document or of a retained copy.
+ * @returns The origin, or `null` without an HTTPS URL.
+ */
+export function explorerOrigin(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === 'https:' ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Maps the `blockchains` documents to catalog networks, sorted by name.
  *
  * EVM documents may omit `family`. Documents of other families are skipped, because the synthetic
@@ -82,7 +103,7 @@ export function networkSlug(name: string): string {
  * repeated slugs or chain ids. `enabled` is carried as information only: a network disabled for
  * new B2C operations keeps its history in the analytics.
  *
- * @param documents - Documents with `name`, `family`, `chainId` and `enabled`.
+ * @param documents - Documents with `name`, `family`, `chainId`, `enabled` and `explorer`.
  * @returns The networks of the catalog.
  */
 export function toNetworkDefinitions(
@@ -117,7 +138,8 @@ export function toNetworkDefinitions(
       family,
       chainId,
       b2cEnabled: typeof document.enabled === 'boolean' ? document.enabled : null,
-      sourcePresent: true
+      sourcePresent: true,
+      explorer: explorerOrigin(document.explorer)
     });
   }
   return sortByLabel(definitions);
@@ -162,7 +184,8 @@ export function mergeCatalog(
       family: chain.family,
       chainId: chain.chainId,
       b2cEnabled: null,
-      sourcePresent: false
+      sourcePresent: false,
+      explorer: explorerOrigin(chain.explorer)
     });
   }
   return sortByLabel(merged);
@@ -170,8 +193,8 @@ export function mergeCatalog(
 
 /**
  * Read-only access to the `blockchains` collection of the ChatterPay B2C database, the source of
- * the networks that the metrics endpoints offer. Only `name`, `family`, `chainId` and `enabled`
- * are read here, from every document whatever its `enabled`;
+ * the networks that the metrics endpoints offer. Only `name`, `family`, `chainId`, `enabled` and
+ * `explorer` are read here, from every document whatever its `enabled`;
  * {@link B2cNetworkSource.activity} reads the collections the ingestion copies.
  */
 export class B2cNetworkSource {
@@ -205,7 +228,7 @@ export class B2cNetworkSource {
     const documents = await this.client
       .db(this.dbName)
       .collection<BlockchainDocument>('blockchains')
-      .find({}, { projection: { _id: 0, name: 1, family: 1, chainId: 1, enabled: 1 } })
+      .find({}, { projection: { _id: 0, name: 1, family: 1, chainId: 1, enabled: 1, explorer: 1 } })
       .toArray();
     return toNetworkDefinitions(documents);
   }
