@@ -134,6 +134,21 @@ function asOfOf(source: SnapshotSource, snapshot: RunSnapshot): string | null {
   return source.kind === 'live' ? snapshot.takenAt.toISOString() : null;
 }
 
+/**
+ * Last run that read every user wallet of a network, as stored with the row; for a row stored
+ * before it was recorded, the snapshot itself when it read the network in full, else unknown.
+ */
+function lastSuccessOf(
+  source: SnapshotSource,
+  snapshot: RunSnapshot,
+  row: SnapshotNetwork
+): string | null {
+  const fallback =
+    row.status === 'complete' && (row.reason ?? null) === null ? snapshot.takenAt : null;
+  const at = row.lastSuccessAt === undefined ? fallback : row.lastSuccessAt;
+  return source.kind === 'live' && at !== null ? at.toISOString() : null;
+}
+
 /** Whether a snapshot read every network of `networks` completely and valued all they held. */
 function readCompletely(snapshot: RunSnapshot, networks: ReadonlySet<NetworkId>): boolean {
   return (
@@ -256,7 +271,8 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
           tvlUsd: wasRead(row) && priced ? centsToUsd(cents) : null,
           share: wasRead(row) && priced && shown ? shareOf(cents, total) : null,
           status: row.status,
-          reason: row.reason ?? null
+          reason: row.reason ?? null,
+          lastSuccessAt: lastSuccessOf(source, current, row)
         };
       }),
     lastComplete:
