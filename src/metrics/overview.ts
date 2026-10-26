@@ -3,10 +3,16 @@ import { type NetworkFilter, type NetworkId, networkProfile, networksFor } from 
 import type { Facts, MoneyKey } from './facts.js';
 import { countMetric } from './format.js';
 import { buildTopCountries, buildTopTokens, buildTvl } from './holdings.js';
-import { activityTotals, buildVolumeByProduct } from './products.js';
+import { activityTotals, buildTradedTokens, buildVolumeByProduct } from './products.js';
 import { resolveRange } from './ranges.js';
 import { type MetricGroup, provenanceOf, sourceFor } from './sources.js';
-import type { MetricsRange, OverviewResponse, RangeMeta } from './types.js';
+import {
+  type HiddenAssets,
+  NO_HIDDEN_ASSETS,
+  scopedActivity,
+  tokenScopeOf
+} from './token-scope.js';
+import type { MetricsRange, OverviewResponse, RangeMeta, TokenScope } from './types.js';
 import {
   buildValuation,
   FEE_KEYS,
@@ -32,13 +38,15 @@ const OVERVIEW_GROUPS: readonly MetricGroup[] = [
  * @param range - Requested range.
  * @param now - Generation instant.
  * @param groups - Metric groups of the response, which set its provenance.
+ * @param tokenScope - Hidden tokens of the selected networks.
  * @returns The meta object.
  */
 export function rangeMeta(
   network: NetworkFilter,
   range: MetricsRange,
   now: Date,
-  groups: readonly MetricGroup[]
+  groups: readonly MetricGroup[],
+  tokenScope: TokenScope
 ): RangeMeta {
   const resolved = resolveRange(range, dayHourOf(now));
   return {
@@ -49,7 +57,8 @@ export function rangeMeta(
     range,
     period: periodOf(resolved.current),
     previousPeriod: resolved.previous === null ? null : periodOf(resolved.previous),
-    bucket: resolved.bucket
+    bucket: resolved.bucket,
+    tokenScope
   };
 }
 
@@ -64,15 +73,15 @@ interface NetworkTotals {
 function totalsFor(
   network: NetworkId,
   current: TimeWindow,
-  previous: TimeWindow | null
+  previous: TimeWindow | null,
+  activity: (network: NetworkId, window: TimeWindow) => Facts
 ): NetworkTotals {
-  const activity = sourceFor('activity');
   const active = sourceFor('activeUsers');
   const signups = sourceFor('signups');
   return {
     network,
-    facts: activity.facts(network, current),
-    previous: previous === null ? null : activity.facts(network, previous),
+    facts: activity(network, current),
+    previous: previous === null ? null : activity(network, previous),
     activeUsers: active.activeUsers(network, current),
     newUsers: signups.facts(network, current).newUsers
   };
@@ -115,29 +124,36 @@ function previousValued(
  * TVL and Top Tokens come from the balance snapshots and Top Countries from the country counts of
  * the last ingestion run; each block states its own availability and the instant it reflects.
  *
+ * Hidden tokens (`meta.tokenScope`) leave every money figure, the transaction counts when the
+ * build counts operations per asset, TVL, Top Tokens and Most Traded Tokens before anything is
+ * added; user and country figures have no token and keep counting them.
+ *
  * @param network - Network filter.
  * @param range - Time range.
  * @param now - Current instant; the dataset ends at its hour.
  * @param visible - Networks visible in the analytics, which `all` covers; every network of the
  *   catalog when omitted.
+ * @param hidden - Hidden tokens per network.
  * @returns The Overview response.
  */
 export function buildOverview(
   network: NetworkFilter,
   range: MetricsRange,
   now: Date,
-  visible?: readonly NetworkId[]
+  visible?: readonly NetworkId[],
+  hidden: HiddenAssets = NO_HIDDEN_ASSETS
 ): OverviewResponse {
   const resolved = resolveRange(range, dayHourOf(now));
   const networks = networksFor(network, visible);
-  const totals = networks.map((id) => totalsFor(id, resolved.current, resolved.previous));
+  const source = sourceFor('activity');
+  const activity = scopedActivity(source, hidden);
+  const totals = networks.map((id) => totalsFor(id, resolved.current, resolved.previous, activity));
 
-  const activity = sourceFor('activity');
   const active = sourceFor('activeUsers');
   const signups = sourceFor('signups');
   const series = resolved.buckets.map((bucket) => {
     const byNetwork = networks.map((id) => {
-      const facts = activity.facts(id, bucket);
+      const facts = activity(id, bucket);
       return { network: id, facts, transactions: facts.transfers + facts.swaps };
     });
     return {
@@ -156,7 +172,7 @@ export function buildOverview(
   });
 
   return {
-    meta: rangeMeta(network, range, now, OVERVIEW_GROUPS),
+    meta: rangeMeta(network, range, now, OVERVIEW_GROUPS, tokenScopeOf(networks, hidden, source)),
     tiles: {
       volumeUsd: valuedMoneyMetric(
         valuedOf(
@@ -198,8 +214,12 @@ export function buildOverview(
       newUsers: t.newUsers
     })),
     valuation: buildValuation(totals.map((t) => ({ network: t.network, facts: t.facts }))),
-    tvl: buildTvl(networks, resolved),
-    topTokens: buildTopTokens(networks, resolved),
+    tvl: buildTvl(networks, resolved, hidden),
+    topTokens: buildTopTokens(networks, resolved, hidden),
+    tradedTokens: buildTradedTokens(
+      totals.map((t) => ({ network: t.network, facts: t.facts })),
+      source.countsByAsset()
+    ),
     topCountries: buildTopCountries(network, hourIndexOf(now), visible),
     volumeByProduct: buildVolumeByProduct(activityTotals(totals.map((t) => t.facts)))
   };
