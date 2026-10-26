@@ -6,6 +6,7 @@ import { centsToUsd, moneyMetric } from './format.js';
 import type { ResolvedRange } from './ranges.js';
 import type { SnapshotSource } from './snapshot-source.js';
 import { snapshotsFor } from './sources.js';
+import { type HiddenAssets, NO_HIDDEN_ASSETS, scopedSnapshots } from './token-scope.js';
 import type {
   Availability,
   MasterWalletsBlock,
@@ -188,14 +189,20 @@ function lastCompleteSnapshot(
  * (`native_not_covered`), never `available`. A `partial` value is the subtotal of what was read,
  * so it carries no comparison, and neither does a value whose previous snapshot was `partial`.
  * When the block is `not_read`, `lastComplete` is the last earlier snapshot that read every
- * selected network completely, as a dated historical balance; it is never the value.
+ * selected network completely, as a dated historical balance; it is never the value. Hidden
+ * tokens are left out of every snapshot before anything is added.
  *
  * @param networks - Networks of the filter.
  * @param resolved - Range windows and buckets.
+ * @param hidden - Hidden tokens per network.
  * @returns The block.
  */
-export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange): TvlBlock {
-  const source = snapshotsFor('balances');
+export function buildTvl(
+  networks: readonly NetworkId[],
+  resolved: ResolvedRange,
+  hidden: HiddenAssets = NO_HIDDEN_ASSETS
+): TvlBlock {
+  const source = scopedSnapshots(snapshotsFor('balances'), hidden);
   const selected = new Set(networks);
   const kind = source.kind;
   const first = source.firstBalancesAt();
@@ -287,18 +294,22 @@ export function buildTvl(networks: readonly NetworkId[], resolved: ResolvedRange
 
 /**
  * Builds the Top Tokens block from the snapshot behind the TVL: each asset summed over the selected
- * networks, by USD value. An asset unpriced on any of them has no value and goes last. A snapshot
- * that read none of the selected networks answers `unavailable` (`not_read`), as the TVL does.
+ * networks, by USD value, with its amount and value on each network. An asset unpriced on any of
+ * them has no total value and goes last; its amounts stay. A snapshot that read none of the
+ * selected networks answers `unavailable` (`not_read`), as the TVL does. Hidden tokens are left
+ * out.
  *
  * @param networks - Networks of the filter.
  * @param resolved - Range windows.
+ * @param hidden - Hidden tokens per network.
  * @returns The block.
  */
 export function buildTopTokens(
   networks: readonly NetworkId[],
-  resolved: ResolvedRange
+  resolved: ResolvedRange,
+  hidden: HiddenAssets = NO_HIDDEN_ASSETS
 ): TopTokensBlock {
-  const source = snapshotsFor('balances');
+  const source = scopedSnapshots(snapshotsFor('balances'), hidden);
   const selected = new Set(networks);
   const current = source.balancesBetween(Number.NEGATIVE_INFINITY, lastHour(resolved.current));
   if (current === null) {
@@ -321,15 +332,24 @@ export function buildTopTokens(
       totalUsd: null
     };
   }
-  const byAsset = new Map<string, { amounts: string[]; cents: number | null }>();
-  for (const holding of current.balances?.holdings ?? []) {
-    if (!selected.has(holding.network)) {
-      continue;
-    }
-    const entry = byAsset.get(holding.asset) ?? { amounts: [], cents: 0 };
+  const order = new Map(networks.map((id, index) => [id, index]));
+  const byAsset = new Map<
+    string,
+    { amounts: string[]; cents: number | null; networks: TokenHolding['networks'] }
+  >();
+  const held = (current.balances?.holdings ?? [])
+    .filter((holding) => selected.has(holding.network))
+    .sort((left, right) => (order.get(left.network) ?? 0) - (order.get(right.network) ?? 0));
+  for (const holding of held) {
+    const entry = byAsset.get(holding.asset) ?? { amounts: [], cents: 0, networks: [] };
     entry.amounts.push(holding.amount);
     entry.cents =
       entry.cents === null || holding.valueCents === null ? null : entry.cents + holding.valueCents;
+    entry.networks.push({
+      network: holding.network,
+      amount: holding.amount,
+      valueUsd: holding.valueCents === null ? null : centsToUsd(holding.valueCents)
+    });
     byAsset.set(holding.asset, entry);
   }
   const total = sum([...byAsset.values()].map((entry) => entry.cents ?? 0));
@@ -343,7 +363,8 @@ export function buildTopTokens(
       asset,
       amount: addDecimals(entry.amounts),
       valueUsd: entry.cents === null ? null : centsToUsd(entry.cents),
-      share: entry.cents === null ? null : shareOf(entry.cents, total)
+      share: entry.cents === null ? null : shareOf(entry.cents, total),
+      networks: entry.networks
     }));
   // Without any USD value the items keep their amounts and the total is `null`, not zero.
   return {
@@ -453,17 +474,19 @@ export function buildTopCountries(
  * Builds the Master Wallets block: the configured signers of the selected networks with their
  * balances in the last snapshot. Balances are not fees: nothing here is attributed as revenue.
  * When none of the listed wallets was read the block is `unavailable` (`not_read`) and its total
- * `null`; the wallets stay listed with their status.
+ * `null`; the wallets stay listed with their status. Balances of hidden tokens are left out.
  *
  * @param networks - Networks of the filter.
  * @param now - Current hour, in hours since 1970-01-01T00:00Z.
+ * @param hidden - Hidden tokens per network.
  * @returns The block.
  */
 export function buildMasterWallets(
   networks: readonly NetworkId[],
-  now: number
+  now: number,
+  hidden: HiddenAssets = NO_HIDDEN_ASSETS
 ): MasterWalletsBlock {
-  const source = snapshotsFor('balances');
+  const source = scopedSnapshots(snapshotsFor('balances'), hidden);
   const selected = new Set(networks);
   const current = source.balancesBetween(Number.NEGATIVE_INFINITY, now);
   if (current === null) {
