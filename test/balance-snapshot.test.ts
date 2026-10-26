@@ -25,6 +25,7 @@ const USERS: IngestedUser[] = [
 ];
 
 const SIGNER = '0x9999999999999999999999999999999999999999';
+const TAKEN_AT = new Date('2026-10-24T03:00:00.000Z');
 
 const EVM_BALANCES: Record<string, bigint> = {
   [`0xusera|${TOKEN_ADDRESSES.USDC}`]: 2_500_000n,
@@ -58,6 +59,7 @@ function input(overrides: Partial<SnapshotInput> = {}): SnapshotInput {
     ]),
     b2cEnabled: new Map(CHAINS.map((chain) => [chain.chainId, true])),
     budget: budget(),
+    takenAt: TAKEN_AT,
     ...overrides
   };
 }
@@ -78,8 +80,11 @@ describe('takeBalanceSnapshot', () => {
         calls: 1,
         failedCalls: 0,
         b2cEnabled: true,
+        collectBalances: true,
+        attempted: true,
         reason: null,
-        native: 'not_listed'
+        native: 'not_listed',
+        lastSuccessAt: TAKEN_AT
       },
       {
         network: 'cardano-preprod',
@@ -89,8 +94,11 @@ describe('takeBalanceSnapshot', () => {
         calls: 1,
         failedCalls: 0,
         b2cEnabled: true,
+        collectBalances: true,
+        attempted: true,
         reason: null,
-        native: 'included'
+        native: 'included',
+        lastSuccessAt: TAKEN_AT
       }
     ]);
     expect(snapshot.holdings).toEqual([
@@ -116,8 +124,11 @@ describe('takeBalanceSnapshot', () => {
       calls: 1,
       failedCalls: 0,
       b2cEnabled: true,
+      collectBalances: true,
+      attempted: true,
       reason: 'read_incomplete',
-      native: 'not_listed'
+      native: 'not_listed',
+      lastSuccessAt: null
     });
     expect(snapshot.holdings.find((holding) => holding.asset === 'USDC')?.valueCents).toBe(250);
     expect(snapshot.holdings.some((holding) => holding.asset === 'WBTC')).toBe(false);
