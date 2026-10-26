@@ -10,7 +10,11 @@ import {
 import type { Role } from '../auth/principal.js';
 import { connectOrClose } from './connect-retry.js';
 import { assertIndexes, COLLECTIONS, NETWORK_SETTINGS_ID } from './mongo-schema.js';
-import { INITIAL_VISIBILITY, planVisibilityChange } from './network-visibility.js';
+import {
+  INITIAL_VISIBILITY,
+  planTokenVisibilityChange,
+  planVisibilityChange
+} from './network-visibility.js';
 import type {
   ActivatedMember,
   ActivityCursor,
@@ -30,6 +34,8 @@ import type {
   RateLimitResult,
   Session,
   Store,
+  TokenVisibilityChange,
+  TokenVisibilityResult,
   User
 } from './types.js';
 
@@ -44,7 +50,11 @@ interface CounterDoc {
   count: number;
   resetAt: Date;
 }
-type VisibilityDoc = NetworkVisibility & { _id: string };
+/** A document written before tokens could be hidden has no `disabledTokenIds`. */
+type VisibilityDoc = Omit<NetworkVisibility, 'disabledTokenIds'> & {
+  _id: string;
+  disabledTokenIds?: string[];
+};
 
 const VISIBILITY_ID = NETWORK_SETTINGS_ID;
 
@@ -477,10 +487,11 @@ export class MongoStore implements Store {
   async networkVisibility(): Promise<NetworkVisibility> {
     const doc = await this.settings.findOne({ _id: VISIBILITY_ID });
     if (doc === null) {
-      return { ...INITIAL_VISIBILITY, disabledChainIds: [] };
+      return { ...INITIAL_VISIBILITY, disabledChainIds: [], disabledTokenIds: [] };
     }
     return {
       disabledChainIds: doc.disabledChainIds.map(String).sort(),
+      disabledTokenIds: (doc.disabledTokenIds ?? []).map(String).sort(),
       revision: doc.revision,
       updatedAt: doc.updatedAt,
       updatedBy: doc.updatedBy
@@ -496,10 +507,34 @@ export class MongoStore implements Store {
     if (plan.kind === 'done') {
       return plan.result;
     }
+    return this.writeVisibility(current, plan.next);
+  }
+
+  async changeTokenVisibility(
+    change: TokenVisibilityChange,
+    now: Date
+  ): Promise<TokenVisibilityResult> {
+    const current = await this.networkVisibility();
+    const plan = planTokenVisibilityChange(current, change, now);
+    if (plan.kind === 'done') {
+      return plan.result;
+    }
+    return this.writeVisibility(current, plan.next);
+  }
+
+  /**
+   * Writes the next policy as a compare-and-set on the revision read: the first write inserts the
+   * document (a duplicate key means another write came first), later ones match the revision.
+   * Fields of the document this policy does not own, such as `uncollectedChainIds`, are kept.
+   */
+  private async writeVisibility(
+    current: NetworkVisibility,
+    next: NetworkVisibility
+  ): Promise<TokenVisibilityResult> {
     let written: boolean;
     if (current.revision === 0) {
       try {
-        await this.settings.insertOne({ _id: VISIBILITY_ID, ...plan.next });
+        await this.settings.insertOne({ _id: VISIBILITY_ID, ...next });
         written = true;
       } catch (error) {
         if (!isDuplicateKey(error)) {
@@ -510,12 +545,12 @@ export class MongoStore implements Store {
     } else {
       const result = await this.settings.updateOne(
         { _id: VISIBILITY_ID, revision: current.revision },
-        { $set: plan.next }
+        { $set: next }
       );
       written = result.matchedCount === 1;
     }
     return written
-      ? { kind: 'ok', visibility: plan.next, changed: true }
+      ? { kind: 'ok', visibility: next, changed: true }
       : { kind: 'conflict', visibility: await this.networkVisibility() };
   }
 
