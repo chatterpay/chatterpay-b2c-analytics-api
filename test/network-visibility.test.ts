@@ -191,7 +191,7 @@ describe('network visibility with Scroll history', () => {
       overview.byNetwork.find((item: { network: string }) => item.network === 'scroll')
     ).toMatchObject({ volumeUsd: '700.00', transactions: 2, feesUsd: '7.00' });
     expect(admin.revision).toBe(0);
-    expect(admin.networks).toContainEqual({
+    expect(admin.networks.find((item: { id: string }) => item.id === 'scroll')).toMatchObject({
       id: 'scroll',
       chainId: SCROLL_CHAIN,
       label: 'Scroll',
@@ -388,7 +388,13 @@ describe('network visibility with Scroll history', () => {
     expect((await store.networkVisibility()).disabledChainIds).toHaveLength(1);
     expect(
       planVisibilityChange(
-        { disabledChainIds: ['1'], revision: 1, updatedAt: NOW, updatedBy: 'a' },
+        {
+          disabledChainIds: ['1'],
+          disabledTokenIds: [],
+          revision: 1,
+          updatedAt: NOW,
+          updatedBy: 'a'
+        },
         {
           chainId: '2',
           analyticsEnabled: false,
