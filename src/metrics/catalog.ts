@@ -34,6 +34,11 @@ export interface NetworkDefinition {
   b2cEnabled: boolean | null;
   /** `false` for a network the B2C database no longer lists, kept for its history. */
   sourcePresent: boolean;
+  /**
+   * HTTPS origin of the network explorer, from its B2C document or the retained copy; `null`
+   * without a usable one.
+   */
+  explorer: string | null;
 }
 
 /** Version of the synthetic dataset; changing the generator requires a new value. */
@@ -113,7 +118,8 @@ export const DEFAULT_NETWORKS: readonly NetworkDefinition[] = [
     family: 'evm',
     chainId: '84532',
     b2cEnabled: null,
-    sourcePresent: true
+    sourcePresent: true,
+    explorer: null
   },
   {
     id: 'cardano-preprod',
@@ -121,7 +127,8 @@ export const DEFAULT_NETWORKS: readonly NetworkDefinition[] = [
     family: 'cardano',
     chainId: '900000000001',
     b2cEnabled: null,
-    sourcePresent: true
+    sourcePresent: true,
+    explorer: null
   }
 ];
 
