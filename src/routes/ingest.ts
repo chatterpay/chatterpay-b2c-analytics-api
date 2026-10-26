@@ -59,25 +59,57 @@ const reportSchema = object({
       networks: arrayOf(
         object({
           network: { type: 'string' },
+          chainId: { type: 'string' },
           status: { type: 'string', enum: ['complete', 'partial', 'failed', 'unsupported'] },
           wallets: count,
           walletsRead: count,
           calls: count,
           failedCalls: count,
-          b2cEnabled: { type: ['boolean', 'null'] },
+          b2cEnabled: {
+            type: ['boolean', 'null'],
+            description: 'Informative: whether B2C takes new operations; it does not gate reads.'
+          },
+          analyticsVisible: {
+            type: 'boolean',
+            description: 'Analytics visibility; reported only, hidden networks are read as well.'
+          },
+          collectBalances: {
+            type: 'boolean',
+            description:
+              'false when the analytics settings stop the balance reads (uncollectedChainIds).'
+          },
+          endpointPresent: {
+            type: 'boolean',
+            description: 'Whether B2C lists an HTTPS endpoint; the URL is never reported.'
+          },
+          attempted: { type: 'boolean', description: 'Whether the balance reads were started.' },
           reason: {
             type: ['string', 'null'],
             enum: [
               'b2c_disabled',
+              'collection_off',
               'source_absent',
               'no_endpoint',
               'unsupported_provider',
+              'rpc_failed',
+              'budget_exhausted',
+              'deadline_reached',
               'read_incomplete',
               null
             ]
           },
           native: { type: 'string', enum: ['included', 'not_listed'] },
-          takenAt: { type: 'string', format: 'date-time' }
+          unpricedAssets: count,
+          startedAt: { type: 'string', format: 'date-time' },
+          finishedAt: { type: 'string', format: 'date-time' },
+          durationMs: count,
+          takenAt: { type: 'string', format: 'date-time' },
+          lastSuccessAt: {
+            type: ['string', 'null'],
+            format: 'date-time',
+            description:
+              'Start of the last run that read every user wallet of the network; not a current balance.'
+          }
         })
       ),
       masterWallets: count
