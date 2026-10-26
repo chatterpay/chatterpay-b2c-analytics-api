@@ -36,7 +36,10 @@ const OPTIONS: IngestionOptions = {
   lockTtlMs: 120_000
 };
 
-/** Synthetic B2C documents: Base enabled, Scroll disabled for new operations, both with an RPC. */
+/**
+ * Synthetic B2C documents: Base enabled, Scroll and its USDC disabled for new operations, both
+ * networks with an RPC.
+ */
 async function seedB2c(db: Db): Promise<void> {
   await db.collection('blockchains').insertMany([
     {
@@ -56,7 +59,14 @@ async function seedB2c(db: Db): Promise<void> {
   ]);
   await db.collection('tokens').insertMany([
     { chain_id: 84532, symbol: 'USDC', type: 'stable', address: BASE_USDC, decimals: 6 },
-    { chain_id: 534352, symbol: 'USDC', type: 'stable', address: SCROLL_USDC, decimals: 6 }
+    {
+      chain_id: 534352,
+      symbol: 'USDC',
+      type: 'stable',
+      address: SCROLL_USDC,
+      decimals: 6,
+      enabled: false
+    }
   ]);
   await db.collection('users').insertMany([
     {
@@ -141,31 +151,71 @@ describe.skipIf(MONGO_TEST_URI === '')('retired network ingestion on MongoDB', (
     return { report, urls: balances.urls() };
   }
 
-  it('skips, reads again and retains Scroll while its history stays', async () => {
+  it('reads Scroll disabled in B2C, stops by the settings and retains it while its history stays', async () => {
     const b2c = client.db(b2cName);
+    const settings = client.db(analyticsName).collection<{ _id: string }>('analytics_settings');
 
-    // Disabled in B2C: activity and countries copied, no request to the Scroll RPC.
+    // Disabled in B2C, its USDC too: activity, countries and the token copied, the RPC read.
     const disabled = await run(RUNS[0] as Date);
-    expect(disabled.urls).toEqual([BASE_RPC]);
+    expect(disabled.urls).toEqual([BASE_RPC, SCROLL_RPC]);
     expect(disabled.report.sources.transactions.read).toBe(3);
     expect(disabled.report.sources.users.countedInCountries).toBe(2);
     expect(
       disabled.report.sources.balances.networks.find((row) => row.network === 'scroll')
-    ).toMatchObject({ status: 'unsupported', calls: 0, b2cEnabled: false, reason: 'b2c_disabled' });
+    ).toMatchObject({
+      status: 'complete',
+      calls: 1,
+      b2cEnabled: false,
+      collectBalances: true,
+      reason: null,
+      lastSuccessAt: RUNS[0]?.toISOString()
+    });
+    expect(await repository.tokens()).toContainEqual(
+      expect.objectContaining({ chainId: '534352', symbol: 'USDC' })
+    );
 
-    // Enabled again: the next run reads it.
-    await b2c.collection('blockchains').updateOne({ chainId: 534352 }, { $set: { enabled: true } });
-    const enabled = await run(RUNS[1] as Date);
-    expect(enabled.urls).toEqual([BASE_RPC, SCROLL_RPC]);
+    // The operator command of the runbook stops the Scroll reads without touching B2C.
+    await settings.updateOne(
+      { _id: 'network_visibility' },
+      {
+        $addToSet: { uncollectedChainIds: '534352' },
+        $inc: { revision: 1 },
+        $set: { updatedAt: RUNS[1] as Date, updatedBy: 'operator' },
+        $setOnInsert: { disabledChainIds: [] }
+      },
+      { upsert: true }
+    );
+    const uncollected = await run(RUNS[1] as Date);
+    expect(uncollected.urls).toEqual([BASE_RPC]);
+    expect(
+      uncollected.report.sources.balances.networks.find((row) => row.network === 'scroll')
+    ).toMatchObject({
+      status: 'unsupported',
+      calls: 0,
+      collectBalances: false,
+      reason: 'collection_off',
+      lastSuccessAt: RUNS[0]?.toISOString()
+    });
 
-    // Dropped from B2C: the copy is retained for its rows and gets a row without any request.
+    // Collected again and dropped from B2C: the copy is retained and gets a row without requests.
+    await settings.updateOne(
+      { _id: 'network_visibility' },
+      { $pull: { uncollectedChainIds: '534352' }, $inc: { revision: 1 } }
+    );
     await b2c.collection('blockchains').deleteOne({ chainId: 534352 });
     const dropped = await run(RUNS[2] as Date);
     expect(dropped.urls).toEqual([BASE_RPC]);
     expect(dropped.report.sources.catalog.retainedNetworks).toBe(1);
     expect(
       dropped.report.sources.balances.networks.find((row) => row.network === 'scroll')
-    ).toMatchObject({ status: 'unsupported', calls: 0, b2cEnabled: null, reason: 'source_absent' });
+    ).toMatchObject({
+      status: 'unsupported',
+      calls: 0,
+      b2cEnabled: null,
+      endpointPresent: false,
+      reason: 'source_absent',
+      lastSuccessAt: RUNS[0]?.toISOString()
+    });
 
     const stored = await repository.loadAggregates();
     const scrollRows = (stored?.snapshots ?? []).map((snapshot) => [
@@ -173,13 +223,71 @@ describe.skipIf(MONGO_TEST_URI === '')('retired network ingestion on MongoDB', (
       snapshot.balances?.networks.find((row) => row.network === 'scroll')?.reason
     ]);
     expect(scrollRows).toEqual([
-      [RUNS[0]?.toISOString(), 'b2c_disabled'],
-      [RUNS[1]?.toISOString(), null],
+      [RUNS[0]?.toISOString(), null],
+      [RUNS[1]?.toISOString(), 'collection_off'],
       [RUNS[2]?.toISOString(), 'source_absent']
     ]);
+    expect(stored?.snapshots[0]?.balances?.holdings).toContainEqual({
+      network: 'scroll',
+      asset: 'USDC',
+      amount: '2.0',
+      valueCents: 200
+    });
+    expect((await repository.lastBalanceSuccess()).get('scroll')).toEqual(RUNS[0]);
     expect(
       (await repository.transactions()).filter((row) => row.chainId === '534352')
     ).toHaveLength(2);
+    await settings.deleteOne({ _id: 'network_visibility' });
+  });
+
+  it('keeps the uncollected networks of the operator across visibility changes', async () => {
+    await createRequiredIndexes(client.db(analyticsName));
+    const settings = client.db(analyticsName).collection<{ _id: string }>('analytics_settings');
+    const store = await MongoStore.connect({ uri: MONGO_TEST_URI, dbName: analyticsName });
+    try {
+      await settings.updateOne(
+        { _id: 'network_visibility' },
+        {
+          $addToSet: { uncollectedChainIds: '534352' },
+          $inc: { revision: 1 },
+          $set: { updatedAt: RUNS[0] as Date, updatedBy: 'operator' },
+          $setOnInsert: { disabledChainIds: [] }
+        },
+        { upsert: true }
+      );
+      const catalogChainIds = ['84532', '534352'];
+      const stale = await store.changeNetworkVisibility(
+        {
+          chainId: '84532',
+          analyticsEnabled: false,
+          expectedRevision: 0,
+          catalogChainIds,
+          actorId: 'admin-0'
+        },
+        RUNS[1] as Date
+      );
+      const hidden = await store.changeNetworkVisibility(
+        {
+          chainId: '84532',
+          analyticsEnabled: false,
+          expectedRevision: 1,
+          catalogChainIds,
+          actorId: 'admin-0'
+        },
+        RUNS[1] as Date
+      );
+
+      // The operator write bumped the revision, so an admin who read revision 0 conflicts.
+      expect(stale.kind).toBe('conflict');
+      expect(hidden).toMatchObject({ kind: 'ok', changed: true });
+      expect(await repository.networkSettings()).toEqual({
+        hiddenChainIds: ['84532'],
+        uncollectedChainIds: ['534352']
+      });
+    } finally {
+      await settings.deleteOne({ _id: 'network_visibility' });
+      await store.close();
+    }
   });
 
   it('lets one of two concurrent admins change the visibility on MongoDB', async () => {
