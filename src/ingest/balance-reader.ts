@@ -18,6 +18,12 @@ const KOIOS_PAGE_SIZE = 1000;
 /** Pages read per Koios batch at most, so a provider that keeps answering full pages stops. */
 const KOIOS_MAX_PAGES = 20;
 const REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * Failed requests in a row after which the reads of one endpoint stop for the run. A node that is
+ * down or too slow then takes at most this many requests of the budget and this many timeouts of
+ * the run time, and the networks read after it keep their share of both.
+ */
+export const MAX_CONSECUTIVE_FAILURES = 2;
 
 type Fetch = (
   url: string,
@@ -144,8 +150,9 @@ function bigintOf(value: unknown): bigint {
 /**
  * {@link BalanceReader} over HTTPS: Multicall3 `aggregate3` through `eth_call` on EVM networks, and
  * the Koios `address_utxos` endpoint on Cardano networks. Each HTTP request takes one unit of the
- * budget and has a timeout; a failed request leaves its queries unread instead of failing the run.
- * Error messages are never kept, because they can carry the endpoint URL and its key.
+ * budget and has a timeout; a failed request leaves its queries unread instead of failing the run,
+ * and {@link MAX_CONSECUTIVE_FAILURES} failures in a row leave the rest of the call unread. Error
+ * messages are never kept, because they can carry the endpoint URL and its key.
  *
  * @param fetchImpl - Fetch implementation; the global `fetch` by default, replaced by tests.
  * @param clock - Current epoch milliseconds, compared with the budget deadline.
@@ -171,8 +178,9 @@ export function rpcBalanceReader(
   return {
     async evm(url, queries, budget) {
       const results: Array<bigint | null> = queries.map(() => null);
+      let failures = 0;
       for (let start = 0; start < queries.length; start += MULTICALL_BATCH_SIZE) {
-        if (!take(budget, clock())) {
+        if (failures >= MAX_CONSECUTIVE_FAILURES || !take(budget, clock())) {
           break;
         }
         const batch = queries.slice(start, start + MULTICALL_BATCH_SIZE);
@@ -198,8 +206,10 @@ export function rpcBalanceReader(
               results[start + index] = BigInt(`0x${entry.data.slice(0, 64)}`);
             }
           });
+          failures = 0;
         } catch {
           budget.failed += 1;
+          failures += 1;
         }
       }
       return results;
@@ -208,7 +218,11 @@ export function rpcBalanceReader(
     async cardano(url, addresses, budget) {
       const holdings = new Map<string, CardanoHoldings>();
       const base = url.replace(/\/+$/, '');
+      let failures = 0;
       for (let start = 0; start < addresses.length; start += KOIOS_BATCH_SIZE) {
+        if (failures >= MAX_CONSECUTIVE_FAILURES) {
+          break;
+        }
         const batch = addresses.slice(start, start + KOIOS_BATCH_SIZE);
         const read = new Map<string, CardanoHoldings>(
           batch.map((address) => [address, { lovelace: 0n, assets: new Map() }])
@@ -243,8 +257,10 @@ export function rpcBalanceReader(
               break;
             }
           }
+          failures = 0;
         } catch {
           budget.failed += 1;
+          failures += 1;
         }
         // A batch is kept only when every page was read; a cut batch would understate balances.
         if (complete) {
