@@ -367,6 +367,78 @@ describe('operations without USD value', () => {
   });
 });
 
+describe('price identity', () => {
+  // Prices are keyed by symbol and day, without network: these tests pin that identity, so a
+  // change to it is deliberate. Within one deployment a symbol stands for one asset.
+  it('values a symbol on one network with the price a swap implied on another network', () => {
+    const chains = new Map<string, NetworkId>([...CHAIN_MAP, [SCROLL_CHAIN, 'scroll']]);
+    const rows = [
+      // 10 USDC for 0.004 WETH on Base Sepolia implies 2500 USD per WETH that day.
+      ...swapLegs(1, { hash: '0xswap', at: '2026-10-12T11:05:00.000Z' }),
+      transaction(3, {
+        token: 'WETH',
+        amount: 1,
+        fee: 0,
+        chainId: SCROLL_CHAIN,
+        date: new Date('2026-10-12T12:00:00.000Z')
+      })
+    ];
+
+    const { aggregates } = aggregate(rows, { chains });
+
+    const scroll = aggregates.hourly.find((item) => item.network === 'scroll');
+    expect(scroll?.transferVolume).toEqual({ WETH: 250_000 });
+  });
+
+  it('values the same symbol on two networks of a snapshot with one price', async () => {
+    const { takeBalanceSnapshot } = await import('../src/ingest/snapshot.js');
+    const scrollWeth = '0x5555555555555555555555555555555555555555';
+    const reader = new FakeBalanceReader({
+      [`0xuser1|${TOKEN_ADDRESSES.WETH}`]: 1_000_000_000_000_000_000n,
+      [`0xscroll1|${scrollWeth}`]: 1_000_000_000_000_000_000n
+    });
+
+    const { snapshot } = await takeBalanceSnapshot({
+      reader,
+      endpoints: [
+        ...ENDPOINTS.slice(0, 1),
+        { chainId: SCROLL_CHAIN, family: 'evm', url: 'https://rpc.scroll.test' }
+      ],
+      chains: [
+        ...CHAINS.slice(0, 1),
+        {
+          chainId: SCROLL_CHAIN,
+          network: 'scroll',
+          name: 'Scroll',
+          family: 'evm',
+          explorer: 'https://scrollscan.com',
+          contracts: {}
+        }
+      ],
+      tokens: [
+        ...TOKENS,
+        { chainId: SCROLL_CHAIN, symbol: 'WETH', stable: false, address: scrollWeth, decimals: 18 }
+      ],
+      users: [
+        ...USERS,
+        { id: 'u3', createdAt: null, wallets: [{ chainId: SCROLL_CHAIN, address: '0xScroll1' }] }
+      ],
+      masterWallets: [],
+      prices: new Map([['WETH', 3000]]),
+      b2cEnabled: new Map([
+        ['84532', true],
+        [SCROLL_CHAIN, true]
+      ]),
+      budget: { remaining: 10, deadline: Number.MAX_SAFE_INTEGER, used: 0, failed: 0 }
+    });
+
+    expect(snapshot.holdings).toEqual([
+      { network: 'base-sepolia', asset: 'WETH', amount: '1.0', valueCents: 300_000 },
+      { network: 'scroll', asset: 'WETH', amount: '1.0', valueCents: 300_000 }
+    ]);
+  });
+});
+
 describe('USD valuation of a deployment', () => {
   const rows = [transaction(1, { token: 'WBTC', amount: 1, fee: 0.0001 })];
   const prices: DailyPrice[] = [
@@ -559,6 +631,179 @@ describe('native coin coverage of the TVL', () => {
     expect(snapshot.masterWallets[0]?.balances).toEqual([
       { asset: 'USDC', amount: '1.0', valueCents: 100 },
       { asset: 'ETH', amount: '1.0', valueCents: 300_000 }
+    ]);
+  });
+
+  describe('named by a master wallet when the B2C list lacks it', () => {
+    const SIGNER = '0x9999999999999999999999999999999999999999';
+
+    async function snapshotOf(
+      reader: FakeBalanceReader,
+      overrides: { signer?: string; enabled?: boolean } = {}
+    ) {
+      const { takeBalanceSnapshot } = await import('../src/ingest/snapshot.js');
+      const budget = { remaining: 10, deadline: Number.MAX_SAFE_INTEGER, used: 0, failed: 0 };
+      const result = await takeBalanceSnapshot({
+        reader,
+        endpoints: ENDPOINTS.slice(0, 1),
+        chains: CHAINS.slice(0, 1),
+        tokens: TOKENS,
+        users: USERS,
+        masterWallets: [
+          {
+            network: 'base-sepolia',
+            address: overrides.signer ?? SIGNER,
+            role: 'Backend signer',
+            nativeSymbol: 'ETH'
+          }
+        ],
+        prices: new Map([['ETH', 3000]]),
+        b2cEnabled: new Map([['84532', overrides.enabled ?? true]]),
+        budget
+      });
+      return { ...result, budget };
+    }
+
+    it('reads the native coin of every user wallet and values it at the price of the day', async () => {
+      const reader = new FakeBalanceReader({
+        [`0xuser1|${TOKEN_ADDRESSES.USDC}`]: 1_000_000n,
+        '0xuser1|native': 500_000_000_000_000_000n,
+        [`${SIGNER}|native`]: 2_000_000_000_000_000_000n
+      });
+
+      const { snapshot, networks, budget } = await snapshotOf(reader);
+
+      expect(networks[0]).toMatchObject({ status: 'complete', native: 'included', calls: 1 });
+      expect(budget.used).toBe(1);
+      expect(snapshot.holdings).toEqual([
+        { network: 'base-sepolia', asset: 'USDC', amount: '1.0', valueCents: 100 },
+        { network: 'base-sepolia', asset: 'ETH', amount: '0.5', valueCents: 150_000 }
+      ]);
+      expect(snapshot.masterWallets[0]?.balances).toEqual([
+        { asset: 'ETH', amount: '2.0', valueCents: 600_000 }
+      ]);
+    });
+
+    it('reports the native coin as included at zero and answers the TVL available', async () => {
+      const reader = new FakeBalanceReader({ [`0xuser1|${TOKEN_ADDRESSES.USDC}`]: 1_000_000n });
+
+      const { snapshot, networks } = await snapshotOf(reader);
+      install([], {
+        snapshots: [
+          { takenAt: new Date('2026-10-24T03:00:00.000Z'), balances: snapshot, countries: [] }
+        ]
+      });
+
+      expect(networks[0]).toMatchObject({ native: 'included' });
+      expect(snapshot.holdings.map((holding) => holding.asset)).toEqual(['USDC']);
+      expect(buildOverview('base-sepolia', 'month', NOW).tvl).toMatchObject({
+        availability: 'available',
+        value: { value: '1.00' },
+        coverage: { nativeNotCovered: [] }
+      });
+    });
+
+    it('reads a master wallet that is also a user wallet once, native coin included', async () => {
+      const reader = new FakeBalanceReader({
+        '0xuser1|native': 1_000_000_000_000_000_000n
+      });
+      const queried: string[] = [];
+      const evm = reader.evm.bind(reader);
+      reader.evm = async (url, queries, budget) => {
+        queried.push(...queries.map((query) => `${query.holder}|${query.token ?? 'native'}`));
+        return evm(url, queries, budget);
+      };
+
+      const { snapshot } = await snapshotOf(reader, { signer: '0xUser1' });
+
+      expect(queried.filter((key) => key === '0xuser1|native')).toHaveLength(1);
+      expect(new Set(queried).size).toBe(queried.length);
+      expect(snapshot.holdings).toContainEqual({
+        network: 'base-sepolia',
+        asset: 'ETH',
+        amount: '1.0',
+        valueCents: 300_000
+      });
+      expect(snapshot.masterWallets[0]?.balances).toEqual([
+        { asset: 'ETH', amount: '1.0', valueCents: 300_000 }
+      ]);
+    });
+
+    it('leaves a wallet whose request failed out of the totals and the coverage', async () => {
+      const reader = new FakeBalanceReader(
+        { '0xuser1|native': 1_000_000_000_000_000_000n },
+        {},
+        new Set(['0xuser2'])
+      );
+
+      const { snapshot, networks } = await snapshotOf(reader);
+
+      expect(networks[0]).toMatchObject({
+        status: 'partial',
+        wallets: 2,
+        walletsRead: 1,
+        reason: 'read_incomplete',
+        native: 'included'
+      });
+      expect(snapshot.holdings).toEqual([
+        { network: 'base-sepolia', asset: 'ETH', amount: '1.0', valueCents: 300_000 }
+      ]);
+    });
+
+    it('sends no request for the network once B2C disables it', async () => {
+      const reader = new FakeBalanceReader({ '0xuser1|native': 1n });
+
+      const { snapshot, networks, budget } = await snapshotOf(reader, { enabled: false });
+
+      expect(reader.requests).toBe(0);
+      expect(budget.used).toBe(0);
+      expect(networks[0]).toMatchObject({
+        status: 'unsupported',
+        calls: 0,
+        reason: 'b2c_disabled'
+      });
+      expect(snapshot.holdings).toEqual([]);
+    });
+  });
+});
+
+describe('TVL series', () => {
+  it('gives a bucket whose held assets all lack a price no value instead of zero', () => {
+    const network: SnapshotNetwork = {
+      network: 'base-sepolia',
+      status: 'complete',
+      wallets: 1,
+      walletsRead: 1,
+      native: 'included'
+    };
+    install([], {
+      snapshots: [
+        {
+          takenAt: new Date('2026-10-22T03:00:00.000Z'),
+          balances: {
+            networks: [network],
+            holdings: [{ network: 'base-sepolia', asset: 'WETH', amount: '1.0', valueCents: null }],
+            masterWallets: []
+          },
+          countries: []
+        },
+        {
+          takenAt: new Date('2026-10-24T03:00:00.000Z'),
+          balances: {
+            networks: [network],
+            holdings: [{ network: 'base-sepolia', asset: 'USDC', amount: '5.0', valueCents: 500 }],
+            masterWallets: []
+          },
+          countries: []
+        }
+      ]
+    });
+
+    const series = buildOverview('base-sepolia', 'week', NOW).tvl.series;
+
+    expect(series.filter((point) => point.asOf !== null).map((point) => point.tvlUsd)).toEqual([
+      null,
+      '5.00'
     ]);
   });
 });
