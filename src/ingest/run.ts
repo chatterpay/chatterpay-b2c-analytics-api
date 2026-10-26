@@ -130,13 +130,24 @@ export interface IngestionReport {
       calls: number;
       failedCalls: number;
       /** Read of each network, with the instant of the snapshot it belongs to. */
-      networks: Array<NetworkRead & { takenAt: string }>;
+      networks: NetworkReport[];
       masterWallets: number;
     };
   };
   /** Counters of the aggregate build; `null` when the run did not build. */
   aggregates: (AggregationStats & { builtAt: string }) | null;
 }
+
+/**
+ * Read of one network in the report: the snapshot row with the instant of the snapshot, the
+ * analytics visibility of the network (reported only, it plays no part in what is read) and
+ * `lastSuccessAt` as an ISO instant.
+ */
+export type NetworkReport = Omit<NetworkRead, 'lastSuccessAt'> & {
+  takenAt: string;
+  analyticsVisible: boolean;
+  lastSuccessAt: string | null;
+};
 
 const HOUR_MS = 3_600_000;
 
@@ -229,9 +240,10 @@ function pricedSymbols(
  *    wallets seen for the first time.
  * 5. Requests at most one provider price snapshot per UTC day, within `maxProviderCallsPerRun`.
  * 6. Reads the balances of the user and master wallets, within `maxBalanceCallsPerRun`, and stores
- *    the run snapshot (balance sums and country counts). Networks disabled in B2C and networks
- *    only the analytics database retains get a row without any balance request; the analytics
- *    visibility plays no part here.
+ *    the run snapshot (balance sums and country counts). Every network with an endpoint is read,
+ *    whatever its B2C `enabled` and its analytics visibility; networks whose balance reads the
+ *    analytics settings stop and networks only the analytics database retains get a row without
+ *    any balance request.
  * 7. Rebuilds every aggregate from the copies and records the status of the run.
  *
  * Steps 2 and 3 stop starting batches at `maxTransactionsPerRun` rows or `maxRunMs`; the run then
@@ -442,24 +454,35 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
           .filter((price) => price.day === today && price.source === 'provider')
           .map((price) => [price.symbol, price.usd])
       );
+      const settings = await repository.networkSettings();
       const result = await takeBalanceSnapshot({
         reader: deps.balances,
         endpoints: await reader.endpoints(),
         chains: catalogChains,
         b2cEnabled: await reader.b2cEnabled(),
+        uncollected: new Set(settings.uncollectedChainIds),
         tokens,
         users: copies,
         masterWallets: deps.masterWallets,
         prices: dayPrices,
         budget: callBudget,
-        valuation
+        valuation,
+        takenAt: startedAt,
+        lastSuccess: await repository.lastBalanceSuccess(),
+        now: () => deps.clock().getTime()
       });
       balances = result.snapshot;
+      const hidden = new Set(settings.hiddenChainIds);
       report.sources.balances = {
         status: result.status,
         calls: callBudget.used,
         failedCalls: callBudget.failed,
-        networks: result.networks.map((row) => ({ ...row, takenAt: startedAt.toISOString() })),
+        networks: result.networks.map((row) => ({
+          ...row,
+          lastSuccessAt: row.lastSuccessAt?.toISOString() ?? null,
+          takenAt: startedAt.toISOString(),
+          analyticsVisible: !hidden.has(row.chainId)
+        })),
         masterWallets: result.snapshot.masterWallets.length
       };
     }
