@@ -126,13 +126,15 @@ export type Availability = 'available' | 'partial' | 'unavailable';
  * - `no_transactions`: the figure divides by a number of operations that is zero.
  * - `no_eligible_cohort`: no cohort with users is old enough for the retention month.
  * - `not_configured`: nothing is configured to read (no master wallets).
- * - `not_read`: the snapshot holds no reading of the selected networks (disabled in B2C, no longer
- *   listed by it, without a supported endpoint, or every request failed). Earlier snapshots keep
- *   their own values; they are not served as the current one.
+ * - `not_read`: the snapshot holds no reading of the selected networks (balance reads stopped by
+ *   the analytics settings, no longer listed by B2C, without a supported endpoint, every request
+ *   failed, or the budget or deadline ran out). Earlier snapshots keep their own values; they are
+ *   not served as the current one.
  * - `not_valued`: the deployment does not value in USD (`USD_VALUATION=none`, test networks whose
  *   assets have no market value); amounts and counts are kept.
  * - `native_not_covered`: the native coin of an EVM network is neither in the B2C token list nor
- *   named by a master wallet of the network, so the user wallets were read without it.
+ *   named by the `nativeSymbol` of a master wallet of the network, so the user wallets were read
+ *   without it.
  * - `undated_users`: some users have no signup date; they count in the totals but in no signup
  *   window or cohort.
  */
@@ -168,24 +170,35 @@ export type NetworkReadStatus = 'complete' | 'partial' | 'failed' | 'unsupported
 /**
  * Why a network of a balance snapshot was not read, or not read completely.
  *
- * - `b2c_disabled`: the B2C document has `enabled: false`; no request is sent for the network.
- * - `source_absent`: the B2C database no longer lists the network; no request is sent for it.
+ * - `b2c_disabled`: only in snapshots stored while a B2C document with `enabled: false` kept the
+ *   network from being read. B2C `enabled` no longer plays any part in what is read.
+ * - `collection_off`: the analytics settings stop the balance reads of the network
+ *   (`uncollectedChainIds`); no request is sent for it.
+ * - `source_absent`: the B2C database no longer lists the network, so there is no endpoint to read;
+ *   no request is sent for it.
  * - `no_endpoint`: the B2C document has no HTTPS `rpc` or `providerUrl`.
  * - `unsupported_provider`: the endpoint speaks a dialect the reader does not.
- * - `read_incomplete`: some wallets were not read (failed requests, call budget or deadline).
+ * - `rpc_failed`: no wallet was read and every request sent for the network failed.
+ * - `budget_exhausted`: the call budget of the run ran out before every wallet was read.
+ * - `deadline_reached`: the run deadline passed before every wallet was read.
+ * - `read_incomplete`: some wallets were not read for another cause, such as some failed requests.
  */
 export type NetworkReadReason =
   | 'b2c_disabled'
+  | 'collection_off'
   | 'source_absent'
   | 'no_endpoint'
   | 'unsupported_provider'
+  | 'rpc_failed'
+  | 'budget_exhausted'
+  | 'deadline_reached'
   | 'read_incomplete';
 
 /**
  * Whether the user wallets of a network were read with its native coin: `included` on Cardano
  * (ADA comes with the UTxOs) and on EVM networks whose B2C token list carries the native coin or
- * that have a master wallet configured (`MASTER_WALLETS`, whose `nativeSymbol` names the coin),
- * `not_listed` on EVM networks with neither.
+ * that have a master wallet whose `nativeSymbol` names it (`MASTER_WALLETS`), `not_listed` on EVM
+ * networks with neither. A master wallet without `nativeSymbol` names no coin for the user wallets.
  */
 export type NativeCoverage = 'included' | 'not_listed';
 
@@ -249,6 +262,9 @@ export interface TvlBlock extends BlockStatus {
    * Networks of the snapshot behind `value`; `share` is a ratio of the total with 4 places.
    * `tvlUsd` and `share` are `null` for a network with wallets that was not read (`failed` or
    * `unsupported`); `reason` says why, and is `null` for snapshots stored before it was recorded.
+   * `lastSuccessAt` is the last snapshot, through the one behind `value`, that read the network
+   * in full: the date of an observation, never a current balance; `null` when none did or the
+   * snapshot was stored before it was recorded.
    */
   byNetwork: Array<
     NetworkRef & {
@@ -256,6 +272,7 @@ export interface TvlBlock extends BlockStatus {
       share: string | null;
       status: NetworkReadStatus;
       reason: NetworkReadReason | null;
+      lastSuccessAt: string | null;
     }
   >;
   /**
