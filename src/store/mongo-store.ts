@@ -9,7 +9,7 @@ import {
 } from 'mongodb';
 import type { Role } from '../auth/principal.js';
 import { connectOrClose } from './connect-retry.js';
-import { assertIndexes, COLLECTIONS } from './mongo-schema.js';
+import { assertIndexes, COLLECTIONS, NETWORK_SETTINGS_ID } from './mongo-schema.js';
 import { INITIAL_VISIBILITY, planVisibilityChange } from './network-visibility.js';
 import type {
   ActivatedMember,
@@ -46,7 +46,7 @@ interface CounterDoc {
 }
 type VisibilityDoc = NetworkVisibility & { _id: string };
 
-const VISIBILITY_ID = 'network_visibility';
+const VISIBILITY_ID = NETWORK_SETTINGS_ID;
 
 const DUPLICATE_KEY = 11000;
 const PENDING = 'simulated';
