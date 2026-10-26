@@ -27,8 +27,24 @@ export const MAX_CONSECUTIVE_FAILURES = 2;
 
 type Fetch = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }
+  init: { method: string; headers: Record<string, string>; body?: string; signal: AbortSignal }
 ) => Promise<Response>;
+
+/**
+ * Whether a Cardano endpoint is Blockfrost. The host decides, as in the B2C backend: a Koios root
+ * that carries `blockfrost` in its path or query is still Koios.
+ *
+ * @param url - Provider root.
+ * @returns `true` for a host under `blockfrost.io`.
+ */
+export function isBlockfrost(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === 'blockfrost.io' || host.endsWith('.blockfrost.io');
+  } catch {
+    return false;
+  }
+}
 
 function word(hex: string): string {
   return hex.padStart(64, '0');
@@ -130,6 +146,11 @@ function take(budget: CallBudget, now: number): boolean {
   return true;
 }
 
+/** Body of Blockfrost `/addresses/{address}`: the sum of the unspent outputs of the address. */
+interface BlockfrostAddress {
+  amount?: Array<{ unit?: unknown; quantity?: unknown }> | null;
+}
+
 interface KoiosUtxo {
   address?: unknown;
   value?: unknown;
@@ -148,19 +169,23 @@ function bigintOf(value: unknown): bigint {
 }
 
 /**
- * {@link BalanceReader} over HTTPS: Multicall3 `aggregate3` through `eth_call` on EVM networks, and
- * the Koios `address_utxos` endpoint on Cardano networks. Each HTTP request takes one unit of the
- * budget and has a timeout; a failed request leaves its queries unread instead of failing the run,
- * and {@link MAX_CONSECUTIVE_FAILURES} failures in a row leave the rest of the call unread. Error
+ * {@link BalanceReader} over HTTPS: Multicall3 `aggregate3` through `eth_call` on EVM networks,
+ * and on Cardano networks the Koios `address_utxos` endpoint or, with a project key, Blockfrost
+ * `/addresses/{address}`, one request per address. Each HTTP request takes one unit of the budget
+ * and has a timeout; a failed request leaves its queries unread instead of failing the run, and
+ * {@link MAX_CONSECUTIVE_FAILURES} failures in a row leave the rest of the call unread. Error
  * messages are never kept, because they can carry the endpoint URL and its key.
  *
  * @param fetchImpl - Fetch implementation; the global `fetch` by default, replaced by tests.
  * @param clock - Current epoch milliseconds, compared with the budget deadline.
+ * @param blockfrostKey - Blockfrost project id, sent in the `project_id` header; `null` leaves
+ *   Blockfrost endpoints unsupported, since Blockfrost answers no request without one.
  * @returns The reader.
  */
 export function rpcBalanceReader(
   fetchImpl: Fetch = fetch,
-  clock: () => number = Date.now
+  clock: () => number = Date.now,
+  blockfrostKey: string | null = null
 ): BalanceReader {
   const post = async (url: string, body: unknown): Promise<unknown> => {
     const response = await fetchImpl(url, {
@@ -173,6 +198,57 @@ export function rpcBalanceReader(
       throw new Error(`HTTP ${response.status}`);
     }
     return response.json();
+  };
+
+  /**
+   * Holdings of each address from Blockfrost. An address the chain has never seen answers 404 and
+   * holds nothing; any other failure leaves the address unread.
+   */
+  const blockfrost = async (
+    base: string,
+    key: string,
+    addresses: readonly string[],
+    budget: CallBudget
+  ): Promise<Map<string, CardanoHoldings>> => {
+    const holdings = new Map<string, CardanoHoldings>();
+    let failures = 0;
+    for (const address of addresses) {
+      if (failures >= MAX_CONSECUTIVE_FAILURES || !take(budget, clock())) {
+        break;
+      }
+      try {
+        const response = await fetchImpl(`${base}/addresses/${encodeURIComponent(address)}`, {
+          method: 'GET',
+          headers: { accept: 'application/json', project_id: key },
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        });
+        const entry: CardanoHoldings = { lovelace: 0n, assets: new Map() };
+        if (response.status !== 404) {
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const body = (await response.json()) as BlockfrostAddress;
+          if (!Array.isArray(body?.amount)) {
+            throw new Error('Blockfrost result shape');
+          }
+          for (const amount of body.amount) {
+            const unit = String(amount.unit ?? '').toLowerCase();
+            const quantity = bigintOf(amount.quantity);
+            if (unit === 'lovelace') {
+              entry.lovelace += quantity;
+            } else if (unit !== '') {
+              entry.assets.set(unit, (entry.assets.get(unit) ?? 0n) + quantity);
+            }
+          }
+        }
+        holdings.set(address, entry);
+        failures = 0;
+      } catch {
+        budget.failed += 1;
+        failures += 1;
+      }
+    }
+    return holdings;
   };
 
   return {
@@ -216,8 +292,13 @@ export function rpcBalanceReader(
     },
 
     async cardano(url, addresses, budget) {
-      const holdings = new Map<string, CardanoHoldings>();
       const base = url.replace(/\/+$/, '');
+      if (isBlockfrost(base)) {
+        return blockfrostKey === null
+          ? new Map()
+          : blockfrost(base, blockfrostKey, addresses, budget);
+      }
+      const holdings = new Map<string, CardanoHoldings>();
       let failures = 0;
       for (let start = 0; start < addresses.length; start += KOIOS_BATCH_SIZE) {
         if (failures >= MAX_CONSECUTIVE_FAILURES) {
@@ -273,8 +354,7 @@ export function rpcBalanceReader(
     },
 
     supportsCardano(url) {
-      // Blockfrost needs a project key and one request per address; only Koios is read.
-      return !/blockfrost/i.test(url);
+      return !isBlockfrost(url) || blockfrostKey !== null;
     }
   };
 }
