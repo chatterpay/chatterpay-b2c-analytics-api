@@ -4,6 +4,7 @@ import { COINGECKO_SIMPLE_PRICE_URL, coingeckoPriceProvider } from '../src/inges
 import {
   countryOfPhone,
   MongoB2cActivityReader,
+  polymarketAccountOf,
   toIngestedTransaction,
   toIngestedUser,
   UNKNOWN_COUNTRY
@@ -65,12 +66,42 @@ describe('B2C activity mapping', () => {
       id: id.toHexString(),
       createdAt: new Date('2026-10-11T23:41:07.615Z'),
       country: 'AR',
+      polymarket: null,
       wallets: [
         { chainId: '84532', address: '0x12b4' },
         { chainId: '900000000001', address: 'addr_test1q' }
       ]
     });
     expect(toIngestedUser({ _id: id }).createdAt).toBeNull();
+  });
+
+  it('keeps of a Polymarket account only whether its address is valid and its creation date', () => {
+    const createdAt = new Date('2026-09-01T12:00:00.000Z');
+    const address = '0x1111111111111111111111111111111111111111';
+
+    expect(polymarketAccountOf(undefined)).toBeNull();
+    expect(polymarketAccountOf(null)).toBeNull();
+    expect(polymarketAccountOf({ polygon_address: address, created_at: createdAt })).toEqual({
+      validAddress: true,
+      createdAt
+    });
+    expect(polymarketAccountOf({ polygon_address: address })).toEqual({
+      validAddress: true,
+      createdAt: null
+    });
+    expect(polymarketAccountOf({ polygon_address: '0x12', created_at: createdAt })).toEqual({
+      validAddress: false,
+      createdAt
+    });
+    expect(polymarketAccountOf({ created_at: '2026-09-01' })).toEqual({
+      validAddress: false,
+      createdAt: null
+    });
+    const user = toIngestedUser({
+      _id: new ObjectId(),
+      polymarket_account: { polygon_address: address, created_at: createdAt }
+    });
+    expect(JSON.stringify(user)).not.toContain(address);
   });
 
   it('estimates the country from the calling code, or Unknown', () => {
@@ -85,19 +116,55 @@ describe('B2C activity mapping', () => {
   });
 });
 
-/** Database fake that serves fixed documents per collection and records the filters it got. */
+/**
+ * Database fake that serves fixed documents per collection and records the filters and the
+ * options it got.
+ */
 function fakeDb(collections: Record<string, Record<string, unknown>[]>) {
-  const filters: Array<{ collection: string; filter: unknown }> = [];
+  const filters: Array<{ collection: string; filter: unknown; options: unknown }> = [];
   const db = {
     collection: (name: string) => ({
-      find: (filter: unknown) => {
-        filters.push({ collection: name, filter });
+      find: (filter: unknown, options?: unknown) => {
+        filters.push({ collection: name, filter, options });
         return { toArray: async () => collections[name] ?? [] };
       }
     })
   };
   return { db: db as unknown as Db, filters };
 }
+
+describe('B2C user reads', () => {
+  it('asks for the Polymarket address and creation date only, never the credentials', async () => {
+    const { db, filters } = fakeDb({
+      users: [
+        {
+          _id: new ObjectId(),
+          polymarket_account: {
+            polygon_address: '0x2222222222222222222222222222222222222222',
+            created_at: new Date('2026-09-02T00:00:00.000Z')
+          }
+        },
+        { _id: new ObjectId(), polymarket_account: { polygon_address: 'not-an-address' } },
+        { _id: new ObjectId() }
+      ]
+    });
+
+    const users = await new MongoB2cActivityReader(db).users();
+
+    const options = filters[0]?.options as { projection: Record<string, number> } | undefined;
+    const projection = options?.projection ?? {};
+    expect(Object.keys(projection).filter((key) => key.startsWith('polymarket'))).toEqual([
+      'polymarket_account.polygon_address',
+      'polymarket_account.created_at'
+    ]);
+    expect(JSON.stringify(projection)).not.toContain('api_credentials');
+    expect(users.map((user) => user.polymarket)).toEqual([
+      { validAddress: true, createdAt: new Date('2026-09-02T00:00:00.000Z') },
+      { validAddress: false, createdAt: null },
+      null
+    ]);
+  });
+});
 
 describe('B2C catalog reads', () => {
   it('reads networks and tokens disabled for new B2C operations', async () => {
