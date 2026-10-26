@@ -311,7 +311,8 @@ describe('network visibility with Scroll history', () => {
       family: 'evm',
       chainId: SCROLL_CHAIN,
       b2cEnabled: null,
-      sourcePresent: false
+      sourcePresent: false,
+      explorer: 'https://scrollscan.com'
     });
     const revenue = (await get(app, '/v1/metrics/revenue?network=scroll')).json();
     expect(revenue.tiles.feesUsd.value).toBe('7.00');
@@ -547,7 +548,8 @@ describe('network visibility failures', () => {
           throw new TypeError('fetch failed');
         }
         const data =
-          (JSON.parse(init.body) as { params: Array<{ data: string }> }).params[0]?.data ?? '';
+          (JSON.parse(init.body ?? '{}') as { params: Array<{ data: string }> }).params[0]?.data ??
+          '';
         const calls = Number.parseInt(data.slice(10 + 64, 10 + 128), 16);
         const word = (value: number) => value.toString(16).padStart(64, '0');
         const tuples = Array.from(
