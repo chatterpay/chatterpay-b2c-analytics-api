@@ -75,33 +75,32 @@ describe('B2C activity mapping', () => {
     expect(toIngestedUser({ _id: id }).createdAt).toBeNull();
   });
 
-  it('keeps of a Polymarket account only whether its address is valid and its creation date', () => {
+  it('keeps of a Polymarket account its validity, its address in lower case and its creation date', () => {
     const createdAt = new Date('2026-09-01T12:00:00.000Z');
-    const address = '0x1111111111111111111111111111111111111111';
+    const address = '0xAbCd111111111111111111111111111111111111';
 
     expect(polymarketAccountOf(undefined)).toBeNull();
     expect(polymarketAccountOf(null)).toBeNull();
     expect(polymarketAccountOf({ polygon_address: address, created_at: createdAt })).toEqual({
       validAddress: true,
+      address: address.toLowerCase(),
       createdAt
     });
     expect(polymarketAccountOf({ polygon_address: address })).toEqual({
       validAddress: true,
+      address: address.toLowerCase(),
       createdAt: null
     });
     expect(polymarketAccountOf({ polygon_address: '0x12', created_at: createdAt })).toEqual({
       validAddress: false,
+      address: null,
       createdAt
     });
     expect(polymarketAccountOf({ created_at: '2026-09-01' })).toEqual({
       validAddress: false,
+      address: null,
       createdAt: null
     });
-    const user = toIngestedUser({
-      _id: new ObjectId(),
-      polymarket_account: { polygon_address: address, created_at: createdAt }
-    });
-    expect(JSON.stringify(user)).not.toContain(address);
   });
 
   it('estimates the country from the calling code, or Unknown', () => {
@@ -159,8 +158,12 @@ describe('B2C user reads', () => {
     ]);
     expect(JSON.stringify(projection)).not.toContain('api_credentials');
     expect(users.map((user) => user.polymarket)).toEqual([
-      { validAddress: true, createdAt: new Date('2026-09-02T00:00:00.000Z') },
-      { validAddress: false, createdAt: null },
+      {
+        validAddress: true,
+        address: '0x2222222222222222222222222222222222222222',
+        createdAt: new Date('2026-09-02T00:00:00.000Z')
+      },
+      { validAddress: false, address: null, createdAt: null },
       null
     ]);
   });
