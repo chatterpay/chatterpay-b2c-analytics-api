@@ -9,7 +9,10 @@ export interface MemberBody {
   /** Name recorded for the member; `null` when none was recorded. */
   name: string | null;
   role: User['role'];
-  status: 'active';
+  /** `blocked` while an admin keeps the member blocked; `active` otherwise. */
+  status: 'active' | 'blocked';
+  /** When the member was blocked; `null` unless `blocked`. */
+  blockedAt: string | null;
   createdAt: string;
   lastLoginAt: string | null;
 }
@@ -18,6 +21,11 @@ export interface MemberBody {
 export interface TeamMemberBody extends MemberBody {
   /** Last event of the activity log the member acted in, logins included; `null` when none. */
   lastActivityAt: string | null;
+  /**
+   * End of the automatic lockout of login codes for the email, after repeated codes without a
+   * login; `null` when there is none. It ends by itself; an admin can lift it earlier.
+   */
+  loginLockedUntil: string | null;
 }
 
 /** Invite as exposed by the API; `createdBy` is the email of the creator. */
@@ -86,7 +94,13 @@ const memberProperties = {
     description: 'Name recorded for the member by an operator; null when none. Never derived.'
   },
   role: roleSchema,
-  status: { type: 'string', enum: ['active'] },
+  status: {
+    type: 'string',
+    enum: ['active', 'blocked'],
+    description:
+      '`blocked`: an admin blocked the member, who cannot sign in and whose sessions were revoked, until an admin unblocks it.'
+  },
+  blockedAt: nullableInstant,
   createdAt: instant,
   lastLoginAt: nullableInstant
 };
@@ -101,6 +115,11 @@ export const teamMemberSchema: Record<string, unknown> = object({
     ...nullableInstant,
     description:
       'Last event of the activity log the member acted in, of any action; distinct from lastLoginAt.'
+  },
+  loginLockedUntil: {
+    ...nullableInstant,
+    description:
+      'End of the automatic lockout of login codes for the email after repeated codes without a login; null when none. It ends by itself and is never an admin block.'
   }
 });
 
@@ -152,6 +171,9 @@ export const activityEventSchema: Record<string, unknown> = object({
       'invite_accepted',
       'role_changed',
       'member_removed',
+      'member_blocked',
+      'member_unblocked',
+      'login_lockout_cleared',
       'network_hidden',
       'network_shown',
       'token_hidden',
@@ -169,7 +191,7 @@ export const activityEventSchema: Record<string, unknown> = object({
 /**
  * Maps an active user to its API body.
  *
- * @param user - Active user.
+ * @param user - Active user, blocked or not.
  * @returns The member body.
  */
 export function toMemberBody(user: User): MemberBody {
@@ -178,23 +200,30 @@ export function toMemberBody(user: User): MemberBody {
     email: user.email,
     name: user.name,
     role: user.role,
-    status: 'active',
+    status: user.blockedAt === null ? 'active' : 'blocked',
+    blockedAt: user.blockedAt?.toISOString() ?? null,
     createdAt: user.createdAt.toISOString(),
     lastLoginAt: user.lastLoginAt === null ? null : user.lastLoginAt.toISOString()
   };
 }
 
 /**
- * Maps an active user and its last activity to the team list body.
+ * Maps an active user, its last activity and its login lockout to the team list body.
  *
  * @param user - Active user.
  * @param lastActivityAt - Last event the user acted in; `null` when none.
+ * @param loginLockedUntil - End of the automatic login lockout; `null` when none.
  * @returns The team member body.
  */
-export function toTeamMemberBody(user: User, lastActivityAt: Date | null): TeamMemberBody {
+export function toTeamMemberBody(
+  user: User,
+  lastActivityAt: Date | null,
+  loginLockedUntil: Date | null
+): TeamMemberBody {
   return {
     ...toMemberBody(user),
-    lastActivityAt: lastActivityAt === null ? null : lastActivityAt.toISOString()
+    lastActivityAt: lastActivityAt === null ? null : lastActivityAt.toISOString(),
+    loginLockedUntil: loginLockedUntil?.toISOString() ?? null
   };
 }
 
