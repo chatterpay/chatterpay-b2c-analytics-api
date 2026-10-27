@@ -27,6 +27,7 @@ components:
             - CANNOT_CHANGE_OWN_ROLE
             - CANNOT_REMOVE_SELF
             - CANNOT_BLOCK_SELF
+            - MEMBER_BLOCKED
             - NOT_FOUND
             - CONFLICT
             - CONFIG_CONFLICT
@@ -277,6 +278,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
           description: Default Response
           content:
             application/json:
