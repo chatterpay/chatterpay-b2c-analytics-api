@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { generateLoginCode, hashLoginCode, loginCodeMatches } from '../src/auth/login-code.js';
+import {
+  codeMatches,
+  codeVerifier,
+  decodeKeyMaterial,
+  emailKey,
+  encodeFields,
+  generateLoginCode,
+  loadLoginCodeKeys,
+  originKey
+} from '../src/auth/login-code.js';
 import { deliver } from '../src/email/delivery.js';
 import { ResendEmailProvider } from '../src/email/resend-provider.js';
 import { SimulatedEmailProvider } from '../src/email/simulated-provider.js';
@@ -126,26 +135,124 @@ describe('email templates', () => {
   });
 });
 
+const KEYS = loadLoginCodeKeys({
+  OTP_HMAC_SECRET: 'a'.repeat(64),
+  OTP_EMAIL_HMAC_SECRET: 'b'.repeat(64)
+});
+const CHALLENGE_ID = '7f1d3c2a-0b4e-4c55-9a77-1d2e3f405162';
+
+/** Challenge fields the verifier reads, as stored for `code`. */
+function storedFor(code: string, keys = KEYS, email = 'member@example.com') {
+  return {
+    id: CHALLENGE_ID,
+    keyVersion: keys.codeKeyVersion,
+    codeDigest: codeVerifier(keys, CHALLENGE_ID, email, code)
+  };
+}
+
 describe('login codes', () => {
-  it('draws six digits', () => {
-    for (let i = 0; i < 50; i += 1) {
-      expect(generateLoginCode()).toMatch(/^\d{6}$/);
+  it('draws eight digits from the CSPRNG, leading zeros kept', () => {
+    const codes = new Set<string>();
+    for (let i = 0; i < 200; i += 1) {
+      const code = generateLoginCode(8);
+      expect(code).toMatch(/^\d{8}$/);
+      codes.add(code);
     }
+    expect(codes.size).toBeGreaterThan(190);
   });
 
-  it('matches only the code that was hashed', () => {
-    const stored = hashLoginCode('042137');
+  it('stores an HMAC verifier from which the code cannot be read back', () => {
+    const stored = storedFor('04213799');
 
-    expect(stored).not.toContain('042137');
-    expect(loginCodeMatches('042137', stored)).toBe(true);
-    expect(loginCodeMatches(' 042137 ', stored)).toBe(true);
-    expect(loginCodeMatches('042138', stored)).toBe(false);
-    expect(loginCodeMatches('042137', null)).toBe(false);
-    expect(loginCodeMatches('042137', 'garbage')).toBe(false);
+    expect(stored.codeDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(stored.codeDigest).not.toContain('04213799');
+    expect(JSON.stringify(stored)).not.toContain('04213799');
   });
 
-  it('salts every digest', () => {
-    expect(hashLoginCode('042137')).not.toBe(hashLoginCode('042137'));
+  it('matches only the code, the challenge and the email it was issued for', () => {
+    const stored = storedFor('04213799');
+    const email = 'member@example.com';
+
+    expect(codeMatches(KEYS, stored, email, '04213799', 8)).toBe(true);
+    expect(codeMatches(KEYS, stored, email, ' 04213799 ', 8)).toBe(true);
+    expect(codeMatches(KEYS, stored, email, '04213798', 8)).toBe(false);
+    expect(codeMatches(KEYS, stored, 'other@example.com', '04213799', 8)).toBe(false);
+    expect(codeMatches(KEYS, { ...stored, id: 'another-challenge' }, email, '04213799', 8)).toBe(
+      false
+    );
+  });
+
+  it('refuses malformed codes and verifiers without throwing', () => {
+    const stored = storedFor('04213799');
+    const email = 'member@example.com';
+
+    expect(codeMatches(KEYS, stored, email, '0421379', 8)).toBe(false);
+    expect(codeMatches(KEYS, stored, email, '0421379a', 8)).toBe(false);
+    expect(codeMatches(KEYS, stored, email, `${'9'.repeat(63)}`, 8)).toBe(false);
+    expect(codeMatches(KEYS, { ...stored, codeDigest: null }, email, '04213799', 8)).toBe(false);
+    expect(codeMatches(KEYS, { ...stored, codeDigest: 'zz' }, email, '04213799', 8)).toBe(false);
+    expect(
+      codeMatches(KEYS, { ...stored, codeDigest: 'ab'.repeat(20) }, email, '04213799', 8)
+    ).toBe(false);
+  });
+
+  it('does not verify with another key or another key version', () => {
+    const other = loadLoginCodeKeys({
+      OTP_HMAC_SECRET: 'c'.repeat(64),
+      OTP_EMAIL_HMAC_SECRET: 'b'.repeat(64)
+    });
+    const stored = storedFor('04213799');
+
+    expect(other.codeKeyVersion).not.toBe(KEYS.codeKeyVersion);
+    expect(codeMatches(other, stored, 'member@example.com', '04213799', 8)).toBe(false);
+    // The digest of the other key under the version of this one still fails: the key differs.
+    expect(
+      codeMatches(
+        other,
+        { ...stored, keyVersion: other.codeKeyVersion },
+        'member@example.com',
+        '04213799',
+        8
+      )
+    ).toBe(false);
+  });
+
+  it('derives the email and IP identifiers from their own key and context', () => {
+    const otherIdentity = loadLoginCodeKeys({
+      OTP_HMAC_SECRET: 'a'.repeat(64),
+      OTP_EMAIL_HMAC_SECRET: 'd'.repeat(64)
+    });
+
+    expect(emailKey(KEYS, 'member@example.com')).toMatch(/^[0-9a-f]{64}$/);
+    expect(emailKey(KEYS, 'member@example.com')).toBe(emailKey(KEYS, 'member@example.com'));
+    expect(emailKey(KEYS, 'member@example.com')).not.toContain('member');
+    expect(emailKey(otherIdentity, 'member@example.com')).not.toBe(
+      emailKey(KEYS, 'member@example.com')
+    );
+    expect(originKey(KEYS, '203.0.113.10')).not.toBe(emailKey(KEYS, '203.0.113.10'));
+  });
+
+  it('encodes fields with their lengths, so different lists never collide', () => {
+    expect(encodeFields(['ab', 'c'])).not.toEqual(encodeFields(['a', 'bc']));
+    expect(encodeFields(['a:b'])).not.toEqual(encodeFields(['a', 'b']));
+  });
+
+  it('accepts only keys of at least 256 bits in hex or base64', () => {
+    expect(decodeKeyMaterial('a'.repeat(64))?.length).toBe(32);
+    expect(decodeKeyMaterial(Buffer.alloc(32, 7).toString('base64'))?.length).toBe(32);
+    expect(decodeKeyMaterial(Buffer.alloc(32, 7).toString('base64url'))?.length).toBe(32);
+    expect(decodeKeyMaterial('a'.repeat(62))).toBeNull();
+    expect(decodeKeyMaterial('short')).toBeNull();
+    expect(decodeKeyMaterial('not base64 at all!')).toBeNull();
+  });
+
+  it('generates keys for the process when the variables are unset', () => {
+    const keys = loadLoginCodeKeys({ OTP_HMAC_SECRET: null, OTP_EMAIL_HMAC_SECRET: null });
+
+    expect(keys.ephemeral).toBe(true);
+    expect(keys.code.length).toBe(32);
+    expect(keys.code.equals(keys.identity)).toBe(false);
+    expect(KEYS.ephemeral).toBe(false);
   });
 });
 
