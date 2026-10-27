@@ -8,8 +8,8 @@ import type { NetworkVisibility, Store } from '../store/types.js';
 
 /**
  * Reads the network visibility policy for one request. The policy lives in the analytics database
- * shared by every instance and is read on every request, so a change applies to the next request
- * of any instance.
+ * shared by every instance. A change applies to the next request of the instance that made it, and
+ * to the others once their cached read expires (`withReadCache`).
  *
  * @param store - Store holding the policy.
  * @param request - Request, for its logger.
