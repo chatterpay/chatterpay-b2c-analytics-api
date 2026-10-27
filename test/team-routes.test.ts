@@ -545,7 +545,8 @@ describe('team routes', () => {
             role: 'viewer',
             createdBy,
             mutationId: randomUUID(),
-            expiresAt: new Date(harness.now().getTime() + 7 * DAY_MS)
+            expiresAt: new Date(harness.now().getTime() + 7 * DAY_MS),
+            locale: 'en'
           },
           harness.now()
         );
