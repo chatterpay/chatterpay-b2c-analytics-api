@@ -1,10 +1,16 @@
-import type { TimeWindow } from './calendar.js';
+import { hourIndexOf, type TimeWindow } from './calendar.js';
 import type { NetworkId } from './catalog.js';
 import { shareOf, tenThousandthsToUsd } from './decimal.js';
 import { type Facts, sumAssets } from './facts.js';
 import { centsToUsd, changeRatio, countMetric } from './format.js';
 import type { ResolvedRange } from './ranges.js';
-import { liveAsOf, snapshotsFor, sourceFor } from './sources.js';
+import {
+  liveAsOf,
+  type PolymarketFigures,
+  provenanceOf,
+  snapshotsFor,
+  sourceFor
+} from './sources.js';
 import type {
   Availability,
   AverageFeeBlock,
@@ -12,6 +18,8 @@ import type {
   FeesByProductBlock,
   PolymarketAccountsBlock,
   PolymarketVolumeBlock,
+  ProductFees,
+  ProductVolume,
   TradedTokensBlock,
   UnavailableReason,
   VolumeByProductBlock
@@ -83,75 +91,148 @@ function productFigure(
   };
 }
 
-function activityStatus(availability: BlockStatus['availability']): BlockStatus {
+/** Polymarket fills of a window, with how far the Polygon reads cover it. */
+export interface PolymarketWindow {
+  availability: Availability;
+  reason: UnavailableReason | null;
+  /** `null` when no run read any block. */
+  figures: PolymarketFigures | null;
+}
+
+/**
+ * Polymarket fills of a window. They are read from Polygon up to a block (`coverage.through`):
+ * the window is `available` when the last run read up to the confirmed head or the window ends
+ * before the hour of that block, `partial` (`partial_coverage`) when that hour falls inside the
+ * window and `unavailable` (`partial_coverage`) when the window starts after it. Without any
+ * block read the figures are `unavailable`: `not_configured` when the last run had no Polygon
+ * endpoint or budget, `not_recorded` otherwise.
+ *
+ * @param window - Time window.
+ * @returns The fills and their availability.
+ */
+export function polymarketIn(window: TimeWindow): PolymarketWindow {
+  const figures = sourceFor('activity').polymarket(window);
+  if (figures === null) {
+    const disabled = provenanceOf(['activity']).ingest?.sources.polymarket === 'disabled';
+    return {
+      availability: 'unavailable',
+      reason: disabled ? 'not_configured' : 'not_recorded',
+      figures: null
+    };
+  }
+  const { first, last } = hourSpan(window);
+  const through = hourIndexOf(figures.coverage.through);
+  if (figures.coverage.caughtUp || last < through) {
+    return { availability: 'available', reason: null, figures };
+  }
+  return first <= through
+    ? { availability: 'partial', reason: 'partial_coverage', figures }
+    : { availability: 'unavailable', reason: 'partial_coverage', figures };
+}
+
+/** Executed Polymarket volume in cents: pUSD paid by buys plus pUSD received by sells. */
+function polymarketCents(polymarket: PolymarketWindow): number {
+  return Math.round((polymarket.figures?.volumeMicro ?? 0) / 10_000);
+}
+
+/** Status of a block from its items; the reason is that of the first item not fully served. */
+function itemsStatus(
+  items: ReadonlyArray<{ availability: Availability; reason: UnavailableReason | null }>
+): BlockStatus {
+  const availability: Availability = items.every((item) => item.availability === 'available')
+    ? 'available'
+    : items.every((item) => item.availability === 'unavailable')
+      ? 'unavailable'
+      : 'partial';
   return {
     source: sourceFor('activity').kind,
     availability,
-    reason: availability === 'available' ? null : 'not_recorded',
+    reason:
+      availability === 'available'
+        ? null
+        : (items.find((item) => item.availability !== 'available')?.reason ?? 'not_recorded'),
     asOf: liveAsOf('activity')
   };
 }
 
 /**
- * Polymarket orders are recorded with the amount requested and `fee: 0`; the executed amount of a
- * fill and the fee charged are not recorded, so the product has no volume or fee to report.
- */
-const POLYMARKET_UNAVAILABLE = {
-  product: 'polymarket',
-  availability: 'unavailable',
-  reason: 'not_recorded'
-} as const;
-
-/**
  * Builds the volume per product. A swap counts once, in `swap`, on its input side, and never in
- * `transfer`; the available products add up to the total volume of the range. A product with
+ * `transfer`; transfers and swaps add up to the total volume of the range. A product with
  * operations without a USD value is `partial` with the subtotal of the valued ones, or
  * `unavailable` when none has one; `transactions` counts them all and shares are of the subtotals.
+ * `polymarket` is the executed volume of the fills of the Polymarket accounts, read on Polygon,
+ * outside the networks of the catalog: it is listed only for every network, it is not in the total
+ * volume of the range and `transactions` counts its fills. The block is `available` when every
+ * item is.
  *
  * @param totals - Activity of the range.
- * @returns The block; `partial` because Polymarket has no verifiable volume.
+ * @param polymarket - Polymarket fills of the range; `null` when a single network is selected.
+ * @returns The block.
  */
-export function buildVolumeByProduct(totals: ActivityTotals): VolumeByProductBlock {
-  const total = totals.transferVolumeCents + totals.swapVolumeCents;
+export function buildVolumeByProduct(
+  totals: ActivityTotals,
+  polymarket: PolymarketWindow | null
+): VolumeByProductBlock {
+  const polymarketVolume =
+    polymarket === null || polymarket.availability === 'unavailable'
+      ? 0
+      : polymarketCents(polymarket);
+  const total = totals.transferVolumeCents + totals.swapVolumeCents + polymarketVolume;
   const transfer = productFigure(
     totals.transferVolumeCents,
     totals.transfers,
     totals.unpricedTransferVolume
   );
   const swap = productFigure(totals.swapVolumeCents, totals.swaps, totals.unpricedSwapVolume);
-  return {
-    ...activityStatus('partial'),
-    items: [
-      {
-        product: 'transfer',
-        availability: transfer.availability,
-        reason: transfer.reason,
-        volumeUsd: transfer.usd,
-        transactions: totals.transfers,
-        share: transfer.usd === null ? null : shareOf(totals.transferVolumeCents, total)
-      },
-      {
-        product: 'swap',
-        availability: swap.availability,
-        reason: swap.reason,
-        volumeUsd: swap.usd,
-        transactions: totals.swaps,
-        share: swap.usd === null ? null : shareOf(totals.swapVolumeCents, total)
-      },
-      { ...POLYMARKET_UNAVAILABLE, volumeUsd: null, transactions: null, share: null }
-    ]
-  };
+  const items: ProductVolume[] = [
+    {
+      product: 'transfer',
+      availability: transfer.availability,
+      reason: transfer.reason,
+      volumeUsd: transfer.usd,
+      transactions: totals.transfers,
+      share: transfer.usd === null ? null : shareOf(totals.transferVolumeCents, total)
+    },
+    {
+      product: 'swap',
+      availability: swap.availability,
+      reason: swap.reason,
+      volumeUsd: swap.usd,
+      transactions: totals.swaps,
+      share: swap.usd === null ? null : shareOf(totals.swapVolumeCents, total)
+    }
+  ];
+  if (polymarket !== null) {
+    const served = polymarket.availability !== 'unavailable';
+    items.push({
+      product: 'polymarket',
+      availability: polymarket.availability,
+      reason: polymarket.reason,
+      volumeUsd: served ? centsToUsd(polymarketVolume) : null,
+      transactions: served ? (polymarket.figures?.fills ?? 0) : null,
+      share: served ? shareOf(polymarketVolume, total) : null
+    });
+  }
+  return { ...itemsStatus(items), items };
 }
 
 /**
  * Builds the fees per product: the `fee` recorded on each counted operation, valued in USD; they
  * are not reconciled charges. A product with fees without a USD value is `partial` or
- * `unavailable`, as in {@link buildVolumeByProduct}.
+ * `unavailable`, as in {@link buildVolumeByProduct}. ChatterPay places Polymarket orders without
+ * a builder code, so it charges no fee on them: `polymarket` is `0.00`, listed only for every
+ * network, with the availability of the fills read. A fill of an order with a builder code may
+ * carry a builder fee the fill does not state; the item is then `unavailable` (`not_recorded`).
+ * The fee Polymarket charges on a fill is paid by the user to Polymarket, not to ChatterPay.
  *
  * @param totals - Activity of the range.
- * @returns The block; `partial` because Polymarket has no recorded fee.
+ * @param polymarket - Polymarket fills of the range; `null` when a single network is selected.
+ * @returns The block.
  */
-export function buildFeesByProduct(totals: ActivityTotals): FeesByProductBlock {
+export function buildFeesByProduct(
+  totals: ActivityTotals,
+  polymarket: PolymarketWindow | null
+): FeesByProductBlock {
   const total = totals.transferFeesCents + totals.swapFeesCents;
   const transfer = productFigure(
     totals.transferFeesCents,
@@ -159,26 +240,34 @@ export function buildFeesByProduct(totals: ActivityTotals): FeesByProductBlock {
     totals.unpricedTransferFees
   );
   const swap = productFigure(totals.swapFeesCents, totals.swaps, totals.unpricedSwapFees);
-  return {
-    ...activityStatus('partial'),
-    items: [
-      {
-        product: 'transfer',
-        availability: transfer.availability,
-        reason: transfer.reason,
-        feesUsd: transfer.usd,
-        share: transfer.usd === null ? null : shareOf(totals.transferFeesCents, total)
-      },
-      {
-        product: 'swap',
-        availability: swap.availability,
-        reason: swap.reason,
-        feesUsd: swap.usd,
-        share: swap.usd === null ? null : shareOf(totals.swapFeesCents, total)
-      },
-      { ...POLYMARKET_UNAVAILABLE, feesUsd: null, share: null }
-    ]
-  };
+  const items: ProductFees[] = [
+    {
+      product: 'transfer',
+      availability: transfer.availability,
+      reason: transfer.reason,
+      feesUsd: transfer.usd,
+      share: transfer.usd === null ? null : shareOf(totals.transferFeesCents, total)
+    },
+    {
+      product: 'swap',
+      availability: swap.availability,
+      reason: swap.reason,
+      feesUsd: swap.usd,
+      share: swap.usd === null ? null : shareOf(totals.swapFeesCents, total)
+    }
+  ];
+  if (polymarket !== null) {
+    const attributed = (polymarket.figures?.attributed ?? 0) > 0;
+    const served = polymarket.availability !== 'unavailable' && !attributed;
+    items.push({
+      product: 'polymarket',
+      availability: served ? polymarket.availability : 'unavailable',
+      reason: attributed ? 'not_recorded' : polymarket.reason,
+      feesUsd: served ? centsToUsd(0) : null,
+      share: served ? shareOf(0, total) : null
+    });
+  }
+  return { ...itemsStatus(items), items };
 }
 
 /** Operations whose fee has a USD value, the divisor of the average fee. */
@@ -234,12 +323,27 @@ export function buildAverageFee(
 }
 
 /**
- * Builds the Polymarket volume block.
+ * Builds the Polymarket volume block: pUSD paid by the buys plus pUSD received by the sells of the
+ * fills of the orders of the Polymarket accounts, read on Polygon (1 pUSD = 1 USD). The fills are
+ * those of every account whatever the network filter (`scope: all_networks`); availability is
+ * that of {@link polymarketIn}.
  *
- * @returns Always `unavailable`: see {@link POLYMARKET_UNAVAILABLE}.
+ * @param window - Time window of the range.
+ * @returns The block.
  */
-export function buildPolymarketVolume(): PolymarketVolumeBlock {
-  return { ...activityStatus('unavailable'), valueUsd: null };
+export function buildPolymarketVolume(window: TimeWindow): PolymarketVolumeBlock {
+  const polymarket = polymarketIn(window);
+  const served = polymarket.availability !== 'unavailable';
+  return {
+    source: sourceFor('activity').kind,
+    availability: polymarket.availability,
+    reason: polymarket.reason,
+    asOf: liveAsOf('activity'),
+    scope: 'all_networks',
+    valueUsd: served ? centsToUsd(polymarketCents(polymarket)) : null,
+    fills: served ? (polymarket.figures?.fills ?? 0) : null,
+    readThrough: polymarket.figures?.coverage.through.toISOString() ?? null
+  };
 }
 
 /**
