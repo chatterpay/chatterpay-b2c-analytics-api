@@ -61,7 +61,7 @@ describe('member block', () => {
     }[];
   }
 
-  it('revokes the sessions and the open code of a blocked member and refuses new ones', async () => {
+  it('revokes the sessions and the open code of a blocked member and shows the block', async () => {
     const viewerToken = await login(harness, VIEWER_EMAIL);
     const id = await memberId(harness, adminToken, VIEWER_EMAIL);
     harness.advance(MINUTE_MS);
@@ -81,11 +81,17 @@ describe('member block', () => {
     expect(session?.revokedAt).toEqual(harness.now());
     expect((await verify(openChallenge, VIEWER_EMAIL, openCode)).statusCode).toBe(401);
 
+    // A new code is sent like to anyone, and only its right code tells the owner about the block.
     harness.advance(MINUTE_MS);
-    const sent = harness.outbox.length;
     const challengeId = await requestCode(harness, VIEWER_EMAIL);
-    expect(harness.outbox).toHaveLength(sent);
+    const newCode = sentCode(harness, VIEWER_EMAIL) ?? '';
+    expect(newCode).not.toBe(openCode);
     expect((await verify(challengeId, VIEWER_EMAIL, openCode)).statusCode).toBe(401);
+    const shown = await verify(challengeId, VIEWER_EMAIL, newCode);
+    expect(shown.statusCode).toBe(403);
+    expect(shown.json()).toMatchObject({ code: 'MEMBER_BLOCKED' });
+    expect(shown.json()).not.toHaveProperty('token');
+    expect((await verify(challengeId, VIEWER_EMAIL, newCode)).statusCode).toBe(401);
 
     expect((await members()).find((member) => member.email === VIEWER_EMAIL)).toMatchObject({
       status: 'blocked'
@@ -101,9 +107,9 @@ describe('member block', () => {
 
     harness.advance(2 * DAY_MS);
     adminToken = await login(harness, ADMIN_EMAIL);
-    const sent = harness.outbox.length;
-    await requestCode(harness, VIEWER_EMAIL);
-    expect(harness.outbox).toHaveLength(sent);
+    const challengeId = await requestCode(harness, VIEWER_EMAIL);
+    const code = sentCode(harness, VIEWER_EMAIL) ?? '';
+    expect((await verify(challengeId, VIEWER_EMAIL, code)).statusCode).toBe(403);
     expect((await members()).find((member) => member.email === VIEWER_EMAIL)?.status).toBe(
       'blocked'
     );
