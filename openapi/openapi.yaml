@@ -1325,6 +1325,13 @@ paths:
                                       - partial
                                       - failed
                                       - disabled
+                                  polymarket:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - partial
+                                      - failed
+                                      - disabled
                               valuation:
                                 type: string
                                 enum:
@@ -2471,6 +2478,13 @@ paths:
                                       - partial
                                       - failed
                                       - disabled
+                                  polymarket:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - partial
+                                      - failed
+                                      - disabled
                               valuation:
                                 type: string
                                 enum:
@@ -3215,6 +3229,13 @@ paths:
                                       - partial
                                       - failed
                                       - disabled
+                                  polymarket:
+                                    type: string
+                                    enum:
+                                      - complete
+                                      - partial
+                                      - failed
+                                      - disabled
                               valuation:
                                 type: string
                                 enum:
@@ -3832,7 +3853,10 @@ paths:
                       - availability
                       - reason
                       - asOf
+                      - scope
                       - valueUsd
+                      - fills
+                      - readThrough
                     properties:
                       source:
                         type: string
@@ -3870,11 +3894,27 @@ paths:
                           - type: string
                             format: date-time
                           - type: "null"
+                      scope:
+                        type: string
+                        enum:
+                          - all_networks
+                        description: Fills are read on Polygon for every account; the network filter
+                          does not apply.
                       valueUsd:
                         type:
                           - "null"
                           - string
                         pattern: ^-?\d+\.\d+$
+                      fills:
+                        type:
+                          - "null"
+                          - integer
+                        minimum: 0
+                      readThrough:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
                   polymarketAccounts:
                     type: object
                     additionalProperties: false
@@ -4801,6 +4841,7 @@ paths:
                       - catalogUsers
                       - prices
                       - snapshot
+                      - polymarket
                       - aggregateRebuild
                       - persist
                     properties:
@@ -4819,6 +4860,9 @@ paths:
                       snapshot:
                         type: integer
                         minimum: 0
+                      polymarket:
+                        type: integer
+                        minimum: 0
                       aggregateRebuild:
                         type: integer
                         minimum: 0
@@ -4834,6 +4878,7 @@ paths:
                       - catalog
                       - prices
                       - balances
+                      - polymarket
                     properties:
                       transactions:
                         type: object
@@ -4951,6 +4996,7 @@ paths:
                                 - wallets
                                 - walletsRead
                                 - calls
+                                - plannedCalls
                                 - failedCalls
                                 - b2cEnabled
                                 - analyticsVisible
@@ -4986,6 +5032,12 @@ paths:
                                 calls:
                                   type: integer
                                   minimum: 0
+                                plannedCalls:
+                                  type: integer
+                                  minimum: 0
+                                  description: Requests a full read of the network takes, counted before the read;
+                                    on Koios, without the additional pages of
+                                    UTxOs.
                                 failedCalls:
                                   type: integer
                                   minimum: 0
@@ -5054,6 +5106,50 @@ paths:
                           masterWallets:
                             type: integer
                             minimum: 0
+                      polymarket:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - status
+                          - calls
+                          - failedCalls
+                          - accounts
+                          - fills
+                          - from
+                          - through
+                        properties:
+                          status:
+                            type: string
+                            enum:
+                              - complete
+                              - partial
+                              - failed
+                              - disabled
+                          calls:
+                            type: integer
+                            minimum: 0
+                          failedCalls:
+                            type: integer
+                            minimum: 0
+                          accounts:
+                            type: integer
+                            minimum: 0
+                            description: Distinct Polygon addresses read; the addresses are never reported.
+                          fills:
+                            type: integer
+                            minimum: 0
+                          from:
+                            type:
+                              - "null"
+                              - string
+                            format: date-time
+                            description: Instant of the first Polygon block read for the fills.
+                          through:
+                            type:
+                              - "null"
+                              - string
+                            format: date-time
+                            description: Instant of the last Polygon block read for the fills.
                   aggregates:
                     anyOf:
                       - type: object
