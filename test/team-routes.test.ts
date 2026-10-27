@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { decodeJwt } from 'jose';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  ACCESS_CODE,
   ADMIN_EMAIL,
   createHarness,
   type Harness,
@@ -10,6 +9,7 @@ import {
   memberId,
   requestCode,
   SECOND_ADMIN_EMAIL,
+  sentCode,
   VIEWER_EMAIL
 } from './auth-helpers.js';
 
@@ -211,9 +211,11 @@ describe('team routes', () => {
     const verified = await harness.call({
       method: 'POST',
       url: '/v1/auth/verify-code',
-      payload: { challengeId, email: 'late@example.com', code: ACCESS_CODE }
+      payload: { challengeId, email: 'late@example.com', code: '12345678' }
     });
     expect(verified.statusCode).toBe(401);
+    // An expired invite gets no login code.
+    expect(sentCode(harness, 'late@example.com')).toBeUndefined();
   });
 
   it('accepts the invite on first login with the invite role', async () => {
@@ -223,7 +225,11 @@ describe('team routes', () => {
     const verified = await harness.call({
       method: 'POST',
       url: '/v1/auth/verify-code',
-      payload: { challengeId, email: 'invited@example.com', code: ACCESS_CODE }
+      payload: {
+        challengeId,
+        email: 'invited@example.com',
+        code: sentCode(harness, 'invited@example.com') ?? ''
+      }
     });
     expect(verified.statusCode).toBe(200);
     expect(verified.json().user).toMatchObject({ email: 'invited@example.com', role: 'viewer' });
@@ -313,11 +319,16 @@ describe('team routes', () => {
     });
     expect(again.statusCode).toBe(404);
 
+    // A removed member gets no new login code, and the last one it got no longer verifies.
+    const lastCode = sentCode(harness, VIEWER_EMAIL);
+    const sent = harness.outbox.length;
+    harness.advance(60 * 1000);
     const relogin = await requestCode(harness, VIEWER_EMAIL);
+    expect(harness.outbox).toHaveLength(sent);
     const verified = await harness.call({
       method: 'POST',
       url: '/v1/auth/verify-code',
-      payload: { challengeId: relogin, email: VIEWER_EMAIL, code: ACCESS_CODE }
+      payload: { challengeId: relogin, email: VIEWER_EMAIL, code: lastCode ?? '12345678' }
     });
     expect(verified.statusCode).toBe(401);
 
