@@ -6,6 +6,10 @@ import { createJwtAuthenticator } from './auth/jwt-authenticator.js';
 import type { Authenticator } from './auth/principal.js';
 import { loadSigningKeys } from './auth/session-token.js';
 import type { AppEnv } from './config/env.js';
+import { ResendEmailProvider } from './email/resend-provider.js';
+import { EmailService } from './email/service.js';
+import { SimulatedEmailProvider } from './email/simulated-provider.js';
+import type { EmailProvider } from './email/types.js';
 import { registerErrorHandling } from './plugins/error-handler.js';
 import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
@@ -29,7 +33,14 @@ export interface AppOptions {
   store?: Store;
   /** Ingestion behind `POST /v1/internal/ingest`; `null` by default, which answers 503. */
   ingestion?: IngestionHandle | null;
+  /** Sender of invitations and login codes; built from `EMAIL_PROVIDER` by default. */
+  emailProvider?: EmailProvider;
+  /** Wait between email retries; replaced in tests. */
+  emailSleep?: (ms: number) => Promise<void>;
 }
+
+/** Site origin of the email links outside production when `SITE_URL` is unset. */
+const LOCAL_SITE_URL = 'http://localhost:4000';
 
 /**
  * Builds the Fastify application without binding a port, so tests can use `inject`.
@@ -52,6 +63,15 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
   }
   const keys = loadSigningKeys(env);
   const authenticate = options.authenticate ?? createJwtAuthenticator({ env, keys, store, clock });
+  const email = new EmailService({
+    provider:
+      options.emailProvider ??
+      (env.EMAIL_PROVIDER === 'resend' && env.RESEND_API_KEY !== null && env.EMAIL_FROM !== null
+        ? new ResendEmailProvider({ apiKey: env.RESEND_API_KEY, from: env.EMAIL_FROM })
+        : new SimulatedEmailProvider()),
+    loginUrl: `${env.SITE_URL ?? LOCAL_SITE_URL}/login`,
+    ...(options.emailSleep === undefined ? {} : { sleep: options.emailSleep })
+  });
 
   const app = Fastify({
     logger: {
@@ -82,6 +102,9 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
 
   if (store.kind === 'memory') {
     app.log.warn('using the in-memory store: MONGO_URI is unset, data is lost on restart');
+  }
+  if (email.provider.name === 'simulated') {
+    app.log.warn('EMAIL_PROVIDER is simulated: invitations and login codes are not emailed');
   }
   if (keys.ephemeral) {
     app.log.warn('JWT_PRIVATE_KEY is unset: using an ephemeral key, sessions end on restart');
@@ -125,8 +148,8 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
   registerErrorHandling(app);
   registerSharedSchemas(app);
   await app.register(healthRoutes, { store });
-  await app.register(authRoutes, { prefix: '/v1/auth', env, store, keys, clock });
-  await app.register(teamRoutes, { prefix: '/v1/team', store, clock });
+  await app.register(authRoutes, { prefix: '/v1/auth', env, store, keys, clock, email });
+  await app.register(teamRoutes, { prefix: '/v1/team', store, clock, email });
   await app.register(metricsRoutes, { prefix: '/v1/metrics', clock, store });
   await app.register(adminRoutes, { prefix: '/v1/admin', store, clock });
   await app.register(ingestRoutes, {
