@@ -3,19 +3,28 @@ import { decodeJwt, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadEnv } from '../src/config/env.js';
+import { SimulatedEmailProvider } from '../src/email/simulated-provider.js';
 import { MemoryStore } from '../src/store/memory-store.js';
 import {
-  ACCESS_CODE,
   ADMIN_EMAIL,
   createHarness,
   type Harness,
   login,
+  OTP_EMAIL_HMAC_SECRET,
+  OTP_HMAC_SECRET,
   requestCode,
+  SECOND_ADMIN_EMAIL,
   START,
+  sentCode,
   VIEWER_EMAIL
 } from './auth-helpers.js';
 
 const MINUTE_MS = 60 * 1000;
+
+/** A code of the right shape that differs from `code`. */
+function otherCode(code: string): string {
+  return code.replace(/^./, (digit) => String((Number(digit) + 1) % 10));
+}
 
 function base64url(value: Record<string, unknown>): string {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -55,7 +64,9 @@ describe('auth routes', () => {
     expect(challengeResponse.statusCode).toBe(400);
 
     const challengeId = await requestCode(harness, 'Admin@Example.com');
-    const response = await verify({ challengeId, email: 'ADMIN@example.com', code: ACCESS_CODE });
+    const code = sentCode(harness, ADMIN_EMAIL) ?? '';
+    expect(code).toMatch(/^\d{8}$/);
+    const response = await verify({ challengeId, email: 'ADMIN@example.com', code });
 
     expect(response.statusCode).toBe(200);
     expect(response.headers['cache-control']).toBe('private, no-store');
@@ -107,35 +118,44 @@ describe('auth routes', () => {
     const failures = [];
 
     const wrongCode = await requestCode(harness, ADMIN_EMAIL);
+    const adminCode = sentCode(harness, ADMIN_EMAIL) ?? '';
     failures.push(
-      await verify({ challengeId: wrongCode, email: ADMIN_EMAIL, code: 'wrong-code-123' })
+      await verify({ challengeId: wrongCode, email: ADMIN_EMAIL, code: otherCode(adminCode) })
     );
 
     const unknownEmail = await requestCode(harness, 'nobody@example.com');
     failures.push(
-      await verify({ challengeId: unknownEmail, email: 'nobody@example.com', code: ACCESS_CODE })
+      await verify({ challengeId: unknownEmail, email: 'nobody@example.com', code: '12345678' })
     );
 
+    // The viewer's code, sent back with the viewer's challenge under another email.
     const mismatch = await requestCode(harness, VIEWER_EMAIL);
-    failures.push(await verify({ challengeId: mismatch, email: ADMIN_EMAIL, code: ACCESS_CODE }));
+    const viewerCode = sentCode(harness, VIEWER_EMAIL) ?? '';
+    failures.push(await verify({ challengeId: mismatch, email: ADMIN_EMAIL, code: viewerCode }));
 
     failures.push(
       await verify({
         challengeId: '00000000-0000-4000-8000-000000000000',
         email: ADMIN_EMAIL,
-        code: ACCESS_CODE
+        code: adminCode
       })
     );
 
-    const expired = await requestCode(harness, ADMIN_EMAIL);
-    harness.advance(10 * MINUTE_MS);
-    failures.push(await verify({ challengeId: expired, email: ADMIN_EMAIL, code: ACCESS_CODE }));
-
-    const consumed = await requestCode(harness, ADMIN_EMAIL);
+    // Used once by its own email, then refused.
     expect(
-      (await verify({ challengeId: consumed, email: ADMIN_EMAIL, code: ACCESS_CODE })).statusCode
+      (await verify({ challengeId: mismatch, email: VIEWER_EMAIL, code: viewerCode })).statusCode
     ).toBe(200);
-    failures.push(await verify({ challengeId: consumed, email: ADMIN_EMAIL, code: ACCESS_CODE }));
+    failures.push(await verify({ challengeId: mismatch, email: VIEWER_EMAIL, code: viewerCode }));
+
+    const expired = await requestCode(harness, SECOND_ADMIN_EMAIL);
+    harness.advance(5 * MINUTE_MS);
+    failures.push(
+      await verify({
+        challengeId: expired,
+        email: SECOND_ADMIN_EMAIL,
+        code: sentCode(harness, SECOND_ADMIN_EMAIL) ?? ''
+      })
+    );
 
     for (const failure of failures) {
       expect(failure.statusCode).toBe(401);
@@ -157,27 +177,17 @@ describe('auth routes', () => {
       expect(response.statusCode).toBe(401);
     }
 
-    const response = await verify({ challengeId, email: ADMIN_EMAIL, code: ACCESS_CODE });
+    const response = await verify({
+      challengeId,
+      email: ADMIN_EMAIL,
+      code: sentCode(harness, ADMIN_EMAIL) ?? ''
+    });
     expect(response.statusCode).toBe(401);
   });
 
-  it('rate limits request-code per email and per IP with Retry-After', async () => {
-    for (let index = 0; index < 5; index += 1) {
-      await requestCode(harness, ADMIN_EMAIL);
-    }
-    const perEmail = await harness.call({
-      method: 'POST',
-      url: '/v1/auth/request-code',
-      payload: { email: ADMIN_EMAIL },
-      ip: '198.51.100.7'
-    });
-    expect(perEmail.statusCode).toBe(429);
-    expect(perEmail.json()).toMatchObject({ code: 'RATE_LIMITED' });
-    expect(Number(perEmail.headers['retry-after'])).toBe(15 * 60);
-    expect(perEmail.headers['cache-control']).toBe('private, no-store');
-
+  it('rate limits request-code per IP with Retry-After', async () => {
     const statuses: number[] = [];
-    for (let index = 0; index < 21; index += 1) {
+    for (let index = 0; index < 31; index += 1) {
       const response = await harness.call({
         method: 'POST',
         url: '/v1/auth/request-code',
@@ -186,8 +196,17 @@ describe('auth routes', () => {
       });
       statuses.push(response.statusCode);
     }
-    expect(statuses.filter((status) => status === 202)).toHaveLength(20);
-    expect(statuses.at(-1)).toBe(429);
+    expect(statuses.filter((status) => status === 202)).toHaveLength(30);
+    const refused = await harness.call({
+      method: 'POST',
+      url: '/v1/auth/request-code',
+      payload: { email: ADMIN_EMAIL },
+      ip: '2001:db8::1'
+    });
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json()).toMatchObject({ code: 'RATE_LIMITED' });
+    expect(Number(refused.headers['retry-after'])).toBe(15 * 60);
+    expect(refused.headers['cache-control']).toBe('private, no-store');
 
     harness.advance(15 * MINUTE_MS);
     expect(await requestCode(harness, ADMIN_EMAIL)).toEqual(expect.any(String));
@@ -195,15 +214,15 @@ describe('auth routes', () => {
 
   it('rate limits verify-code per IP', async () => {
     const statuses: number[] = [];
-    for (let index = 0; index < 31; index += 1) {
+    for (let index = 0; index < 61; index += 1) {
       const response = await verify(
         { challengeId: 'unknown', email: ADMIN_EMAIL, code: 'wrong-code-123' },
         '192.0.2.44'
       );
       statuses.push(response.statusCode);
     }
-    expect(statuses.slice(0, 30).every((status) => status === 401)).toBe(true);
-    expect(statuses[30]).toBe(429);
+    expect(statuses.slice(0, 60).every((status) => status === 401)).toBe(true);
+    expect(statuses[60]).toBe(429);
 
     const otherIp = await verify(
       { challengeId: 'unknown', email: ADMIN_EMAIL, code: 'wrong-code-123' },
@@ -213,7 +232,7 @@ describe('auth routes', () => {
   });
 
   it('falls back to the socket IP when x-client-ip is not an IP literal', async () => {
-    for (let index = 0; index < 20; index += 1) {
+    for (let index = 0; index < 30; index += 1) {
       const response = await harness.call({
         method: 'POST',
         url: '/v1/auth/request-code',
@@ -324,9 +343,9 @@ describe('auth routes', () => {
     ['/v1/auth/request-code', { email: ADMIN_EMAIL, role: 'admin' }],
     ['/v1/auth/request-code', { email: 'not-an-email' }],
     ['/v1/auth/request-code', { email: { $ne: null } }],
-    ['/v1/auth/verify-code', { challengeId: 'x', email: ADMIN_EMAIL, code: ACCESS_CODE, extra: 1 }],
+    ['/v1/auth/verify-code', { challengeId: 'x', email: ADMIN_EMAIL, code: '12345678', extra: 1 }],
     ['/v1/auth/verify-code', { challengeId: 'x', email: ADMIN_EMAIL, code: '12345' }],
-    ['/v1/auth/verify-code', { challengeId: 'x'.repeat(65), email: ADMIN_EMAIL, code: ACCESS_CODE }]
+    ['/v1/auth/verify-code', { challengeId: 'x'.repeat(65), email: ADMIN_EMAIL, code: '12345678' }]
   ])('rejects invalid body on %s with 400', async (url, payload) => {
     const response = await harness.call({ method: 'POST', url, payload });
     expect(response.statusCode).toBe(400);
@@ -337,8 +356,11 @@ describe('auth routes', () => {
     const adminToken = await login(harness, ADMIN_EMAIL);
     const challengeId = await requestCode(harness, VIEWER_EMAIL);
     await verify({ challengeId, email: VIEWER_EMAIL, code: 'wrong-code-123' });
+    // A second code for the email waits for the cooldown.
+    harness.advance(MINUTE_MS);
     const viewerToken = await login(harness, VIEWER_EMAIL);
     await harness.call({ method: 'POST', url: '/v1/auth/logout', token: viewerToken });
+    const codes = harness.outbox.map((message) => sentCode(harness, message.to) ?? '');
 
     const activity = await harness.call({
       method: 'GET',
@@ -349,11 +371,13 @@ describe('auth routes', () => {
     expect(actions).toEqual(['logout', 'login', 'login_failed', 'login']);
 
     for (const body of harness.bodies) {
-      expect(body).not.toContain(ACCESS_CODE);
+      for (const code of codes) {
+        expect(body).not.toContain(code);
+      }
       expect(body).not.toContain('wrong-code-123');
     }
     const stored = JSON.stringify(await harness.store.listActivity(100));
-    for (const secret of [ACCESS_CODE, 'wrong-code-123', adminToken, viewerToken]) {
+    for (const secret of [...codes, 'wrong-code-123', adminToken, viewerToken]) {
       expect(activity.body).not.toContain(secret);
       expect(stored).not.toContain(secret);
     }
@@ -361,41 +385,29 @@ describe('auth routes', () => {
 
   it('does not record failures of unknown emails', async () => {
     const challengeId = await requestCode(harness, 'nobody@example.com');
-    await verify({ challengeId, email: 'nobody@example.com', code: ACCESS_CODE });
+    await verify({ challengeId, email: 'nobody@example.com', code: '12345678' });
 
     expect(await harness.store.listActivity(100)).toEqual([]);
   });
 });
 
 describe('auth configuration', () => {
-  it('answers 503 on verify-code without DEMO_ACCESS_CODE', async () => {
-    const harness = await createHarness({ DEMO_ACCESS_CODE: '' });
-    const challengeId = await requestCode(harness, ADMIN_EMAIL);
-    const response = await harness.call({
-      method: 'POST',
-      url: '/v1/auth/verify-code',
-      payload: { challengeId, email: ADMIN_EMAIL, code: ACCESS_CODE }
-    });
-
-    expect(response.statusCode).toBe(503);
-    expect(response.json()).toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
-    await harness.app.close();
-  });
-
-  it('works with the ephemeral key generated at startup', async () => {
-    const env = loadEnv({ NODE_ENV: 'test', LOG_LEVEL: 'silent', DEMO_ACCESS_CODE: ACCESS_CODE });
+  it('works with the ephemeral signing and login code keys generated at startup', async () => {
+    const env = loadEnv({ NODE_ENV: 'test', LOG_LEVEL: 'silent' });
     const store = new MemoryStore();
     await store.ensureUser(ADMIN_EMAIL, 'admin', START);
-    const app = await buildApp(env, { store, clock: () => START });
+    const provider = new SimulatedEmailProvider();
+    const app = await buildApp(env, { store, clock: () => START, emailProvider: provider });
     const challenge = await app.inject({
       method: 'POST',
       url: '/v1/auth/request-code',
       payload: { email: ADMIN_EMAIL }
     });
+    const code = provider.outbox.at(-1)?.text.match(/\b(\d{8})\b/)?.[1] ?? '';
     const verified = await app.inject({
       method: 'POST',
       url: '/v1/auth/verify-code',
-      payload: { challengeId: challenge.json().challengeId, email: ADMIN_EMAIL, code: ACCESS_CODE }
+      payload: { challengeId: challenge.json().challengeId, email: ADMIN_EMAIL, code }
     });
     expect(verified.statusCode).toBe(200);
 
@@ -414,7 +426,12 @@ describe('auth configuration', () => {
     const production = loadEnv({
       NODE_ENV: 'production',
       LOG_LEVEL: 'silent',
-      DEMO_ACCESS_CODE: ACCESS_CODE,
+      OTP_HMAC_SECRET,
+      OTP_EMAIL_HMAC_SECRET,
+      EMAIL_PROVIDER: 'resend',
+      RESEND_API_KEY: 're_test_only',
+      EMAIL_FROM: 'Analytics <no-reply@example.com>',
+      SITE_URL: 'https://analytics.example.com',
       JWT_PRIVATE_KEY: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
       MONGO_URI: 'mongodb://127.0.0.1:27017',
       B2C_MONGO_URI: 'mongodb://127.0.0.1:27017/chatterpay-dev'
