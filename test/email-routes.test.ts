@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
+import { emailKey, loadLoginCodeKeys } from '../src/auth/login-code.js';
 import type { EmailAttempt, EmailMessage, EmailProvider } from '../src/email/types.js';
 import {
   ACCESS_CODE,
@@ -7,10 +8,15 @@ import {
   createHarness,
   type Harness,
   login,
-  requestCode
+  OTP_EMAIL_HMAC_SECRET,
+  OTP_HMAC_SECRET,
+  requestCode,
+  sentCode,
+  VIEWER_EMAIL
 } from './auth-helpers.js';
 
 const INVITEE = 'invitee@example.com';
+const MINUTE_MS = 60 * 1000;
 
 /** Provider that records the messages and answers with the current `next` attempt. */
 class ControlledProvider implements EmailProvider {
@@ -31,16 +37,13 @@ const UNAVAILABLE: EmailAttempt = {
   retryAfterMs: null
 };
 
-/**
- * Code of the last login email sent to the address.
- *
- * @param outbox - Messages sent.
- * @param email - Recipient.
- * @returns The six digits.
- */
-function lastCode(outbox: EmailMessage[], email: string): string {
-  const message = outbox.filter((item) => item.to === email).at(-1);
-  const code = /\b(\d{6})\b/.exec(message?.text ?? '')?.[1];
+/** A code of the right shape that differs from `code`. */
+function otherCode(code: string): string {
+  return code.replace(/^./, (digit) => String((Number(digit) + 1) % 10));
+}
+
+function codeOf(harness: Harness, email: string): string {
+  const code = sentCode(harness, email);
   if (code === undefined) {
     throw new Error('no login code email');
   }
@@ -62,70 +65,146 @@ describe('login with a code sent by email', () => {
     });
   }
 
-  async function loginByEmail(email: string): Promise<string> {
-    const challengeId = await requestCode(harness, email);
-    const response = await verify(challengeId, email, lastCode(harness.outbox, email));
-    return response.json().token;
-  }
-
-  it('emails a one-time code to a member, in the asked language, and signs in with it', async () => {
-    harness = await createHarness({ LOGIN_CODE_DELIVERY: 'email' });
+  it('emails an eight-digit code in the asked language and signs in with it once', async () => {
+    harness = await createHarness();
     const response = await harness.call({
       method: 'POST',
       url: '/v1/auth/request-code',
       payload: { email: ADMIN_EMAIL, locale: 'es' }
     });
     expect(response.statusCode).toBe(202);
-    const { challengeId } = response.json();
+    const { challengeId, expiresAt, delivery, codeLength } = response.json();
+    expect({ delivery, codeLength }).toEqual({ delivery: 'email', codeLength: 8 });
+    expect(expiresAt).toBe(new Date(harness.now().getTime() + 5 * MINUTE_MS).toISOString());
 
     expect(harness.outbox).toHaveLength(1);
     const message = harness.outbox[0];
     expect(message?.to).toBe(ADMIN_EMAIL);
     expect(message?.idempotencyKey).toBe(`login-code/${challengeId}`);
-    expect(message?.subject).toMatch(/^\d{6} es tu código de ChatterPay Analytics$/);
-    const code = lastCode(harness.outbox, ADMIN_EMAIL);
+    expect(message?.subject).toMatch(/^\d{8} es tu código de ChatterPay Analytics$/);
+    expect(message?.text).toContain('5');
+    const code = codeOf(harness, ADMIN_EMAIL);
     expect(harness.bodies.join('\n')).not.toContain(code);
 
-    // The shared access code no longer opens a session.
+    // The shared demo code opens no session for an account outside the demo login.
     expect((await verify(challengeId, ADMIN_EMAIL, ACCESS_CODE)).statusCode).toBe(401);
     const verified = await verify(challengeId, ADMIN_EMAIL, code);
     expect(verified.statusCode).toBe(200);
     expect(verified.json().user.email).toBe(ADMIN_EMAIL);
-    // One use only.
     expect((await verify(challengeId, ADMIN_EMAIL, code)).statusCode).toBe(401);
   });
 
   it('answers the same to an unknown email and emails nothing', async () => {
-    harness = await createHarness({ LOGIN_CODE_DELIVERY: 'email' });
-    const response = await harness.call({
+    harness = await createHarness();
+    const known = await harness.call({
+      method: 'POST',
+      url: '/v1/auth/request-code',
+      payload: { email: VIEWER_EMAIL }
+    });
+    const unknown = await harness.call({
       method: 'POST',
       url: '/v1/auth/request-code',
       payload: { email: 'nobody@example.com' }
     });
 
-    expect(response.statusCode).toBe(202);
-    expect(Object.keys(response.json()).sort()).toEqual(['challengeId', 'expiresAt']);
-    expect(harness.outbox).toEqual([]);
+    expect(unknown.statusCode).toBe(202);
+    const { challengeId: _known, expiresAt: _knownAt, ...knownRest } = known.json();
+    const { challengeId: _unknown, expiresAt: _unknownAt, ...unknownRest } = unknown.json();
+    expect(unknownRest).toEqual(knownRest);
+    expect(harness.outbox.map((item) => item.to)).toEqual([VIEWER_EMAIL]);
   });
 
-  it('accepts a code only on the challenge it was sent for', async () => {
-    harness = await createHarness({ LOGIN_CODE_DELIVERY: 'email' });
+  it('keeps no code nor email in clear in the stored challenge', async () => {
+    harness = await createHarness();
+    const challengeId = await requestCode(harness, ADMIN_EMAIL);
+    const code = codeOf(harness, ADMIN_EMAIL);
+    const keys = loadLoginCodeKeys({ OTP_HMAC_SECRET, OTP_EMAIL_HMAC_SECRET });
+    const key = emailKey(keys, ADMIN_EMAIL);
+
+    const challenge = await harness.store.recordChallengeAttempt(key, challengeId, harness.now());
+    expect(challenge).toMatchObject({ id: challengeId, kind: 'otp', emailKey: key, attempts: 1 });
+    const stored = JSON.stringify(challenge);
+    expect(stored).not.toContain(code);
+    expect(stored).not.toContain(ADMIN_EMAIL);
+    expect(challenge?.codeDigest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('refuses a wrong, expired, reused or superseded code, another email and another challenge', async () => {
+    harness = await createHarness();
     const first = await requestCode(harness, ADMIN_EMAIL);
-    const firstCode = lastCode(harness.outbox, ADMIN_EMAIL);
+    const firstCode = codeOf(harness, ADMIN_EMAIL);
+
+    expect((await verify(first, ADMIN_EMAIL, otherCode(firstCode))).statusCode).toBe(401);
+    expect((await verify(first, VIEWER_EMAIL, firstCode)).statusCode).toBe(401);
+    expect((await verify(randomUUID(), ADMIN_EMAIL, firstCode)).statusCode).toBe(401);
+
+    harness.advance(MINUTE_MS);
     const second = await requestCode(harness, ADMIN_EMAIL);
-    const secondCode = lastCode(harness.outbox, ADMIN_EMAIL);
-    // Two draws can repeat; the test needs two different codes.
-    if (firstCode === secondCode) {
-      return;
+    const secondCode = codeOf(harness, ADMIN_EMAIL);
+    // The new challenge replaces the first: its code and its id no longer verify.
+    expect((await verify(first, ADMIN_EMAIL, firstCode)).statusCode).toBe(401);
+    // Two draws repeat once in a hundred million; only different codes tell the challenges apart.
+    if (firstCode !== secondCode) {
+      expect((await verify(second, ADMIN_EMAIL, firstCode)).statusCode).toBe(401);
     }
 
-    expect((await verify(second, ADMIN_EMAIL, firstCode)).statusCode).toBe(401);
-    expect((await verify(first, ADMIN_EMAIL, firstCode)).statusCode).toBe(200);
+    harness.advance(5 * MINUTE_MS);
+    expect((await verify(second, ADMIN_EMAIL, secondCode)).statusCode).toBe(401);
+  });
+
+  it('spends the challenge after five attempts, the right code included', async () => {
+    harness = await createHarness();
+    const challengeId = await requestCode(harness, ADMIN_EMAIL);
+    const code = codeOf(harness, ADMIN_EMAIL);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await verify(challengeId, ADMIN_EMAIL, otherCode(code))).statusCode).toBe(401);
+    }
+
+    expect((await verify(challengeId, ADMIN_EMAIL, code)).statusCode).toBe(401);
+  });
+
+  it('lets only one of two concurrent verifications consume the code', async () => {
+    harness = await createHarness();
+    const challengeId = await requestCode(harness, ADMIN_EMAIL);
+    const code = codeOf(harness, ADMIN_EMAIL);
+
+    const results = await Promise.all([
+      verify(challengeId, ADMIN_EMAIL, code),
+      verify(challengeId, ADMIN_EMAIL, code)
+    ]);
+
+    expect(results.map((result) => result.statusCode).sort()).toEqual([200, 401]);
+  });
+
+  it('does not verify a code once the login code key changed', async () => {
+    harness = await createHarness();
+    const challengeId = await requestCode(harness, ADMIN_EMAIL);
+    const code = codeOf(harness, ADMIN_EMAIL);
+    const rotated = await createHarness({ OTP_HMAC_SECRET: 'c'.repeat(64) });
+    // The challenge moves to an app with another code key, as after a rotation.
+    const keys = loadLoginCodeKeys({ OTP_HMAC_SECRET, OTP_EMAIL_HMAC_SECRET });
+    const challenge = await harness.store.recordChallengeAttempt(
+      emailKey(keys, ADMIN_EMAIL),
+      challengeId,
+      harness.now()
+    );
+    if (challenge === null) {
+      throw new Error('no challenge');
+    }
+    await rotated.store.issueChallenge({ ...challenge, attempts: 0 });
+
+    const response = await rotated.call({
+      method: 'POST',
+      url: '/v1/auth/verify-code',
+      payload: { challengeId, email: ADMIN_EMAIL, code }
+    });
+    expect(response.statusCode).toBe(401);
+    await rotated.app.close();
   });
 
   it('activates an invited account only once its email confirms the code', async () => {
-    harness = await createHarness({ LOGIN_CODE_DELIVERY: 'email' });
-    const adminToken = await loginByEmail(ADMIN_EMAIL);
+    harness = await createHarness();
+    const adminToken = await login(harness, ADMIN_EMAIL);
     const created = await harness.call({
       method: 'POST',
       url: '/v1/team/invites',
@@ -138,29 +217,90 @@ describe('login with a code sent by email', () => {
     expect(harness.outbox.filter((message) => message.to === INVITEE)).toHaveLength(2);
     expect(await harness.store.findActiveUserByEmail(INVITEE)).toBeNull();
 
-    expect((await verify(challengeId, INVITEE, '000000')).statusCode).toBe(401);
+    const code = codeOf(harness, INVITEE);
+    expect((await verify(challengeId, INVITEE, otherCode(code))).statusCode).toBe(401);
     expect(await harness.store.findActiveUserByEmail(INVITEE)).toBeNull();
 
-    const verified = await verify(challengeId, INVITEE, lastCode(harness.outbox, INVITEE));
+    const verified = await verify(challengeId, INVITEE, code);
     expect(verified.statusCode).toBe(200);
     expect(verified.json().user).toMatchObject({ email: INVITEE, role: 'viewer' });
     const actions = (await harness.store.listActivity(10)).map((event) => event.action);
     expect(actions).toContain('invite_accepted');
   });
 
-  it('answers 202 when the code email could not be delivered', async () => {
+  it('keeps the previous code valid and lets the person ask again when the email fails', async () => {
     const provider = new ControlledProvider();
+    harness = await createHarness({}, provider);
+    const first = await requestCode(harness, ADMIN_EMAIL);
+    const firstCode = codeOf(harness, ADMIN_EMAIL);
+    harness.advance(MINUTE_MS);
     provider.next = UNAVAILABLE;
-    harness = await createHarness({ LOGIN_CODE_DELIVERY: 'email' }, provider);
+    const calls = provider.calls.length;
 
-    const response = await harness.call({
+    const failed = await harness.call({
       method: 'POST',
       url: '/v1/auth/request-code',
       payload: { email: ADMIN_EMAIL }
     });
 
-    expect(response.statusCode).toBe(202);
-    expect(provider.calls).toHaveLength(3);
+    expect(failed.statusCode).toBe(202);
+    expect(provider.calls.length - calls).toBe(3);
+    provider.next = { kind: 'sent', messageId: 'msg-2' };
+    // The failed code did not count: no penalty step, only the cooldown since the first code.
+    expect(
+      (
+        await harness.call({
+          method: 'POST',
+          url: '/v1/auth/request-code',
+          payload: { email: ADMIN_EMAIL }
+        })
+      ).statusCode
+    ).toBe(202);
+    // The first code stayed the open one until this new code was sent.
+    expect((await verify(first, ADMIN_EMAIL, firstCode)).statusCode).toBe(401);
+  });
+
+  it('keeps the previous code open when its replacement fails to send', async () => {
+    const provider = new ControlledProvider();
+    harness = await createHarness({}, provider);
+    const first = await requestCode(harness, ADMIN_EMAIL);
+    const firstCode = codeOf(harness, ADMIN_EMAIL);
+    harness.advance(MINUTE_MS);
+    provider.next = UNAVAILABLE;
+    await harness.call({
+      method: 'POST',
+      url: '/v1/auth/request-code',
+      payload: { email: ADMIN_EMAIL }
+    });
+
+    expect((await verify(first, ADMIN_EMAIL, firstCode)).statusCode).toBe(200);
+  });
+
+  it('logs neither the code nor the email', async () => {
+    const provider = new ControlledProvider();
+    harness = await createHarness({ LOG_LEVEL: 'info' }, provider);
+    const challengeId = await requestCode(harness, ADMIN_EMAIL);
+    const code = codeOf(harness, ADMIN_EMAIL);
+    await verify(challengeId, ADMIN_EMAIL, otherCode(code));
+    await verify(challengeId, ADMIN_EMAIL, code);
+    await requestCode(harness, 'nobody@example.com');
+    await harness.call({
+      method: 'POST',
+      url: '/v1/auth/request-code',
+      payload: { email: 'nobody@example.com' }
+    });
+    provider.next = UNAVAILABLE;
+    await requestCode(harness, VIEWER_EMAIL);
+
+    const logged = harness.logs.join('');
+    expect(logged).toContain('login step refused');
+    expect(logged).toContain('login code email not delivered');
+    for (const secret of [code, otherCode(code), codeOf(harness, VIEWER_EMAIL)]) {
+      expect(logged).not.toContain(secret);
+    }
+    for (const email of [ADMIN_EMAIL, VIEWER_EMAIL, 'nobody@example.com']) {
+      expect(logged).not.toContain(email);
+    }
   });
 });
 
@@ -180,6 +320,10 @@ describe('invitation emails', () => {
     });
   }
 
+  function invitations(): EmailMessage[] {
+    return harness.outbox.filter((message) => message.to === INVITEE);
+  }
+
   it('emails a new invite in its language and records the simulated delivery', async () => {
     harness = await createHarness();
     const adminToken = await login(harness, ADMIN_EMAIL);
@@ -196,19 +340,19 @@ describe('invitation emails', () => {
       lastAttemptAt: harness.now().toISOString(),
       failure: null
     });
-    expect(harness.outbox).toHaveLength(1);
-    expect(harness.outbox[0]).toMatchObject({
+    expect(invitations()).toHaveLength(1);
+    expect(invitations()[0]).toMatchObject({
       to: INVITEE,
       subject: 'Te invitaron a ChatterPay Analytics',
       idempotencyKey: `invite/${body.id}/0`
     });
-    expect(harness.outbox[0]?.text).toContain('http://localhost:4000/login');
+    expect(invitations()[0]?.text).toContain('http://localhost:4000/login');
 
     // A replay of the same submit answers the invite without a second email.
     const replay = await invite(adminToken, mutationId, 'es');
     expect(replay.statusCode).toBe(201);
     expect(replay.json().id).toBe(body.id);
-    expect(harness.outbox).toHaveLength(1);
+    expect(invitations()).toHaveLength(1);
   });
 
   it('emails a resent invite with a new idempotency key', async () => {
@@ -224,11 +368,11 @@ describe('invitation emails', () => {
 
     expect(resent.statusCode).toBe(200);
     expect(resent.json()).toMatchObject({ resendCount: 1, delivery: { state: 'simulated' } });
-    expect(harness.outbox.map((message) => message.idempotencyKey)).toEqual([
+    expect(invitations().map((message) => message.idempotencyKey)).toEqual([
       `invite/${id}/0`,
       `invite/${id}/1`
     ]);
-    expect(harness.outbox[0]?.subject).toBe('You are invited to ChatterPay Analytics');
+    expect(invitations()[0]?.subject).toBe('You are invited to ChatterPay Analytics');
   });
 
   it('keeps an invite pending when its email fails, and sends it on resend', async () => {
@@ -257,7 +401,7 @@ describe('invitation emails', () => {
       token: adminToken
     });
     expect(resent.json().delivery).toMatchObject({ state: 'sent', attempts: 1, failure: null });
-    expect(provider.calls.map((message) => message.idempotencyKey)).toEqual([
+    expect(invitations().map((message) => message.idempotencyKey)).toEqual([
       `invite/${id}/0`,
       `invite/${id}/0`,
       `invite/${id}/0`,
@@ -277,6 +421,6 @@ describe('invitation emails', () => {
     });
 
     expect(revoked.json()).toMatchObject({ status: 'revoked', delivery: { state: 'simulated' } });
-    expect(harness.outbox).toHaveLength(1);
+    expect(invitations()).toHaveLength(1);
   });
 });
