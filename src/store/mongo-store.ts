@@ -8,6 +8,7 @@ import {
   ObjectId
 } from 'mongodb';
 import type { Role } from '../auth/principal.js';
+import type { EmailLocale } from '../email/types.js';
 import { connectOrClose } from './connect-retry.js';
 import { assertIndexes, COLLECTIONS, NETWORK_SETTINGS_ID } from './mongo-schema.js';
 import {
@@ -24,6 +25,7 @@ import type {
   Invite,
   InviteCounts,
   InviteCursor,
+  InviteDelivery,
   InviteTransitionResult,
   InviteView,
   MemberMutationResult,
@@ -42,8 +44,14 @@ import type {
 /** `name` is optional: the API never writes it, an operator may. */
 type UserDoc = Omit<User, 'id' | 'name'> & { _id: string; name?: string | null };
 type SessionDoc = Omit<Session, 'jti'> & { _id: string };
-type ChallengeDoc = Omit<Challenge, 'id'> & { _id: string };
-type InviteDoc = Omit<Invite, 'id'> & { _id: string };
+/** Challenges stored before email codes existed have no `codeHash`. */
+type ChallengeDoc = Omit<Challenge, 'id' | 'codeHash'> & { _id: string; codeHash?: string | null };
+/** Invites stored before emails were sent have neither `locale` nor `delivery`. */
+type InviteDoc = Omit<Invite, 'id' | 'locale' | 'delivery'> & {
+  _id: string;
+  locale?: EmailLocale;
+  delivery?: InviteDelivery;
+};
 type ActivityDoc = Omit<ActivityEvent, 'id'> & { _id: ObjectId };
 interface CounterDoc {
   _id: string;
@@ -61,6 +69,15 @@ const VISIBILITY_ID = NETWORK_SETTINGS_ID;
 const DUPLICATE_KEY = 11000;
 const PENDING = 'simulated';
 
+/** Delivery of an invite whose send has not ended. */
+const PENDING_DELIVERY: InviteDelivery = {
+  state: 'pending',
+  attempts: 0,
+  lastAttemptAt: null,
+  messageId: null,
+  failure: null
+};
+
 function isDuplicateKey(error: unknown): boolean {
   return error instanceof MongoServerError && error.code === DUPLICATE_KEY;
 }
@@ -77,13 +94,25 @@ function toSession({ _id, ...rest }: SessionDoc): Session {
   return { jti: _id, ...rest };
 }
 
-function toChallenge({ _id, ...rest }: ChallengeDoc): Challenge {
-  return { id: _id, ...rest };
+function toChallenge({ _id, codeHash, ...rest }: ChallengeDoc): Challenge {
+  return { id: _id, ...rest, codeHash: codeHash ?? null };
 }
 
-function toInvite({ _id, ...rest }: InviteDoc, now: Date): Invite {
+function toInvite({ _id, locale, delivery, ...rest }: InviteDoc, now: Date): Invite {
   const expired = rest.status === PENDING && rest.expiresAt.getTime() <= now.getTime();
-  return { id: _id, ...rest, status: expired ? 'expired' : rest.status };
+  return {
+    id: _id,
+    ...rest,
+    status: expired ? 'expired' : rest.status,
+    locale: locale ?? 'en',
+    delivery: delivery ?? {
+      state: 'simulated',
+      attempts: 0,
+      lastAttemptAt: rest.lastSentAt,
+      messageId: null,
+      failure: null
+    }
+  };
 }
 
 /**
@@ -300,14 +329,20 @@ export class MongoStore implements Store {
     await this.sessions.updateOne({ _id: jti, revokedAt: null }, { $set: { revokedAt: now } });
   }
 
-  async createChallenge(email: string, now: Date, expiresAt: Date): Promise<Challenge> {
+  async createChallenge(
+    email: string,
+    now: Date,
+    expiresAt: Date,
+    codeHash: string | null
+  ): Promise<Challenge> {
     const doc: ChallengeDoc = {
       _id: randomUUID(),
       email,
       createdAt: now,
       expiresAt,
       attempts: 0,
-      consumedAt: null
+      consumedAt: null,
+      codeHash
     };
     await this.challenges.insertOne(doc);
     return toChallenge(doc);
@@ -357,7 +392,9 @@ export class MongoStore implements Store {
       createdBy: input.createdBy,
       resendCount: 0,
       lastSentAt: now,
-      mutationId: input.mutationId
+      mutationId: input.mutationId,
+      locale: input.locale,
+      delivery: PENDING_DELIVERY
     };
     try {
       await this.invites.insertOne(doc);
@@ -409,11 +446,32 @@ export class MongoStore implements Store {
   }
 
   async resendInvite(id: string, now: Date): Promise<InviteTransitionResult> {
-    return this.transition(id, now, { $inc: { resendCount: 1 }, $set: { lastSentAt: now } });
+    return this.transition(id, now, {
+      $inc: { resendCount: 1 },
+      $set: { lastSentAt: now, delivery: PENDING_DELIVERY }
+    });
   }
 
   async revokeInvite(id: string, now: Date): Promise<InviteTransitionResult> {
     return this.transition(id, now, { $set: { status: 'revoked' } });
+  }
+
+  async recordInviteDelivery(
+    id: string,
+    delivery: InviteDelivery,
+    now: Date
+  ): Promise<Invite | null> {
+    const invite = await this.invites.findOneAndUpdate(
+      { _id: id },
+      { $set: { delivery } },
+      { returnDocument: 'after' }
+    );
+    return invite === null ? null : toInvite(invite, now);
+  }
+
+  async hasPendingInvite(email: string, now: Date): Promise<boolean> {
+    const filter: Filter<InviteDoc> = { email, status: PENDING, expiresAt: { $gt: now } };
+    return (await this.invites.countDocuments(filter, { limit: 1 })) > 0;
   }
 
   async appendActivity(event: Omit<ActivityEvent, 'id'>): Promise<ActivityEvent> {
