@@ -57,7 +57,7 @@ describe('demo login', () => {
     expect((await verify(asked.json().challengeId, ADMIN_EMAIL, ACCESS_CODE)).statusCode).toBe(401);
   });
 
-  it('refuses a demo account that an admin blocked', async () => {
+  it('shows the block to a demo account that an admin blocked', async () => {
     harness = await createHarness(DEMO_ENV);
     await harness.store.ensureUser(DEMO_EMAIL, 'viewer', START);
     const adminToken = await login(harness, ADMIN_EMAIL);
@@ -71,7 +71,9 @@ describe('demo login', () => {
     const asked = await ask(DEMO_EMAIL);
 
     expect(asked.statusCode).toBe(202);
-    expect((await verify(asked.json().challengeId, DEMO_EMAIL, ACCESS_CODE)).statusCode).toBe(401);
+    const verified = await verify(asked.json().challengeId, DEMO_EMAIL, ACCESS_CODE);
+    expect(verified.statusCode).toBe(403);
+    expect(verified.json()).toMatchObject({ code: 'MEMBER_BLOCKED' });
   });
 
   it('answers an unknown demo email like any other, without a usable challenge', async () => {
