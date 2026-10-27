@@ -18,7 +18,8 @@ const BEARER_PATTERN = /^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*)
  *
  * Beyond the token checks, the session must exist in the store, be neither revoked nor expired
  * and belong to an active user. The principal role is the current role in the store, so a role
- * change or removal applies to the next request without a new login.
+ * change or removal applies without a new login: on the next request of the instance that made it,
+ * and on the others once their cached read expires (`withReadCache`).
  *
  * @param options - Configuration, keys, store and clock.
  * @returns Authenticator that resolves `null` for any missing or invalid session.
