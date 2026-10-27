@@ -46,6 +46,7 @@ export interface IngestRunEvent {
         | 'wallets'
         | 'walletsRead'
         | 'calls'
+        | 'plannedCalls'
         | 'failedCalls'
         | 'native'
         | 'unpricedAssets'
@@ -57,6 +58,8 @@ export interface IngestRunEvent {
       >
     >;
   } | null;
+  /** Polymarket fill reads: counters and the instants of the blocks read, never an address. */
+  polymarket: IngestionReport['sources']['polymarket'] | null;
   aggregates: AggregationStats | null;
   /** Class of the error of a failed run; never its message, which may quote a URL. */
   error: string | null;
@@ -103,6 +106,7 @@ export function ingestRunEvent(report: IngestionReport, readbackMs: number | nul
         wallets: row.wallets,
         walletsRead: row.walletsRead,
         calls: row.calls,
+        plannedCalls: row.plannedCalls,
         failedCalls: row.failedCalls,
         native: row.native,
         unpricedAssets: row.unpricedAssets,
@@ -113,6 +117,7 @@ export function ingestRunEvent(report: IngestionReport, readbackMs: number | nul
         lastSuccessAt: row.lastSuccessAt
       }))
     },
+    polymarket: { ...sources.polymarket },
     aggregates:
       stats === null
         ? null
@@ -161,6 +166,7 @@ export function failedRunEvent(
     catalog: null,
     prices: null,
     balances: null,
+    polymarket: null,
     aggregates: null,
     error: error instanceof Error ? error.name : typeof error
   };
