@@ -11,7 +11,7 @@ const LOCAL_HOST = /^mongodb:\/\/(?:[^@/]*@)?(?:127\.0\.0\.1|localhost|\[::1\])(
 const NOW = new Date('2026-10-27T12:00:00.000Z');
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-describe.skipIf(MONGO_TEST_URI === '')('invites and challenges stored before emails', () => {
+describe.skipIf(MONGO_TEST_URI === '')('invites, challenges and members stored before', () => {
   const dbName = `analytics-it-${randomUUID()}`;
   let client: MongoClient;
   let store: MongoStore;
@@ -85,7 +85,7 @@ describe.skipIf(MONGO_TEST_URI === '')('invites and challenges stored before ema
     expect(recorded?.delivery).toMatchObject({ state: 'sent', messageId: 'msg-1' });
   });
 
-  it('reads a challenge without codeHash as one that no emailed code matches', async () => {
+  it('never matches a challenge stored with a random id and the email in clear', async () => {
     await client
       .db(dbName)
       .collection('login_challenges')
@@ -98,8 +98,71 @@ describe.skipIf(MONGO_TEST_URI === '')('invites and challenges stored before ema
         consumedAt: null
       });
 
-    const challenge = await store.recordChallengeAttempt('legacy-challenge', 5, NOW);
+    expect(
+      await store.recordChallengeAttempt('legacy-challenge', 'legacy-challenge', NOW)
+    ).toBeNull();
+    expect(await store.consumeChallenge('legacy-challenge', 'legacy-challenge', NOW)).toBe(false);
+  });
 
-    expect(challenge?.codeHash).toBeNull();
+  it('reads a member without blockedAt as not blocked, and blocks it', async () => {
+    await client
+      .db(dbName)
+      .collection('users')
+      .insertMany([
+        {
+          _id: 'legacy-admin' as never,
+          email: 'legacy-admin@example.com',
+          role: 'admin',
+          status: 'active',
+          createdAt: NOW,
+          lastLoginAt: null
+        },
+        {
+          _id: 'legacy-viewer' as never,
+          email: 'legacy-viewer@example.com',
+          role: 'viewer',
+          status: 'active',
+          createdAt: NOW,
+          lastLoginAt: null
+        }
+      ]);
+
+    expect((await store.findUserById('legacy-viewer'))?.blockedAt).toBeNull();
+    const blocked = await store.setBlocked('legacy-viewer', true, NOW);
+    expect(blocked).toMatchObject({ kind: 'ok', user: { blockedAt: NOW } });
+    expect(await store.recordLogin('legacy-viewer', NOW)).toBeNull();
+    expect(await store.setBlocked('legacy-viewer', false, NOW)).toMatchObject({
+      kind: 'ok',
+      user: { blockedAt: null }
+    });
+  });
+
+  it('lets one of two concurrent throttle reservations and consumptions win', async () => {
+    const next = { issued: 1, lastIssuedAt: NOW, forgetAt: new Date(NOW.getTime() + DAY_MS) };
+    const reservations = await Promise.all([
+      store.reserveLoginThrottle('login:email:race', null, next),
+      store.reserveLoginThrottle('login:email:race', null, next)
+    ]);
+    expect(reservations.filter((reservation) => reservation !== null)).toHaveLength(1);
+
+    await store.issueChallenge({
+      id: 'challenge-race',
+      emailKey: 'race-key',
+      userId: null,
+      kind: 'otp',
+      codeDigest: 'ab'.repeat(32),
+      keyVersion: 'test',
+      createdAt: NOW,
+      expiresAt: new Date(NOW.getTime() + 60_000),
+      consumedAt: null,
+      revokedAt: null,
+      attempts: 0,
+      maxAttempts: 5
+    });
+    const consumed = await Promise.all([
+      store.consumeChallenge('race-key', 'challenge-race', NOW),
+      store.consumeChallenge('race-key', 'challenge-race', NOW)
+    ]);
+    expect(consumed.filter(Boolean)).toHaveLength(1);
   });
 });
