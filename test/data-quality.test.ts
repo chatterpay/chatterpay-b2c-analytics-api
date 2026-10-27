@@ -914,6 +914,7 @@ describe('ingestion run event', () => {
       'catalogUsers',
       'copyTransactions',
       'persist',
+      'polymarket',
       'prices',
       'readback',
       'revisit',
@@ -985,6 +986,7 @@ describe('ingestion run event', () => {
         wallets: 2,
         walletsRead: 0,
         calls: 1,
+        plannedCalls: 1,
         failedCalls: 1,
         native: 'not_listed',
         ...shared
@@ -1002,6 +1004,7 @@ describe('ingestion run event', () => {
         wallets: 1,
         walletsRead: 0,
         calls: 0,
+        plannedCalls: 0,
         failedCalls: 0,
         native: 'included',
         ...shared
