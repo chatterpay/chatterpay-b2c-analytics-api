@@ -1,5 +1,6 @@
 import { createPrivateKey } from 'node:crypto';
 import { z } from 'zod';
+import { decodeKeyMaterial } from '../auth/login-code.js';
 import type { MasterWalletConfig } from '../ingest/snapshot.js';
 import { NETWORK_ID_PATTERN } from '../metrics/catalog.js';
 import type { UsdValuation } from '../metrics/types.js';
@@ -12,17 +13,55 @@ export interface AppEnv {
   LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
   BODY_LIMIT_BYTES: number;
   REQUEST_TIMEOUT_MS: number;
-  /**
-   * Shared demo login code, used while `LOGIN_CODE_DELIVERY` is `access_code`; `null` disables
-   * code verification there (503).
-   */
+  /** Shared code of the demo accounts; used only while `DEMO_LOGIN_ENABLED` is on. */
   DEMO_ACCESS_CODE: string | null;
   /**
-   * Source of the login code: `access_code` checks the shared `DEMO_ACCESS_CODE`; `email` sends a
-   * one-time code to the email of the challenge, which proves that the person owns it before an
-   * invited account is activated.
+   * Lets the emails of `DEMO_LOGIN_EMAILS` sign in with `DEMO_ACCESS_CODE` instead of a code sent
+   * by email. Off by default. In production it is accepted only on a Cloud Run service whose name
+   * ends in `-develop` (`K_SERVICE`); any other production service refuses to start with it on.
    */
-  LOGIN_CODE_DELIVERY: 'access_code' | 'email';
+  DEMO_LOGIN_ENABLED: boolean;
+  /** Demo accounts, all under a `demo.` domain, normalized; empty unless the demo login is on. */
+  DEMO_LOGIN_EMAILS: string[];
+  /** Name of the Cloud Run service, set by Cloud Run itself; `null` elsewhere. */
+  K_SERVICE: string | null;
+  /**
+   * Key of the verifiers of the login codes, hex or base64, at least 256 bits, dedicated to this
+   * use. Required in production; outside production `null` uses a key generated at startup.
+   */
+  OTP_HMAC_SECRET: string | null;
+  /**
+   * Key of the pseudonymous identifiers of emails and IPs in challenges and rate limit counters;
+   * same format and rules as `OTP_HMAC_SECRET`, and different from it.
+   */
+  OTP_EMAIL_HMAC_SECRET: string | null;
+  /** Digits of a login code sent by email. */
+  OTP_CODE_DIGITS: number;
+  /** Life of a login challenge, emailed code or demo code alike. */
+  OTP_TTL_SECONDS: number;
+  /** Verification attempts per challenge; the challenge is spent once they run out. */
+  OTP_MAX_ATTEMPTS: number;
+  /** Minimum time between two codes for the same email. */
+  OTP_RESEND_COOLDOWN_SECONDS: number;
+  /**
+   * Wait before the next code, by number of codes issued for the email since its last login:
+   * the first value applies after the first code, the last one to every code after it. Each wait
+   * counts from the issue of the previous code and is at least `OTP_RESEND_COOLDOWN_SECONDS`.
+   */
+  OTP_LOCKOUT_STEPS_SECONDS: number[];
+  /** Ceiling of every value of `OTP_LOCKOUT_STEPS_SECONDS`. */
+  OTP_MAX_LOCKOUT_SECONDS: number;
+  /**
+   * Codes per email and client IP in a fixed one hour window. Counted per IP as well as per email,
+   * so requests made from elsewhere for someone else's email do not use up that person's quota.
+   */
+  OTP_SENDS_PER_EMAIL_HOUR: number;
+  /** Codes per email and client IP in a fixed 24 hour window. */
+  OTP_SENDS_PER_EMAIL_DAY: number;
+  /** Code requests per client IP in a 15 minute window, whatever the email. */
+  OTP_REQUESTS_PER_IP: number;
+  /** Code verifications per client IP in a 15 minute window. */
+  OTP_VERIFICATIONS_PER_IP: number;
   /** Sender of the emails; `simulated` keeps them in memory and sends nothing. */
   EMAIL_PROVIDER: 'simulated' | 'resend';
   /** Sending-only Resend API key; required with `EMAIL_PROVIDER=resend`. */
@@ -40,7 +79,6 @@ export interface AppEnv {
   JWT_ISSUER: string;
   JWT_AUDIENCE: string;
   SESSION_TTL_MINUTES: number;
-  CHALLENGE_TTL_MINUTES: number;
   /** MongoDB connection string; `null` uses the in-memory store, outside production only. */
   MONGO_URI: string | null;
   MONGO_DB_NAME: string;
@@ -115,6 +153,12 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+/** Domain of a demo account: its first label is `demo`, a domain that receives no mail. */
+const DEMO_EMAIL = /^[^\s@]+@demo\.[^\s@]+\.[^\s@]+$/;
+
+/** Cloud Run services that may run the demo login in production. */
+const DEMO_SERVICE = /-develop$/;
+
 function isEd25519PrivateKey(pem: string): boolean {
   try {
     return createPrivateKey({ key: pem, format: 'pem' }).asymmetricKeyType === 'ed25519';
@@ -168,7 +212,45 @@ const envSchema: z.ZodType<AppEnv> = z
     BODY_LIMIT_BYTES: z.coerce.number().int().min(1024).max(1_048_576).default(16_384),
     REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(10_000),
     DEMO_ACCESS_CODE: z.string().min(12).max(64).nullable().default(null),
-    LOGIN_CODE_DELIVERY: z.enum(['access_code', 'email']).default('access_code'),
+    DEMO_LOGIN_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    DEMO_LOGIN_EMAILS: z
+      .string()
+      .transform((value) =>
+        value
+          .split(',')
+          .map(normalizeEmail)
+          .filter((email) => email !== '')
+      )
+      .pipe(z.array(z.string().regex(DEMO_EMAIL).max(254)).max(10))
+      .default([]),
+    K_SERVICE: z.string().min(1).max(128).nullable().default(null),
+    OTP_HMAC_SECRET: z
+      .string()
+      .refine((value) => decodeKeyMaterial(value) !== null)
+      .nullable()
+      .default(null),
+    OTP_EMAIL_HMAC_SECRET: z
+      .string()
+      .refine((value) => decodeKeyMaterial(value) !== null)
+      .nullable()
+      .default(null),
+    OTP_CODE_DIGITS: z.coerce.number().int().min(8).max(10).default(8),
+    OTP_TTL_SECONDS: z.coerce.number().int().min(60).max(600).default(300),
+    OTP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
+    OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(10).max(600).default(60),
+    OTP_LOCKOUT_STEPS_SECONDS: z
+      .string()
+      .transform((value) => value.split(',').map((step) => Number(step.trim())))
+      .pipe(z.array(z.number().int().min(0)).min(1).max(10))
+      .default([0, 300, 900]),
+    OTP_MAX_LOCKOUT_SECONDS: z.coerce.number().int().min(60).max(900).default(900),
+    OTP_SENDS_PER_EMAIL_HOUR: z.coerce.number().int().min(1).max(100).default(5),
+    OTP_SENDS_PER_EMAIL_DAY: z.coerce.number().int().min(1).max(500).default(10),
+    OTP_REQUESTS_PER_IP: z.coerce.number().int().min(1).max(10_000).default(30),
+    OTP_VERIFICATIONS_PER_IP: z.coerce.number().int().min(1).max(10_000).default(60),
     EMAIL_PROVIDER: z.enum(['simulated', 'resend']).default('simulated'),
     RESEND_API_KEY: z.string().trim().min(1).max(256).nullable().default(null),
     EMAIL_FROM: z.string().trim().regex(EMAIL_SENDER).max(254).nullable().default(null),
@@ -192,7 +274,6 @@ const envSchema: z.ZodType<AppEnv> = z
     JWT_ISSUER: z.string().min(1).default('chatterpay-analytics-api'),
     JWT_AUDIENCE: z.string().min(1).default('chatterpay-analytics-site'),
     SESSION_TTL_MINUTES: z.coerce.number().int().min(5).max(1440).default(120),
-    CHALLENGE_TTL_MINUTES: z.coerce.number().int().min(1).max(60).default(10),
     MONGO_URI: z
       .string()
       .regex(/^mongodb(\+srv)?:\/\//)
@@ -256,18 +337,64 @@ const envSchema: z.ZodType<AppEnv> = z
         }
       }
     }
+    if (
+      env.OTP_HMAC_SECRET !== null &&
+      env.OTP_EMAIL_HMAC_SECRET !== null &&
+      decodeKeyMaterial(env.OTP_HMAC_SECRET)?.equals(
+        decodeKeyMaterial(env.OTP_EMAIL_HMAC_SECRET) ?? Buffer.alloc(0)
+      )
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['OTP_EMAIL_HMAC_SECRET'],
+        message: 'Must differ from OTP_HMAC_SECRET'
+      });
+    }
+    if (env.OTP_LOCKOUT_STEPS_SECONDS.some((step) => step > env.OTP_MAX_LOCKOUT_SECONDS)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['OTP_LOCKOUT_STEPS_SECONDS'],
+        message: 'Above OTP_MAX_LOCKOUT_SECONDS'
+      });
+    }
+    if (env.OTP_SENDS_PER_EMAIL_DAY < env.OTP_SENDS_PER_EMAIL_HOUR) {
+      context.addIssue({
+        code: 'custom',
+        path: ['OTP_SENDS_PER_EMAIL_DAY'],
+        message: 'Below OTP_SENDS_PER_EMAIL_HOUR'
+      });
+    }
+    if (
+      env.DEMO_LOGIN_ENABLED &&
+      (env.DEMO_ACCESS_CODE === null || env.DEMO_LOGIN_EMAILS.length === 0)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: [env.DEMO_ACCESS_CODE === null ? 'DEMO_ACCESS_CODE' : 'DEMO_LOGIN_EMAILS'],
+        message: 'Required with DEMO_LOGIN_ENABLED'
+      });
+    }
     if (env.NODE_ENV !== 'production') {
       return;
     }
     if (env.INGEST_DEV_TRIGGER) {
       context.addIssue({ code: 'custom', path: ['INGEST_DEV_TRIGGER'], message: 'Not allowed' });
     }
-    // A login code sent to the simulated provider reaches nobody.
-    if (env.LOGIN_CODE_DELIVERY === 'email' && env.EMAIL_PROVIDER !== 'resend') {
+    // The login sends its codes by email, and a code given to the simulated provider reaches nobody.
+    if (env.EMAIL_PROVIDER !== 'resend') {
       context.addIssue({
         code: 'custom',
         path: ['EMAIL_PROVIDER'],
-        message: 'Email login needs resend'
+        message: 'Login codes need resend in production'
+      });
+    }
+    // `K_SERVICE` is set by Cloud Run from the service name, so a variable copied from the develop
+    // service into another one does not carry the demo login with it.
+    if (env.DEMO_LOGIN_ENABLED && !DEMO_SERVICE.test(env.K_SERVICE ?? '')) {
+      context.addIssue({
+        code: 'custom',
+        path: ['DEMO_LOGIN_ENABLED'],
+        message: 'Only on a -develop service'
       });
     }
     if (env.SITE_URL?.startsWith('http://')) {
@@ -278,7 +405,8 @@ const envSchema: z.ZodType<AppEnv> = z
       });
     }
     const required = [
-      ...(env.LOGIN_CODE_DELIVERY === 'access_code' ? (['DEMO_ACCESS_CODE'] as const) : []),
+      'OTP_HMAC_SECRET',
+      'OTP_EMAIL_HMAC_SECRET',
       'JWT_PRIVATE_KEY',
       'MONGO_URI',
       'B2C_MONGO_URI'
@@ -296,9 +424,10 @@ const envSchema: z.ZodType<AppEnv> = z
  * Fails fast at startup so a misconfigured revision never starts serving requests.
  * The error lists the offending variable names only, never their values. Empty values count as
  * unset, so a `.env` copied from `.env.example` falls back to the defaults. Production requires
- * `JWT_PRIVATE_KEY`, `MONGO_URI` and `B2C_MONGO_URI`, plus `DEMO_ACCESS_CODE` with the
- * `access_code` login or `EMAIL_PROVIDER=resend` with the `email` login. `resend` requires
- * `RESEND_API_KEY`, `EMAIL_FROM` and `SITE_URL`.
+ * `OTP_HMAC_SECRET`, `OTP_EMAIL_HMAC_SECRET`, `JWT_PRIVATE_KEY`, `MONGO_URI`, `B2C_MONGO_URI` and
+ * `EMAIL_PROVIDER=resend`, and refuses the demo login outside a `-develop` Cloud Run service.
+ * `resend` requires `RESEND_API_KEY`, `EMAIL_FROM` and `SITE_URL`; the demo login requires
+ * `DEMO_ACCESS_CODE` and `DEMO_LOGIN_EMAILS`.
  *
  * @param source - Environment map to read, `process.env` by default.
  * @returns The validated configuration with defaults applied.
