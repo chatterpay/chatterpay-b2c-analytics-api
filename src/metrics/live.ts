@@ -5,6 +5,10 @@ import type {
   IngestedUser,
   LiveAggregates,
   NetworkWallets,
+  PolymarketAggregates,
+  PolymarketCoverage,
+  PolymarketFill,
+  PolymarketHour,
   TokenInfo,
   UnpricedOperations,
   UserActivity,
@@ -15,7 +19,7 @@ import { addMonths, type DayHour, isoDayOf, type TimeWindow } from './calendar.j
 import type { NetworkId } from './catalog.js';
 import { emptyUnpriced, type Facts, MONEY_KEYS } from './facts.js';
 import { impliedSwapPrices, PriceBook, type StableSwap } from './pricing.js';
-import type { MetricsSource, WalletCoverage } from './sources.js';
+import type { MetricsSource, PolymarketFigures, WalletCoverage } from './sources.js';
 import type { UsdValuation } from './types.js';
 
 const HOUR_MS = 3_600_000;
@@ -611,6 +615,44 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
   };
 }
 
+/**
+ * Adds the Polymarket fills per hour. Each fill counts once, by its id, whatever runs read it.
+ *
+ * @param fills - Stored fills.
+ * @param coverage - Blocks the fills were read from; `null` while no run read any.
+ * @returns The hours ascending, with the coverage.
+ */
+export function aggregatePolymarket(
+  fills: readonly PolymarketFill[],
+  coverage: PolymarketCoverage | null
+): PolymarketAggregates {
+  const unique = new Map(fills.map((fill) => [fill.id, fill]));
+  const hours = new Map<number, PolymarketHour>();
+  for (const fill of unique.values()) {
+    const hour = hours.get(fill.hour) ?? {
+      hour: fill.hour,
+      fills: 0,
+      buyMicro: 0,
+      sellMicro: 0,
+      feeMicro: 0,
+      attributed: 0
+    };
+    hour.fills += 1;
+    if (fill.side === 'buy') {
+      hour.buyMicro += fill.collateralMicro;
+    } else {
+      hour.sellMicro += fill.collateralMicro;
+    }
+    hour.feeMicro += fill.feeMicro;
+    hour.attributed += fill.attributed ? 1 : 0;
+    hours.set(fill.hour, hour);
+  }
+  return {
+    hours: [...hours.values()].sort((left, right) => left.hour - right.hour),
+    coverage
+  };
+}
+
 interface HourlySeries {
   hours: number[];
   facts: Facts[];
@@ -639,6 +681,9 @@ class LiveSource implements MetricsSource {
   private readonly wallets = new Map<NetworkId, WalletCoverage>();
   /** `false` when some stored hour was built without the counts per asset. */
   private countedByAsset = true;
+  /** Polymarket fills per hour; `null` for builds without them or before any block was read. */
+  private readonly polymarketHours: PolymarketHour[] | null;
+  private readonly polymarketCoverage: PolymarketCoverage | null;
 
   /**
    * @param aggregates - Stored aggregates.
@@ -651,6 +696,11 @@ class LiveSource implements MetricsSource {
     for (const item of aggregates.wallets ?? []) {
       this.wallets.set(item.network, { wallets: item.wallets, verified: item.verified });
     }
+    this.polymarketCoverage = aggregates.polymarket?.coverage ?? null;
+    this.polymarketHours =
+      this.polymarketCoverage === null
+        ? null
+        : [...(aggregates.polymarket?.hours ?? [])].sort((left, right) => left.hour - right.hour);
     const hourly = [...aggregates.hourly].sort((left, right) => left.hour - right.hour);
     for (const item of hourly) {
       const series = this.hourly.get(item.network) ?? { hours: [], facts: [] };
@@ -865,6 +915,27 @@ class LiveSource implements MetricsSource {
 
   walletsTrackingSince(): Date | null {
     return this.trackingSince;
+  }
+
+  polymarket(window: TimeWindow): PolymarketFigures | null {
+    if (this.polymarketHours === null || this.polymarketCoverage === null) {
+      return null;
+    }
+    const { first, last } = windowHours(window);
+    const hours = this.polymarketHours.map((item) => item.hour);
+    let fills = 0;
+    let volumeMicro = 0;
+    let attributed = 0;
+    for (let index = lowerBound(hours, first); index < hours.length; index += 1) {
+      const item = this.polymarketHours[index];
+      if (item === undefined || item.hour > last) {
+        break;
+      }
+      fills += item.fills;
+      volumeMicro += item.buyMicro + item.sellMicro;
+      attributed += item.attributed;
+    }
+    return { fills, volumeMicro, attributed, coverage: this.polymarketCoverage };
   }
 }
 
