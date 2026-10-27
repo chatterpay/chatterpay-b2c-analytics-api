@@ -1,4 +1,5 @@
 import type { Role } from '../auth/principal.js';
+import type { DeliveryState, EmailFailure, EmailLocale } from '../email/types.js';
 
 /** Lifecycle of a member account. Removed users keep their record for the activity log. */
 export type UserStatus = 'active' | 'removed';
@@ -28,7 +29,7 @@ export interface Session {
   revokedAt: Date | null;
 }
 
-/** Login challenge opened by `request-code`. It never stores the code. */
+/** Login challenge opened by `request-code`. It never stores the code in clear. */
 export interface Challenge {
   id: string;
   email: string;
@@ -36,10 +37,36 @@ export interface Challenge {
   expiresAt: Date;
   attempts: number;
   consumedAt: Date | null;
+  /**
+   * Digest of the one-time code sent by email (see `hashLoginCode`); `null` with the shared access
+   * code and on challenges stored before email codes existed.
+   */
+  codeHash: string | null;
 }
 
-/** Invite status; `expired` is derived on read from `expiresAt`. */
+/**
+ * Invite status; `expired` is derived on read from `expiresAt`. A pending invite is stored as
+ * `simulated` whatever its delivery: persisted invites and the unique pending index use that
+ * value. The delivery itself is in {@link Invite.delivery}.
+ */
 export type InviteStatus = 'created' | 'simulated' | 'accepted' | 'revoked' | 'expired';
+
+/** Delivery of the last send of an invite (creation or resend). */
+export interface InviteDelivery {
+  /**
+   * `pending` from the store write until the send ends; then `simulated` when no email was sent,
+   * `sent` when the provider accepted it and `failed` otherwise. An invite left `pending` lost its
+   * send (the instance stopped); a resend sends it again.
+   */
+  state: DeliveryState | 'pending';
+  /** Requests made to the provider for the last send. */
+  attempts: number;
+  /** End of the last send; `null` while none ended. */
+  lastAttemptAt: Date | null;
+  /** Id of the message at the provider; `null` unless `sent` or `simulated`. */
+  messageId: string | null;
+  failure: EmailFailure | null;
+}
 
 /** Invitation of an email to join with a role. */
 export interface Invite {
@@ -55,6 +82,13 @@ export interface Invite {
   lastSentAt: Date | null;
   /** Client-generated id that makes invite creation idempotent. */
   mutationId: string;
+  /** Language of the invitation email; `en` for invites stored before it was recorded. */
+  locale: EmailLocale;
+  /**
+   * Delivery of the last send. Invites stored before emails were sent read as `simulated`, with
+   * `lastSentAt` as the end of the send.
+   */
+  delivery: InviteDelivery;
 }
 
 /** Actions recorded in the activity log. */
@@ -131,6 +165,7 @@ export interface NewInvite {
   createdBy: string;
   mutationId: string;
   expiresAt: Date;
+  locale: EmailLocale;
 }
 
 /** Outcome of an invite creation. */
@@ -245,7 +280,12 @@ export interface Store {
   findSession(jti: string): Promise<Session | null>;
   revokeSession(jti: string, now: Date): Promise<void>;
 
-  createChallenge(email: string, now: Date, expiresAt: Date): Promise<Challenge>;
+  createChallenge(
+    email: string,
+    now: Date,
+    expiresAt: Date,
+    codeHash: string | null
+  ): Promise<Challenge>;
   /**
    * Counts one verification attempt. Returns the challenge when it exists, is neither consumed
    * nor expired and had fewer than `maxAttempts` attempts before this one; `null` otherwise.
@@ -255,7 +295,7 @@ export interface Store {
   consumeChallenge(id: string, now: Date): Promise<boolean>;
 
   /**
-   * Creates a `simulated` invite with `lastSentAt = now`. A known `mutationId` replays its invite
+   * Creates a `simulated` invite with `lastSentAt = now` and a `pending` delivery. A known `mutationId` replays its invite
    * (conflict when the payload differs); an active member or a pending invite of the email is a
    * conflict.
    */
@@ -274,7 +314,16 @@ export interface Store {
   listInvites(view: InviteView, limit: number, now: Date, after?: InviteCursor): Promise<Invite[]>;
   /** Number of invites of each view at `now`. */
   countInvites(now: Date): Promise<InviteCounts>;
+  /** Counts a new send of a pending invite and resets its delivery to `pending`. */
   resendInvite(id: string, now: Date): Promise<InviteTransitionResult>;
+  /**
+   * Records how the last send of an invite ended, whatever the invite status is now.
+   *
+   * @returns The invite with the delivery; `null` when it does not exist.
+   */
+  recordInviteDelivery(id: string, delivery: InviteDelivery, now: Date): Promise<Invite | null>;
+  /** Whether the email has an invite that is still pending at `now`. */
+  hasPendingInvite(email: string, now: Date): Promise<boolean>;
   revokeInvite(id: string, now: Date): Promise<InviteTransitionResult>;
 
   appendActivity(event: Omit<ActivityEvent, 'id'>): Promise<ActivityEvent>;
