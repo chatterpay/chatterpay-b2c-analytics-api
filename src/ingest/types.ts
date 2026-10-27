@@ -62,12 +62,74 @@ export interface B2cUserRecord extends IngestedUser {
 
 /**
  * What the ingestion reads of `users.polymarket_account`: whether `polygon_address` is an EVM
- * address and `created_at`. The encrypted API credentials and the signer are never read.
+ * address, the address itself and `created_at`. The encrypted API credentials and the signer are
+ * never read.
  */
 export interface PolymarketAccountRecord {
   validAddress: boolean;
+  /**
+   * `polygon_address` in lower case when it is an EVM address, else `null`. It is the funder of the
+   * account's CLOB orders, the `maker` of their fills; the run uses it to read the fills and never
+   * stores it.
+   */
+  address: string | null;
   /** `null` when the account has no `created_at`. */
   createdAt: Date | null;
+}
+
+/**
+ * One fill of an order of a ChatterPay Polymarket account, from an `OrderFilled` event of the
+ * Polymarket exchanges on Polygon whose `maker` is the account. A fill of an order matched as
+ * taker is its own event with the account as `maker`, so every executed fill of an account is one
+ * event and none is counted twice. No address is kept.
+ */
+export interface PolymarketFill {
+  /** `transactionHash:logIndex` of the event, in lower case; unique on chain. */
+  id: string;
+  /** Hour of the block, in hours since 1970-01-01T00:00Z. */
+  hour: number;
+  side: 'buy' | 'sell';
+  /** pUSD paid on a buy or received on a sell, in millionths (6 decimals, 1 pUSD = 1 USD). */
+  collateralMicro: number;
+  /** Fee Polymarket charged on the fill, in millionths of pUSD; a third-party charge. */
+  feeMicro: number;
+  /**
+   * Whether the order carried a builder code, which lets its builder charge a fee of its own.
+   * ChatterPay orders carry none.
+   */
+  attributed: boolean;
+}
+
+/** Fills of the ChatterPay Polymarket accounts in one hour. */
+export interface PolymarketHour {
+  /** Hours since 1970-01-01T00:00Z. */
+  hour: number;
+  fills: number;
+  /** pUSD paid by buys, in millionths. */
+  buyMicro: number;
+  /** pUSD received by sells, in millionths. */
+  sellMicro: number;
+  /** Fees Polymarket charged, in millionths of pUSD. */
+  feeMicro: number;
+  /** Fills of orders with a builder code. */
+  attributed: number;
+}
+
+/** Blocks of Polygon whose fills the ingestion has read. */
+export interface PolymarketCoverage {
+  /** Instant of the first block read; no account of the run could fill an order before it. */
+  from: Date;
+  /** Instant of the last block read. */
+  through: Date;
+  /** Whether the last run read up to the confirmed head of the chain. */
+  caughtUp: boolean;
+}
+
+/** Polymarket fills of a build: per hour, with the blocks they cover. */
+export interface PolymarketAggregates {
+  hours: PolymarketHour[];
+  /** `null` while no run has read any block. */
+  coverage: PolymarketCoverage | null;
 }
 
 /**
@@ -155,6 +217,12 @@ export interface IngestCheckpoints {
    * that run may be older than it, so only wallets that appear in later runs are dated by the run.
    */
   walletsTrackingSince: Date | null;
+  /** Next Polygon block whose Polymarket fills are read; `null` before the first read. */
+  polymarketNextBlock: number | null;
+  /** Instant of the first Polygon block read for Polymarket fills; `null` before the first read. */
+  polymarketFrom: Date | null;
+  /** Instant of the last Polygon block read for Polymarket fills; `null` before the first read. */
+  polymarketThrough: Date | null;
 }
 
 /** First ingestion run that saw a wallet in the B2C users. */
@@ -373,6 +441,8 @@ export interface LiveAggregates {
   activity: UserActivity[];
   signups: UserSignup[];
   wallets: NetworkWallets[];
+  /** Absent in builds stored before the Polymarket fills were read. */
+  polymarket?: PolymarketAggregates;
 }
 
 /** Aggregates with the instant they were built and what the endpoints read with them. */
@@ -447,6 +517,9 @@ export interface IngestRepository {
   walletObservations(): Promise<WalletObservation[]>;
   /** Adds observations of wallets not seen before; known wallets keep their first observation. */
   addWalletObservations(items: readonly WalletObservation[]): Promise<void>;
+  /** Stores fills keyed by their `id`, so a fill read again replaces itself. */
+  upsertPolymarketFills(items: readonly PolymarketFill[]): Promise<void>;
+  polymarketFills(): Promise<PolymarketFill[]>;
   transactions(): Promise<IngestedTransaction[]>;
   users(): Promise<IngestedUser[]>;
   tokens(): Promise<TokenInfo[]>;
@@ -514,4 +587,33 @@ export interface BalanceReader {
   ): Promise<Map<string, CardanoHoldings>>;
   /** Whether the reader can read a Cardano endpoint (the Koios dialect). */
   supportsCardano(url: string): boolean;
+}
+
+/** A Polygon block number and its timestamp. */
+export interface PolygonBlock {
+  number: number;
+  at: Date;
+}
+
+/**
+ * Reads the Polymarket fills of Polygon. Every request counts against the budget; a method that
+ * could not complete answers `null`.
+ */
+export interface PolygonFillReader {
+  /** Latest block deep enough not to be reorganized. */
+  head(budget: CallBudget): Promise<PolygonBlock | null>;
+  /** Block `number` with its timestamp. */
+  block(number: number, budget: CallBudget): Promise<PolygonBlock | null>;
+  /** First block at or after `at`, searched up to `head`. */
+  blockAt(at: Date, head: PolygonBlock, budget: CallBudget): Promise<PolygonBlock | null>;
+  /**
+   * Fills of the orders of `makers` (lower case) in blocks `fromBlock` to `toBlock`, both
+   * included; every fill or `null`, never part of them.
+   */
+  fills(
+    makers: readonly string[],
+    fromBlock: number,
+    toBlock: number,
+    budget: CallBudget
+  ): Promise<PolymarketFill[] | null>;
 }
