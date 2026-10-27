@@ -16,6 +16,7 @@ import type {
   IngestRepository,
   LiveAggregates,
   PolymarketAccountRecord,
+  PolymarketFill,
   PriceProvider,
   RunSnapshot,
   StoredAggregates,
@@ -161,7 +162,10 @@ export class MemoryIngestRepository implements IngestRepository {
   checkpoints: IngestCheckpoints = {
     transactionsLastId: null,
     pricesLastDay: null,
-    walletsTrackingSince: null
+    walletsTrackingSince: null,
+    polymarketNextBlock: null,
+    polymarketFrom: null,
+    polymarketThrough: null
   };
   lock: { owner: string; until: Date } | null = null;
   readonly copies = new Map<string, IngestedTransaction>();
@@ -171,6 +175,7 @@ export class MemoryIngestRepository implements IngestRepository {
   readonly priceCopies = new Map<string, DailyPrice>();
   readonly snapshotCopies = new Map<number, RunSnapshot>();
   readonly observations = new Map<string, WalletObservation>();
+  readonly fillCopies = new Map<string, PolymarketFill>();
   stored: StoredAggregates | null = null;
 
   async readCheckpoints(): Promise<IngestCheckpoints> {
@@ -284,6 +289,16 @@ export class MemoryIngestRepository implements IngestRepository {
         this.observations.set(key, { ...item });
       }
     }
+  }
+
+  async upsertPolymarketFills(items: readonly PolymarketFill[]): Promise<void> {
+    for (const item of items) {
+      this.fillCopies.set(item.id, { ...item });
+    }
+  }
+
+  async polymarketFills(): Promise<PolymarketFill[]> {
+    return [...this.fillCopies.values()];
   }
 
   async transactions(): Promise<IngestedTransaction[]> {
