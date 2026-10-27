@@ -2,12 +2,15 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { createCodeMatcher } from '../auth/access-code.js';
 import { clientIp } from '../auth/client-ip.js';
+import { generateLoginCode, hashLoginCode, loginCodeMatches } from '../auth/login-code.js';
 import { requireRoles } from '../auth/principal.js';
 import { type SigningKeys, signSessionToken } from '../auth/session-token.js';
 import { type AppEnv, normalizeEmail } from '../config/env.js';
+import type { EmailService } from '../email/service.js';
+import type { EmailLocale } from '../email/types.js';
 import { ApiError } from '../errors/api-error.js';
-import type { Store } from '../store/types.js';
-import { emailSchema, memberSchema, toMemberBody } from './representations.js';
+import type { Challenge, Store } from '../store/types.js';
+import { emailLocaleSchema, emailSchema, memberSchema, toMemberBody } from './representations.js';
 import { errorResponsesFor, object } from './schemas.js';
 
 /** Options of the auth routes. */
@@ -16,6 +19,7 @@ export interface AuthRoutesOptions {
   store: Store;
   keys: SigningKeys;
   clock: () => Date;
+  email: EmailService;
 }
 
 const RATE_WINDOW_MS = 15 * 60 * 1000;
@@ -29,7 +33,10 @@ const INVALID_CODE_MESSAGE = 'Invalid or expired code';
 
 const instant = { type: 'string', format: 'date-time' } as const;
 
-const requestCodeBody = object({ email: emailSchema });
+const requestCodeBody = {
+  ...object({ email: emailSchema }),
+  properties: { email: emailSchema, locale: emailLocaleSchema }
+};
 const requestCodeResponse = object({ challengeId: { type: 'string' }, expiresAt: instant });
 
 const verifyCodeBody = object({
@@ -68,23 +75,37 @@ function invalidCode(): ApiError {
  *
  * `request-code` and `verify-code` are public: the BFF calls them for the browser and forwards
  * the browser IP in `x-client-ip`. Every verification failure answers the same 401, so callers
- * cannot tell an unknown email from a wrong or expired code. No email is sent and the code is
- * never returned or recorded. Every response carries `Cache-Control: private, no-store`.
+ * cannot tell an unknown email from a wrong or expired code. The code is never returned or logged.
+ *
+ * With `LOGIN_CODE_DELIVERY=access_code` the code is the shared `DEMO_ACCESS_CODE` and no email is
+ * sent. With `email` every challenge gets a one-time code, stored as a salted digest, and the code
+ * is emailed only to active members and emails with a pending invite. Verifying it proves that the
+ * person owns the email, which is when an invited account is activated. A failed delivery still
+ * answers 202 and is logged with the challenge id, without the email or the code; the person asks
+ * for a new code. The send happens before the answer, so its duration is visible to the caller.
+ * Every response carries `Cache-Control: private, no-store`.
  *
  * @param app - Fastify instance (encapsulated by the prefix).
  * @param options - Configuration, store, signing keys and clock.
  */
 export async function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): Promise<void> {
-  const { env, store, keys, clock } = options;
-  const codeMatches =
+  const { env, store, keys, clock, email: emails } = options;
+  const accessCodeMatches =
     env.DEMO_ACCESS_CODE === null ? null : createCodeMatcher(env.DEMO_ACCESS_CODE);
+  // `null` while login is not configured.
+  let codeMatches: ((code: string, challenge: Challenge | null) => boolean) | null = null;
+  if (env.LOGIN_CODE_DELIVERY === 'email') {
+    codeMatches = (code, challenge) => loginCodeMatches(code, challenge?.codeHash ?? null);
+  } else if (accessCodeMatches !== null) {
+    codeMatches = (code) => accessCodeMatches(code);
+  }
   const signedIn = requireRoles(['admin', 'viewer']);
 
   app.addHook('onSend', async (_request, reply) => {
     reply.header('cache-control', 'private, no-store');
   });
 
-  app.post<{ Body: { email: string } }>(
+  app.post<{ Body: { email: string; locale?: EmailLocale } }>(
     '/request-code',
     {
       schema: {
@@ -107,7 +128,31 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       await enforceRateLimit(store, `request-code:email:${email}`, REQUEST_CODE_PER_EMAIL, now);
       // Created for every email so the answer does not reveal which emails are members.
       const expiresAt = new Date(now.getTime() + env.CHALLENGE_TTL_MINUTES * MINUTE_MS);
-      const challenge = await store.createChallenge(email, now, expiresAt);
+      if (env.LOGIN_CODE_DELIVERY === 'access_code') {
+        const challenge = await store.createChallenge(email, now, expiresAt, null);
+        reply.status(202);
+        return { challengeId: challenge.id, expiresAt: challenge.expiresAt.toISOString() };
+      }
+      const code = generateLoginCode();
+      const challenge = await store.createChallenge(email, now, expiresAt, hashLoginCode(code));
+      const known =
+        (await store.findActiveUserByEmail(email)) !== null ||
+        (await store.hasPendingInvite(email, now));
+      if (known) {
+        const outcome = await emails.sendLoginCode({
+          email,
+          challengeId: challenge.id,
+          code,
+          locale: request.body.locale ?? 'en',
+          expiresInMinutes: env.CHALLENGE_TTL_MINUTES
+        });
+        if (outcome.state === 'failed') {
+          request.log.warn(
+            { challengeId: challenge.id, failure: outcome.failure, attempts: outcome.attempts },
+            'login code email not delivered'
+          );
+        }
+      }
       reply.status(202);
       return { challengeId: challenge.id, expiresAt: challenge.expiresAt.toISOString() };
     }
@@ -136,7 +181,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
         MAX_CHALLENGE_ATTEMPTS,
         now
       );
-      const codeOk = codeMatches(request.body.code);
+      const codeOk = codeMatches(request.body.code, challenge);
 
       if (
         challenge === null ||
