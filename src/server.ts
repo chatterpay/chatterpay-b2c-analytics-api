@@ -18,6 +18,7 @@ import { MongoIngestRepository } from './store/ingest-store.js';
 import { MemoryStore } from './store/memory-store.js';
 import { MongoStore } from './store/mongo-store.js';
 import { visibleNetworks } from './store/network-visibility.js';
+import { withReadCache } from './store/read-cache.js';
 import type { Store } from './store/types.js';
 
 const SHUTDOWN_SIGNALS = ['SIGINT', 'SIGTERM'] as const;
@@ -35,6 +36,12 @@ const LOCK_MARGIN_MS = 5 * 60 * 1000;
  * allow longer than this.
  */
 const STARTUP_CONNECT_MS = 120 * 1000;
+
+/**
+ * Lifetime of the cached session, user and visibility reads. It bounds how long a session revoked,
+ * a member removed or a policy changed through another instance keeps applying on this one.
+ */
+const READ_CACHE_TTL_MS = 30 * 1000;
 
 /**
  * Writes a connection attempt as a structured line before the Fastify logger exists. Cloud Logging
@@ -138,7 +145,7 @@ async function main(): Promise<void> {
   const env = loadEnv();
   const deadline = Date.now() + STARTUP_CONNECT_MS;
   const mongoUri = env.MONGO_URI;
-  const store: Store =
+  const store: Store = withReadCache(
     mongoUri === null
       ? new MemoryStore()
       : await connectWithRetry({
@@ -146,7 +153,9 @@ async function main(): Promise<void> {
           connect: () => MongoStore.connect({ uri: mongoUri, dbName: env.MONGO_DB_NAME }),
           deadline,
           log: logConnectAttempt
-        });
+        }),
+    { ttlMs: READ_CACHE_TTL_MS }
+  );
   const b2cUri = env.B2C_MONGO_URI ?? env.MONGO_URI;
   const networks =
     b2cUri === null
