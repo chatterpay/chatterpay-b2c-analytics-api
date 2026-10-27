@@ -34,6 +34,7 @@ const reportSchema = object({
     catalogUsers: count,
     prices: count,
     snapshot: count,
+    polymarket: count,
     aggregateRebuild: count,
     persist: count
   }),
@@ -69,6 +70,11 @@ const reportSchema = object({
           wallets: count,
           walletsRead: count,
           calls: count,
+          plannedCalls: {
+            ...count,
+            description:
+              'Requests a full read of the network takes, counted before the read; on Koios, without the additional pages of UTxOs.'
+          },
           failedCalls: count,
           b2cEnabled: {
             type: ['boolean', 'null'],
@@ -118,6 +124,26 @@ const reportSchema = object({
         })
       ),
       masterWallets: count
+    }),
+    polymarket: object({
+      status: { type: 'string', enum: ['complete', 'partial', 'failed', 'disabled'] },
+      calls: count,
+      failedCalls: count,
+      accounts: {
+        ...count,
+        description: 'Distinct Polygon addresses read; the addresses are never reported.'
+      },
+      fills: count,
+      from: {
+        type: ['string', 'null'],
+        format: 'date-time',
+        description: 'Instant of the first Polygon block read for the fills.'
+      },
+      through: {
+        type: ['string', 'null'],
+        format: 'date-time',
+        description: 'Instant of the last Polygon block read for the fills.'
+      }
     })
   }),
   aggregates: {
