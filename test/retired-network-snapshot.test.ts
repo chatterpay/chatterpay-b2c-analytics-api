@@ -170,6 +170,7 @@ describe('balance snapshot of networks disabled in B2C', () => {
       wallets: 2,
       walletsRead: 2,
       calls: 1,
+      plannedCalls: 1,
       failedCalls: 0,
       b2cEnabled: true,
       collectBalances: true,
@@ -482,6 +483,25 @@ describe('balance collection policy of the analytics', () => {
     expect(networks[1]).toMatchObject({ network: 'base-sepolia', status: 'complete' });
   });
 
+  it('counts the requests a full read of each network takes before reading it', async () => {
+    const reader = rpcBalanceReader(
+      async (_url, init) => multicallAnswer(init.body ?? ''),
+      () => DAY_TWO.getTime()
+    );
+    const { networks } = await takeBalanceSnapshot(
+      snapshotInput(reader, { users: MANY_SCROLL_USERS, masterWallets: [], budget: budget(2) })
+    );
+
+    const scroll = networks.find((row) => row.network === 'scroll');
+    expect(scroll).toMatchObject({
+      status: 'partial',
+      reason: 'budget_exhausted',
+      plannedCalls: 3,
+      walletsRead: 400
+    });
+    expect(scroll?.calls).toBeLessThan(scroll?.plannedCalls ?? 0);
+  });
+
   it('names the spent budget and the passed deadline of the networks left unread', async () => {
     const spent = await takeBalanceSnapshot(
       snapshotInput(new FakeBalanceReader({}), { masterWallets: [], budget: budget(1) })
@@ -643,6 +663,7 @@ describe('ingestion of a network disabled in B2C', () => {
       wallets: 2,
       walletsRead: 2,
       calls: 1,
+      plannedCalls: 1,
       failedCalls: 0,
       b2cEnabled: false,
       analyticsVisible: true,
