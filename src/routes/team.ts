@@ -1,4 +1,11 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { emailKey, type LoginCodeKeys } from '../auth/login-code.js';
+import {
+  type LoginLimits,
+  liveThrottle,
+  lockoutEndsAt,
+  throttleKey
+} from '../auth/login-limits.js';
 import { type Role, requireRoles } from '../auth/principal.js';
 import { normalizeEmail } from '../config/env.js';
 import type { EmailService } from '../email/service.js';
@@ -36,6 +43,9 @@ export interface TeamRoutesOptions {
   store: Store;
   clock: () => Date;
   email: EmailService;
+  /** Keys of the login codes, to find the challenge and the throttle state of a member. */
+  loginKeys: LoginCodeKeys;
+  limits: LoginLimits;
 }
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -221,17 +231,52 @@ function memberOrThrow(result: MemberMutationResult): User {
  * `delivery`: `simulated` while `EMAIL_PROVIDER` is `simulated`, which sends nothing. A failed
  * send still answers with the stored invite, which stays pending. Pending invites carry status
  * `simulated` whatever their delivery. Accepting an invite happens at login, once the invited
- * email verifies its code. An admin cannot change their own role or remove themselves (403
- * `CANNOT_CHANGE_OWN_ROLE`, `CANNOT_REMOVE_SELF`), whatever role the request asks for. Since the
- * caller stays an admin, the store's last-admin check (409) only answers when two admins demote or
- * remove each other at the same time.
+ * email verifies its code. An admin cannot change their own role, remove or block themselves (403
+ * `CANNOT_CHANGE_OWN_ROLE`, `CANNOT_REMOVE_SELF`, `CANNOT_BLOCK_SELF`), whatever role the request
+ * asks for. Since the caller stays an admin, the store's last-admin check (409) only answers when
+ * two admins demote, remove or block each other at the same time.
+ *
+ * Blocking a member revokes its sessions and its open login code; it holds until an admin unblocks
+ * the member, and unblocking restores neither. Removing a member revokes its open login code too.
+ * The automatic lockout of login codes (`loginLockedUntil`) is separate from the block: it ends by
+ * itself, and an admin can lift it earlier with `unlock-login`.
  * Every response carries `Cache-Control: private, no-store`.
  *
  * @param app - Fastify instance (encapsulated by the prefix).
- * @param options - Store and clock.
+ * @param options - Store, clock, email service, login code keys and limits.
  */
 export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOptions): Promise<void> {
-  const { store, clock } = options;
+  const { store, clock, loginKeys, limits } = options;
+
+  /**
+   * Applies a block change and records it.
+   *
+   * @param request - Request of the admin, with the member id.
+   * @param blocked - Whether the member ends blocked.
+   * @returns The member after the change.
+   */
+  async function changeBlock(
+    request: FastifyRequest<{ Params: { id: string } }>,
+    blocked: boolean
+  ): Promise<User> {
+    const now = clock();
+    const actor = actorId(request);
+    if (blocked && request.params.id === actor) {
+      throw new ApiError(403, 'CANNOT_BLOCK_SELF', 'Members cannot block themselves');
+    }
+    const user = memberOrThrow(await store.setBlocked(request.params.id, blocked, now));
+    if (blocked) {
+      await store.revokeChallenge(emailKey(loginKeys, user.email), now);
+    }
+    await store.appendActivity({
+      at: now,
+      actorId: actor,
+      action: blocked ? 'member_blocked' : 'member_unblocked',
+      target: user.email,
+      outcome: 'success'
+    });
+    return user;
+  }
 
   app.addHook('onRequest', requireRoles(['admin']));
   app.addHook('onSend', async (_request, reply) => {
@@ -243,15 +288,31 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
     {
       schema: {
         operationId: 'listTeamMembers',
-        summary: 'Active members sorted by email',
+        summary: 'Active members, blocked ones included, sorted by email',
         tags: ['team'],
         response: { 200: membersResponse, ...errorResponsesFor([401, 403]) }
       }
     },
     async () => {
+      const now = clock();
       const users = await store.listActiveUsers();
-      const last = await store.lastActivityOf(users.map((user) => user.id));
-      return { items: users.map((user) => toTeamMemberBody(user, last.get(user.id) ?? null)) };
+      const keys = new Map(
+        users.map((user) => [user.id, throttleKey(emailKey(loginKeys, user.email))])
+      );
+      const [last, throttles] = await Promise.all([
+        store.lastActivityOf(users.map((user) => user.id)),
+        store.loginThrottles([...keys.values()])
+      ]);
+      return {
+        items: users.map((user) => {
+          const throttle = liveThrottle(throttles.get(keys.get(user.id) ?? '') ?? null, now);
+          return toTeamMemberBody(
+            user,
+            last.get(user.id) ?? null,
+            lockoutEndsAt(throttle, limits, now)
+          );
+        })
+      };
     }
   );
 
@@ -462,10 +523,74 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
         throw new ApiError(403, 'CANNOT_REMOVE_SELF', 'Members cannot remove themselves');
       }
       const user = memberOrThrow(await store.removeUser(request.params.id, now));
+      await store.revokeChallenge(emailKey(loginKeys, user.email), now);
       await store.appendActivity({
         at: now,
         actorId: actor,
         action: 'member_removed',
+        target: user.email,
+        outcome: 'success'
+      });
+      return reply.status(204).send();
+    }
+  );
+
+  app.post<{ Params: { id: string } }>(
+    '/members/:id/block',
+    {
+      schema: {
+        operationId: 'blockTeamMember',
+        summary:
+          'Block another active member until an admin unblocks it; revokes its sessions and its open login code',
+        tags: ['team'],
+        params: idParamsSchema,
+        response: { 200: memberSchema, ...errorResponsesFor([400, 401, 403, 404, 409]) }
+      }
+    },
+    async (request) => toMemberBody(await changeBlock(request, true))
+  );
+
+  app.post<{ Params: { id: string } }>(
+    '/members/:id/unblock',
+    {
+      schema: {
+        operationId: 'unblockTeamMember',
+        summary: 'Lift the block of a member; revoked sessions stay revoked',
+        tags: ['team'],
+        params: idParamsSchema,
+        response: { 200: memberSchema, ...errorResponsesFor([400, 401, 403, 404]) }
+      }
+    },
+    async (request) => toMemberBody(await changeBlock(request, false))
+  );
+
+  app.post<{ Params: { id: string } }>(
+    '/members/:id/unlock-login',
+    {
+      schema: {
+        operationId: 'unlockTeamMemberLogin',
+        summary:
+          'End the automatic lockout of login codes of a member, so it can ask for a code at once',
+        tags: ['team'],
+        params: idParamsSchema,
+        response: {
+          204: { type: 'null', description: 'Lockout lifted' },
+          ...errorResponsesFor([400, 401, 403, 404])
+        }
+      }
+    },
+    async (request, reply) => {
+      const user = await store.findUserById(request.params.id);
+      if (user === null || user.status !== 'active') {
+        throw new ApiError(404, 'NOT_FOUND', 'Member not found');
+      }
+      const key = emailKey(loginKeys, user.email);
+      // The per-IP code counters of the email cannot be listed by member; they end by themselves.
+      await store.clearLoginLimits([throttleKey(key)]);
+      await store.appendActivity({
+        at: clock(),
+        actorId: actorId(request),
+        action: 'login_lockout_cleared',
         target: user.email,
         outcome: 'success'
       });
