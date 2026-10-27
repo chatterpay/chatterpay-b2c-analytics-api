@@ -28,6 +28,7 @@ import type {
   InviteDelivery,
   InviteTransitionResult,
   InviteView,
+  LoginThrottle,
   MemberMutationResult,
   NetworkVisibility,
   NetworkVisibilityChange,
@@ -41,11 +42,33 @@ import type {
   User
 } from './types.js';
 
-/** `name` is optional: the API never writes it, an operator may. */
-type UserDoc = Omit<User, 'id' | 'name'> & { _id: string; name?: string | null };
+/**
+ * `name` is optional: the API never writes it, an operator may. Users stored before members could
+ * be blocked have no `blockedAt`.
+ */
+type UserDoc = Omit<User, 'id' | 'name' | 'blockedAt'> & {
+  _id: string;
+  name?: string | null;
+  blockedAt?: Date | null;
+};
 type SessionDoc = Omit<Session, 'jti'> & { _id: string };
-/** Challenges stored before email codes existed have no `codeHash`. */
-type ChallengeDoc = Omit<Challenge, 'id' | 'codeHash'> & { _id: string; codeHash?: string | null };
+/**
+ * Keyed by the email key, so an email has one challenge and a new one replaces it. Challenges
+ * stored before had a random `_id` and the email in clear; no lookup matches them and the TTL index
+ * removes them once expired.
+ */
+type ChallengeDoc = Omit<Challenge, 'id' | 'emailKey'> & { _id: string; challengeId: string };
+/**
+ * Throttle state of an email, in the rate limit collection: its `resetAt` is `forgetAt`, which
+ * the TTL index of the collection honors.
+ */
+interface ThrottleDoc {
+  _id: string;
+  issued: number;
+  lastIssuedAt: Date;
+  resetAt: Date;
+  version: number;
+}
 /** Invites stored before emails were sent have neither `locale` nor `delivery`. */
 type InviteDoc = Omit<Invite, 'id' | 'locale' | 'delivery'> & {
   _id: string;
@@ -82,11 +105,12 @@ function isDuplicateKey(error: unknown): boolean {
   return error instanceof MongoServerError && error.code === DUPLICATE_KEY;
 }
 
-function toUser({ _id, name, ...rest }: UserDoc): User {
+function toUser({ _id, name, blockedAt, ...rest }: UserDoc): User {
   return {
     id: _id,
     ...rest,
-    name: typeof name === 'string' && name.trim() !== '' ? name.trim() : null
+    name: typeof name === 'string' && name.trim() !== '' ? name.trim() : null,
+    blockedAt: blockedAt ?? null
   };
 }
 
@@ -94,8 +118,12 @@ function toSession({ _id, ...rest }: SessionDoc): Session {
   return { jti: _id, ...rest };
 }
 
-function toChallenge({ _id, codeHash, ...rest }: ChallengeDoc): Challenge {
-  return { id: _id, ...rest, codeHash: codeHash ?? null };
+function toChallenge({ _id, challengeId, ...rest }: ChallengeDoc): Challenge {
+  return { id: challengeId, emailKey: _id, ...rest };
+}
+
+function toThrottle({ issued, lastIssuedAt, resetAt, version }: ThrottleDoc): LoginThrottle {
+  return { issued, lastIssuedAt, forgetAt: resetAt, version };
 }
 
 function toInvite({ _id, locale, delivery, ...rest }: InviteDoc, now: Date): Invite {
@@ -143,8 +171,12 @@ export interface MongoStoreOptions {
  *   from unique indexes; a duplicate-key error is read as the conflict or the replay it means;
  * - challenge attempts, consumption and invite transitions are single conditional updates;
  * - the last active admin is protected by applying the change and undoing it when no active admin
- *   remains. Two concurrent changes that would each remove the last admin can both be undone; the
- *   team never ends without an admin;
+ *   that is not blocked remains. Two concurrent changes that would each remove the last admin can
+ *   both be undone; the team never ends without an admin;
+ * - an email has one challenge, its document keyed by the email key; attempts and consumption are
+ *   conditional updates on that document and the challenge id;
+ * - the throttle state of an email is written with a compare-and-set on its version (the first
+ *   write is an insert, which the `_id` makes unique);
  * - the network visibility is one document replaced with a compare-and-set on its revision (the
  *   first write is an insert, which the `_id` makes unique), so of two concurrent changes made on
  *   the same revision one wins and the other is a conflict.
@@ -157,6 +189,7 @@ export class MongoStore implements Store {
   private readonly invites: Collection<InviteDoc>;
   private readonly activity: Collection<ActivityDoc>;
   private readonly counters: Collection<CounterDoc>;
+  private readonly throttles: Collection<ThrottleDoc>;
   private readonly settings: Collection<VisibilityDoc>;
 
   private constructor(
@@ -169,6 +202,7 @@ export class MongoStore implements Store {
     this.invites = db.collection<InviteDoc>(COLLECTIONS.invites);
     this.activity = db.collection<ActivityDoc>(COLLECTIONS.activity);
     this.counters = db.collection<CounterDoc>(COLLECTIONS.rateLimits);
+    this.throttles = db.collection<ThrottleDoc>(COLLECTIONS.rateLimits);
     this.settings = db.collection<VisibilityDoc>(COLLECTIONS.settings);
   }
 
@@ -270,7 +304,7 @@ export class MongoStore implements Store {
 
   async recordLogin(userId: string, now: Date): Promise<User | null> {
     const user = await this.users.findOneAndUpdate(
-      { _id: userId, status: 'active' },
+      { _id: userId, status: 'active', blockedAt: null },
       { $set: { lastLoginAt: now } },
       { returnDocument: 'after' }
     );
@@ -313,6 +347,37 @@ export class MongoStore implements Store {
     return { kind: 'ok', user: toUser({ ...before, status: 'removed' }) };
   }
 
+  async setBlocked(userId: string, blocked: boolean, now: Date): Promise<MemberMutationResult> {
+    if (!blocked) {
+      const user = await this.users.findOneAndUpdate(
+        { _id: userId, status: 'active' },
+        { $set: { blockedAt: null } },
+        { returnDocument: 'after' }
+      );
+      return user === null ? { kind: 'not_found' } : { kind: 'ok', user: toUser(user) };
+    }
+    const before = await this.users.findOneAndUpdate(
+      { _id: userId, status: 'active', blockedAt: null },
+      { $set: { blockedAt: now } },
+      { returnDocument: 'before' }
+    );
+    if (before === null) {
+      // Already blocked, or not an active member.
+      const current = await this.users.findOne({ _id: userId, status: 'active' });
+      if (current === null) {
+        return { kind: 'not_found' };
+      }
+      await this.sessions.updateMany({ userId, revokedAt: null }, { $set: { revokedAt: now } });
+      return { kind: 'ok', user: toUser(current) };
+    }
+    if (before.role === 'admin' && !(await this.hasActiveAdmin())) {
+      await this.users.updateOne({ _id: userId, blockedAt: now }, { $set: { blockedAt: null } });
+      return { kind: 'last_admin' };
+    }
+    await this.sessions.updateMany({ userId, revokedAt: null }, { $set: { revokedAt: now } });
+    return { kind: 'ok', user: toUser({ ...before, blockedAt: now }) };
+  }
+
   async createSession(input: Omit<Session, 'revokedAt'>): Promise<Session> {
     const { jti, ...rest } = input;
     const doc: SessionDoc = { _id: jti, ...rest, revokedAt: null };
@@ -329,44 +394,112 @@ export class MongoStore implements Store {
     await this.sessions.updateOne({ _id: jti, revokedAt: null }, { $set: { revokedAt: now } });
   }
 
-  async createChallenge(
-    email: string,
-    now: Date,
-    expiresAt: Date,
-    codeHash: string | null
-  ): Promise<Challenge> {
-    const doc: ChallengeDoc = {
-      _id: randomUUID(),
-      email,
-      createdAt: now,
-      expiresAt,
-      attempts: 0,
-      consumedAt: null,
-      codeHash
-    };
-    await this.challenges.insertOne(doc);
-    return toChallenge(doc);
+  async issueChallenge(challenge: Challenge): Promise<void> {
+    const { id, emailKey, ...rest } = challenge;
+    await this.challenges.replaceOne(
+      { _id: emailKey },
+      { ...rest, challengeId: id },
+      { upsert: true }
+    );
   }
 
-  async recordChallengeAttempt(
-    id: string,
-    maxAttempts: number,
-    now: Date
-  ): Promise<Challenge | null> {
+  async recordChallengeAttempt(emailKey: string, id: string, now: Date): Promise<Challenge | null> {
     const challenge = await this.challenges.findOneAndUpdate(
-      { _id: id, consumedAt: null, expiresAt: { $gt: now }, attempts: { $lt: maxAttempts } },
+      {
+        _id: emailKey,
+        challengeId: id,
+        consumedAt: null,
+        revokedAt: null,
+        expiresAt: { $gt: now },
+        $expr: { $lt: ['$attempts', '$maxAttempts'] }
+      },
       { $inc: { attempts: 1 } },
       { returnDocument: 'after' }
     );
     return challenge === null ? null : toChallenge(challenge);
   }
 
-  async consumeChallenge(id: string, now: Date): Promise<boolean> {
+  async consumeChallenge(emailKey: string, id: string, now: Date): Promise<boolean> {
     const result = await this.challenges.updateOne(
-      { _id: id, consumedAt: null },
+      { _id: emailKey, challengeId: id, consumedAt: null, revokedAt: null },
       { $set: { consumedAt: now } }
     );
     return result.modifiedCount === 1;
+  }
+
+  async revokeChallenge(emailKey: string, now: Date): Promise<void> {
+    await this.challenges.updateOne(
+      { _id: emailKey, consumedAt: null, revokedAt: null },
+      { $set: { revokedAt: now } }
+    );
+  }
+
+  async loginThrottle(key: string): Promise<LoginThrottle | null> {
+    const doc = await this.throttles.findOne({ _id: key, version: { $exists: true } });
+    return doc === null ? null : toThrottle(doc);
+  }
+
+  async loginThrottles(keys: readonly string[]): Promise<Map<string, LoginThrottle>> {
+    if (keys.length === 0) {
+      return new Map();
+    }
+    const docs = await this.throttles
+      .find({ _id: { $in: [...keys] }, version: { $exists: true } })
+      .toArray();
+    return new Map(docs.map((doc) => [doc._id, toThrottle(doc)]));
+  }
+
+  async reserveLoginThrottle(
+    key: string,
+    expectedVersion: number | null,
+    next: Pick<LoginThrottle, 'issued' | 'lastIssuedAt' | 'forgetAt'>
+  ): Promise<LoginThrottle | null> {
+    const fields = { issued: next.issued, lastIssuedAt: next.lastIssuedAt, resetAt: next.forgetAt };
+    if (expectedVersion === null) {
+      try {
+        await this.throttles.insertOne({ _id: key, ...fields, version: 1 });
+        return { ...next, version: 1 };
+      } catch (error) {
+        if (!isDuplicateKey(error)) {
+          throw error;
+        }
+        return null;
+      }
+    }
+    const result = await this.throttles.updateOne(
+      { _id: key, version: expectedVersion },
+      { $set: { ...fields, version: expectedVersion + 1 } }
+    );
+    return result.matchedCount === 1 ? { ...next, version: expectedVersion + 1 } : null;
+  }
+
+  async restoreLoginThrottle(
+    key: string,
+    reserved: LoginThrottle,
+    previous: LoginThrottle | null
+  ): Promise<void> {
+    if (previous === null) {
+      await this.throttles.deleteOne({ _id: key, version: reserved.version });
+      return;
+    }
+    await this.throttles.updateOne(
+      { _id: key, version: reserved.version },
+      {
+        $set: {
+          issued: previous.issued,
+          lastIssuedAt: previous.lastIssuedAt,
+          resetAt: previous.forgetAt,
+          version: reserved.version + 1
+        }
+      }
+    );
+  }
+
+  async clearLoginLimits(keys: readonly string[]): Promise<void> {
+    if (keys.length > 0) {
+      // Throttle states and rate limit counters share the collection.
+      await this.counters.deleteMany({ _id: { $in: [...keys] } });
+    }
   }
 
   async createInvite(input: NewInvite, now: Date): Promise<CreateInviteResult> {
@@ -618,6 +751,7 @@ export class MongoStore implements Store {
       email,
       role,
       status: 'active',
+      blockedAt: null,
       createdAt: now,
       lastLoginAt: null
     };
@@ -625,8 +759,10 @@ export class MongoStore implements Store {
     return toUser(doc);
   }
 
+  /** Whether an active admin that is not blocked remains. */
   private async hasActiveAdmin(): Promise<boolean> {
-    return (await this.users.countDocuments({ status: 'active', role: 'admin' }, { limit: 1 })) > 0;
+    const filter: Filter<UserDoc> = { status: 'active', role: 'admin', blockedAt: null };
+    return (await this.users.countDocuments(filter, { limit: 1 })) > 0;
   }
 
   private async replayOf(input: NewInvite, now: Date): Promise<CreateInviteResult | null> {
