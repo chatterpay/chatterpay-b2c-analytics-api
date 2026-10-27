@@ -17,6 +17,7 @@ const apiErrorSchema = {
         'FORBIDDEN',
         'CANNOT_CHANGE_OWN_ROLE',
         'CANNOT_REMOVE_SELF',
+        'CANNOT_BLOCK_SELF',
         'NOT_FOUND',
         'CONFLICT',
         'CONFIG_CONFLICT',
