@@ -238,8 +238,10 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       const member = await store.findActiveUserByEmail(email);
       reply.status(202);
 
+      // A blocked member gets a code like anyone else, so the answer reveals nothing; verifying it
+      // shows the block instead of opening a session.
       if (demoEmails.has(email)) {
-        if (member !== null && member.blockedAt === null) {
+        if (member !== null) {
           await store.issueChallenge({
             ...opened,
             userId: member.id,
@@ -256,8 +258,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
         };
       }
 
-      const eligible =
-        member !== null ? member.blockedAt === null : await store.hasPendingInvite(email, now);
+      const eligible = member !== null || (await store.hasPendingInvite(email, now));
       if (eligible) {
         const code = generateLoginCode(env.OTP_CODE_DIGITS);
         const outcome = await emails.sendLoginCode({
@@ -306,7 +307,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
         summary: 'Exchange a challenge and its code for a session token',
         tags: ['auth'],
         body: verifyCodeBody,
-        response: { 200: verifyCodeResponse, ...errorResponsesFor([400, 401, 429]) }
+        response: { 200: verifyCodeResponse, ...errorResponsesFor([400, 401, 403, 429]) }
       }
     },
     async (request) => {
@@ -352,6 +353,10 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
             target: null,
             outcome: 'failure'
           });
+        }
+        // Only the owner of the email reaches this answer: the code was right and is now used.
+        if (reason === 'blocked') {
+          throw new ApiError(403, 'MEMBER_BLOCKED', 'Access blocked');
         }
         throw invalidCode();
       }
