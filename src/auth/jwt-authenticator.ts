@@ -17,9 +17,9 @@ const BEARER_PATTERN = /^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*)
  * Builds the authenticator of session JWTs sent as `Authorization: Bearer <jwt>`.
  *
  * Beyond the token checks, the session must exist in the store, be neither revoked nor expired
- * and belong to an active user. The principal role is the current role in the store, so a role
- * change or removal applies without a new login: on the next request of the instance that made it,
- * and on the others once their cached read expires (`withReadCache`).
+ * and belong to an active user that is not blocked. The principal role is the current role in the
+ * store, so a role change, removal or block applies without a new login: on the next request of
+ * the instance that made it, and on the others once their cached read expires (`withReadCache`).
  *
  * @param options - Configuration, keys, store and clock.
  * @returns Authenticator that resolves `null` for any missing or invalid session.
@@ -48,7 +48,7 @@ export function createJwtAuthenticator(options: JwtAuthenticatorOptions): Authen
       return null;
     }
     const user = await store.findUserById(session.userId);
-    if (user === null || user.status !== 'active') {
+    if (user === null || user.status !== 'active' || user.blockedAt !== null) {
       return null;
     }
     return { userId: user.id, role: user.role, sessionId: session.jti };
