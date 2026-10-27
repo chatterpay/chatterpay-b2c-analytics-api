@@ -1,6 +1,7 @@
 import { isoDayOf } from '../metrics/calendar.js';
-import { type AggregationStats, aggregateActivity } from '../metrics/live.js';
+import { type AggregationStats, aggregateActivity, aggregatePolymarket } from '../metrics/live.js';
 import type { IngestRunStatus, UsdValuation } from '../metrics/types.js';
+import { collectPolymarketFills } from './polymarket-fills.js';
 import { type MasterWalletConfig, type NetworkRead, takeBalanceSnapshot } from './snapshot.js';
 import type {
   B2cActivityReader,
@@ -14,7 +15,9 @@ import type {
   DailyPrice,
   IngestedUser,
   IngestRepository,
+  PolygonFillReader,
   PolymarketAccountCounts,
+  PolymarketCoverage,
   PriceProvider,
   TokenInfo,
   TransactionCursor,
@@ -36,6 +39,8 @@ export interface IngestionOptions {
   maxProviderCallsPerRun: number;
   /** Ceiling on balance requests (`eth_call` and Koios) in one run; zero disables snapshots. */
   maxBalanceCallsPerRun: number;
+  /** Ceiling on Polygon requests for Polymarket fills in one run; zero or absent disables them. */
+  maxPolymarketCallsPerRun?: number;
   /** Time after which no new batch or balance request is started; the run then saves and returns. */
   maxRunMs: number;
   /** Lifetime of the run lock; longer than `maxRunMs`, so a crashed run frees it on its own. */
@@ -50,6 +55,8 @@ export interface IngestionDependencies {
   prices: PriceProvider | null;
   /** `null` when no balance snapshots are taken. */
   balances: BalanceReader | null;
+  /** `null` or absent when no Polygon endpoint is configured for the Polymarket fills. */
+  polygon?: PolygonFillReader | null;
   /** Configured signers whose balances the snapshot reads. */
   masterWallets: readonly MasterWalletConfig[];
   /** USD valuation of balances and operations (`USD_VALUATION`); `market` when omitted. */
@@ -75,6 +82,8 @@ export interface IngestionPhases {
   prices: number;
   /** Balance reads and the write of the run snapshot. */
   snapshot: number;
+  /** Polygon reads of the Polymarket fills and their write. */
+  polymarket: number;
   /** Read of the copies and computation of the aggregates. */
   aggregateRebuild: number;
   /** Write of the aggregates and of the run status. */
@@ -136,6 +145,19 @@ export interface IngestionReport {
       networks: NetworkReport[];
       masterWallets: number;
     };
+    polymarket: {
+      status: PolymarketReadStatus;
+      /** Polygon requests sent (`eth_getLogs` and block reads). */
+      calls: number;
+      failedCalls: number;
+      /** Distinct maker addresses read; the addresses themselves are never reported. */
+      accounts: number;
+      /** Fills read by this run, fills read again included. */
+      fills: number;
+      /** Instants of the first and last Polygon blocks read so far. */
+      from: string | null;
+      through: string | null;
+    };
   };
   /** Counters of the aggregate build; `null` when the run did not build. */
   aggregates: (AggregationStats & { builtAt: string }) | null;
@@ -151,6 +173,12 @@ export type NetworkReport = Omit<NetworkRead, 'lastSuccessAt'> & {
   analyticsVisible: boolean;
   lastSuccessAt: string | null;
 };
+
+/**
+ * Polymarket fill reads of a run: `complete` up to the confirmed head, `partial` when a limit or a
+ * failed request stopped them, `failed` when no block was read, `disabled` without an endpoint.
+ */
+export type PolymarketReadStatus = 'complete' | 'partial' | 'failed' | 'disabled';
 
 const HOUR_MS = 3_600_000;
 
@@ -286,12 +314,15 @@ function pricedSymbols(
  *    whatever its B2C `enabled` and its analytics visibility; networks whose balance reads the
  *    analytics settings stop and networks only the analytics database retains get a row without
  *    any balance request.
- * 7. Rebuilds every aggregate from the copies and records the status of the run.
+ * 7. Reads, within `maxPolymarketCallsPerRun`, the fills of the orders of the B2C Polymarket
+ *    accounts on Polygon from the block after the last one read, and stores them without any
+ *    address.
+ * 8. Rebuilds every aggregate from the copies and records the status of the run.
  *
  * Steps 2 and 3 stop starting batches at `maxTransactionsPerRun` rows or `maxRunMs`; the run then
- * reports `partial` and the next one continues from the checkpoint. Steps 5 and 6 are the only
- * calls to external APIs; a failed request lowers the coverage of the snapshot instead of failing
- * the run.
+ * reports `partial` and the next one continues from the checkpoint. Steps 5, 6 and 7 are the only
+ * calls to external APIs; a failed request lowers the coverage of the snapshot or of the fills
+ * instead of failing the run.
  *
  * @param deps - Reader, repository, providers, clock and limits.
  * @returns The summary of the run.
@@ -313,6 +344,7 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
       catalogUsers: 0,
       prices: 0,
       snapshot: 0,
+      polymarket: 0,
       aggregateRebuild: 0,
       persist: 0
     },
@@ -321,7 +353,16 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
       users: { read: 0, newWallets: 0, countedInCountries: 0, polymarketAccounts: 0 },
       catalog: { tokens: 0, networks: 0, retainedTokens: 0, retainedNetworks: 0 },
       prices: { provider: deps.prices?.name ?? null, calls: 0, prices: 0, failed: false },
-      balances: { status: 'disabled', calls: 0, failedCalls: 0, networks: [], masterWallets: 0 }
+      balances: { status: 'disabled', calls: 0, failedCalls: 0, networks: [], masterWallets: 0 },
+      polymarket: {
+        status: 'disabled',
+        calls: 0,
+        failedCalls: 0,
+        accounts: 0,
+        fills: 0,
+        from: null,
+        through: null
+      }
     },
     aggregates: null
   };
@@ -539,16 +580,69 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
     });
     lap('snapshot');
 
-    const [transactions, storedUsers, storedTokens, storedChains, prices, seen] = await Promise.all(
-      [
+    let polymarketCoverage: PolymarketCoverage | null = null;
+    const polygon = deps.polygon ?? null;
+    const maxPolymarketCalls = options.maxPolymarketCallsPerRun ?? 0;
+    if (polygon !== null && maxPolymarketCalls > 0) {
+      const accounts = users.flatMap((user) =>
+        user.polymarket?.address == null ? [] : [user.polymarket]
+      );
+      const polymarketBudget: CallBudget = {
+        remaining: maxPolymarketCalls,
+        deadline,
+        used: 0,
+        failed: 0
+      };
+      const collected = await collectPolymarketFills({
+        reader: polygon,
+        accounts,
+        nextBlock: checkpoints.polymarketNextBlock,
+        from: checkpoints.polymarketFrom,
+        through: checkpoints.polymarketThrough,
+        budget: polymarketBudget
+      });
+      await repository.upsertPolymarketFills(collected.fills);
+      await repository.saveCheckpoints({
+        polymarketNextBlock: collected.nextBlock,
+        polymarketFrom: collected.from,
+        polymarketThrough: collected.through
+      });
+      report.sources.polymarket = {
+        status: collected.status,
+        calls: polymarketBudget.used,
+        failedCalls: polymarketBudget.failed,
+        accounts: new Set(accounts.map((account) => account.address)).size,
+        fills: collected.fills.length,
+        from: collected.from?.toISOString() ?? null,
+        through: collected.through?.toISOString() ?? null
+      };
+      if (collected.from !== null && collected.through !== null) {
+        polymarketCoverage = {
+          from: collected.from,
+          through: collected.through,
+          caughtUp: collected.status === 'complete'
+        };
+      }
+    } else if (checkpoints.polymarketFrom !== null && checkpoints.polymarketThrough !== null) {
+      // Fills read while an endpoint was configured stay, as a coverage that is not current.
+      polymarketCoverage = {
+        from: checkpoints.polymarketFrom,
+        through: checkpoints.polymarketThrough,
+        caughtUp: false
+      };
+    }
+    lap('polymarket');
+
+    const [transactions, storedUsers, storedTokens, storedChains, prices, seen, fills] =
+      await Promise.all([
         repository.transactions(),
         repository.users(),
         repository.tokens(),
         repository.chains(),
         repository.prices(),
-        repository.walletObservations()
-      ]
-    );
+        repository.walletObservations(),
+        repository.polymarketFills()
+      ]);
     const { aggregates, stats } = aggregateActivity({
       transactions,
       users: storedUsers,
@@ -561,16 +655,21 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
     lap('aggregateRebuild');
     const builtAt = deps.clock();
     report.status = stopped ? 'partial' : 'completed';
-    await repository.saveAggregates(aggregates, builtAt, {
-      status: report.status,
-      finishedAt: builtAt.toISOString(),
-      sources: {
-        transactions: stopped ? 'partial' : 'complete',
-        prices: pricesStatus,
-        balances: report.sources.balances.status
-      },
-      valuation
-    });
+    await repository.saveAggregates(
+      { ...aggregates, polymarket: aggregatePolymarket(fills, polymarketCoverage) },
+      builtAt,
+      {
+        status: report.status,
+        finishedAt: builtAt.toISOString(),
+        sources: {
+          transactions: stopped ? 'partial' : 'complete',
+          prices: pricesStatus,
+          balances: report.sources.balances.status,
+          polymarket: report.sources.polymarket.status
+        },
+        valuation
+      }
+    );
     lap('persist');
     report.aggregates = { ...stats, builtAt: builtAt.toISOString() };
     return finish();
