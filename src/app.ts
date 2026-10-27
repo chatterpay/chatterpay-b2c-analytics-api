@@ -3,6 +3,7 @@ import helmet from '@fastify/helmet';
 import swagger from '@fastify/swagger';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { createJwtAuthenticator } from './auth/jwt-authenticator.js';
+import { loadLoginCodeKeys } from './auth/login-code.js';
 import type { Authenticator } from './auth/principal.js';
 import { loadSigningKeys } from './auth/session-token.js';
 import type { AppEnv } from './config/env.js';
@@ -37,6 +38,8 @@ export interface AppOptions {
   emailProvider?: EmailProvider;
   /** Wait between email retries; replaced in tests. */
   emailSleep?: (ms: number) => Promise<void>;
+  /** Destination of the log lines; standard output by default. Tests read the lines from it. */
+  logStream?: { write(line: string): void };
 }
 
 /** Site origin of the email links outside production when `SITE_URL` is unset. */
@@ -62,6 +65,7 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
     throw new Error('Production requires the MongoDB store');
   }
   const keys = loadSigningKeys(env);
+  const loginKeys = loadLoginCodeKeys(env);
   const authenticate = options.authenticate ?? createJwtAuthenticator({ env, keys, store, clock });
   const email = new EmailService({
     provider:
@@ -76,6 +80,7 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
   const app = Fastify({
     logger: {
       level: env.LOG_LEVEL,
+      ...(options.logStream === undefined ? {} : { stream: options.logStream }),
       redact: {
         paths: [
           'req.headers.authorization',
@@ -108,6 +113,17 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
   }
   if (keys.ephemeral) {
     app.log.warn('JWT_PRIVATE_KEY is unset: using an ephemeral key, sessions end on restart');
+  }
+  if (loginKeys.ephemeral) {
+    app.log.warn(
+      'OTP_HMAC_SECRET or OTP_EMAIL_HMAC_SECRET is unset: using ephemeral keys, login codes and their limits end on restart'
+    );
+  }
+  if (env.DEMO_LOGIN_ENABLED) {
+    app.log.warn(
+      { demoAccounts: env.DEMO_LOGIN_EMAILS.length },
+      'DEMO_LOGIN_ENABLED: demo accounts sign in with the shared demo code'
+    );
   }
 
   await app.register(swagger, {
@@ -148,8 +164,23 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
   registerErrorHandling(app);
   registerSharedSchemas(app);
   await app.register(healthRoutes, { store });
-  await app.register(authRoutes, { prefix: '/v1/auth', env, store, keys, clock, email });
-  await app.register(teamRoutes, { prefix: '/v1/team', store, clock, email });
+  await app.register(authRoutes, {
+    prefix: '/v1/auth',
+    env,
+    store,
+    keys,
+    loginKeys,
+    clock,
+    email
+  });
+  await app.register(teamRoutes, {
+    prefix: '/v1/team',
+    store,
+    clock,
+    email,
+    loginKeys,
+    limits: env
+  });
   await app.register(metricsRoutes, { prefix: '/v1/metrics', clock, store });
   await app.register(adminRoutes, { prefix: '/v1/admin', store, clock });
   await app.register(ingestRoutes, {
