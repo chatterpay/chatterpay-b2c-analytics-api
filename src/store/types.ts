@@ -16,6 +16,12 @@ export interface User {
   name: string | null;
   role: Role;
   status: UserStatus;
+  /**
+   * When an admin blocked the member; `null` while not blocked. A blocked member stays `active`, so
+   * it keeps its email and nobody else can be invited with it, but it cannot request or verify a
+   * login code and its sessions are rejected. Only an admin lifts it.
+   */
+  blockedAt: Date | null;
   createdAt: Date;
   lastLoginAt: Date | null;
 }
@@ -29,19 +35,43 @@ export interface Session {
   revokedAt: Date | null;
 }
 
-/** Login challenge opened by `request-code`. It never stores the code in clear. */
+/**
+ * Login challenge opened by `request-code`. It holds neither the code nor the email in clear: the
+ * code is reduced to an HMAC verifier and the email to its pseudonymous key, by which the store
+ * keeps one challenge per email.
+ */
 export interface Challenge {
+  /** Public id the client sends back with the code. */
   id: string;
-  email: string;
+  /** Pseudonymous key of the normalized email (see `emailKey`). */
+  emailKey: string;
+  /** Member the code was issued for; `null` when the email only has a pending invite. */
+  userId: string | null;
+  /** `otp`: code sent by email; `access_code`: shared code of a demo account. */
+  kind: 'otp' | 'access_code';
+  /** HMAC verifier of the code (see `codeVerifier`); `null` for `access_code`. */
+  codeDigest: string | null;
+  /** Fingerprint of the key behind `codeDigest`; `null` for `access_code`. */
+  keyVersion: string | null;
   createdAt: Date;
   expiresAt: Date;
-  attempts: number;
   consumedAt: Date | null;
-  /**
-   * Digest of the one-time code sent by email (see `hashLoginCode`); `null` with the shared access
-   * code and on challenges stored before email codes existed.
-   */
-  codeHash: string | null;
+  /** Set when the member is blocked or removed while the challenge is open. */
+  revokedAt: Date | null;
+  attempts: number;
+  maxAttempts: number;
+}
+
+/**
+ * Codes issued for one email since its last login, which set the wait before the next one. It is
+ * keyed by the pseudonymous email key and forgotten at `forgetAt`.
+ */
+export interface LoginThrottle {
+  issued: number;
+  lastIssuedAt: Date;
+  forgetAt: Date;
+  /** Grows on every write; the compare-and-set of {@link Store.reserveLoginThrottle} reads it. */
+  version: number;
 }
 
 /**
@@ -102,6 +132,9 @@ export type ActivityAction =
   | 'invite_accepted'
   | 'role_changed'
   | 'member_removed'
+  | 'member_blocked'
+  | 'member_unblocked'
+  | 'login_lockout_cleared'
   | 'network_hidden'
   | 'network_shown'
   | 'token_hidden'
@@ -247,9 +280,11 @@ export interface ActivatedMember {
  * analytics visibility of the networks.
  *
  * Methods that check an invariant and write (invite creation, invite transitions, member role
- * changes and removal, challenge attempts and consumption, invite acceptance, network visibility
- * changes) are atomic: two concurrent calls never both pass the check. Read methods report invites past `expiresAt` as
- * `expired`. Every method takes the current instant explicitly so callers control the clock.
+ * changes, removal and blocking, challenge attempts and consumption, throttle reservations, invite
+ * acceptance, network visibility changes) are atomic: two concurrent calls never both pass the
+ * check. The last-admin rule counts active admins that are not blocked. Read methods report
+ * invites past `expiresAt` as `expired`. Every method takes the current instant explicitly so
+ * callers control the clock.
  */
 export interface Store {
   /** Backend kind; the in-memory store is limited to tests and local runs without MongoDB. */
@@ -275,24 +310,56 @@ export interface Store {
   changeRole(userId: string, role: User['role']): Promise<MemberMutationResult>;
   /** Marks the user removed and revokes all its sessions. */
   removeUser(userId: string, now: Date): Promise<MemberMutationResult>;
+  /**
+   * Blocks an active member and revokes all its sessions, or lifts the block; sessions revoked by
+   * the block stay revoked. Blocking the last unblocked active admin is `last_admin`. Repeating the
+   * current state answers `ok`.
+   */
+  setBlocked(userId: string, blocked: boolean, now: Date): Promise<MemberMutationResult>;
 
   createSession(session: Omit<Session, 'revokedAt'>): Promise<Session>;
   findSession(jti: string): Promise<Session | null>;
   revokeSession(jti: string, now: Date): Promise<void>;
 
-  createChallenge(
-    email: string,
-    now: Date,
-    expiresAt: Date,
-    codeHash: string | null
-  ): Promise<Challenge>;
+  /** Stores the challenge as the only one of its email, replacing the previous one. */
+  issueChallenge(challenge: Challenge): Promise<void>;
   /**
-   * Counts one verification attempt. Returns the challenge when it exists, is neither consumed
-   * nor expired and had fewer than `maxAttempts` attempts before this one; `null` otherwise.
+   * Counts one verification attempt. Returns the challenge when it is the current one of the email,
+   * has the id, is neither consumed, revoked nor expired, and had fewer than its `maxAttempts`
+   * attempts before this one; `null` otherwise.
    */
-  recordChallengeAttempt(id: string, maxAttempts: number, now: Date): Promise<Challenge | null>;
-  /** Marks the challenge consumed; `false` when it was already consumed or does not exist. */
-  consumeChallenge(id: string, now: Date): Promise<boolean>;
+  recordChallengeAttempt(emailKey: string, id: string, now: Date): Promise<Challenge | null>;
+  /** Marks the challenge consumed; `false` when it was consumed, replaced or revoked meanwhile. */
+  consumeChallenge(emailKey: string, id: string, now: Date): Promise<boolean>;
+  /** Revokes the open challenge of the email, if any. */
+  revokeChallenge(emailKey: string, now: Date): Promise<void>;
+
+  /** Throttle state of the key, even when past `forgetAt`; `null` when none is stored. */
+  loginThrottle(key: string): Promise<LoginThrottle | null>;
+  /** Throttle states of several keys; keys without one are absent. */
+  loginThrottles(keys: readonly string[]): Promise<Map<string, LoginThrottle>>;
+  /**
+   * Writes the next throttle state if the stored one still has `expectedVersion` (`null`: none is
+   * stored). Of two concurrent calls on the same version one wins.
+   *
+   * @returns The written state; `null` when another write came first.
+   */
+  reserveLoginThrottle(
+    key: string,
+    expectedVersion: number | null,
+    next: Pick<LoginThrottle, 'issued' | 'lastIssuedAt' | 'forgetAt'>
+  ): Promise<LoginThrottle | null>;
+  /**
+   * Puts back the state a reservation replaced, if nothing wrote after it: `previous` `null`
+   * deletes the state.
+   */
+  restoreLoginThrottle(
+    key: string,
+    reserved: LoginThrottle,
+    previous: LoginThrottle | null
+  ): Promise<void>;
+  /** Deletes the throttle state and the rate limit counters of the keys. */
+  clearLoginLimits(keys: readonly string[]): Promise<void>;
 
   /**
    * Creates a `simulated` invite with `lastSentAt = now` and a `pending` delivery. A known `mutationId` replays its invite
