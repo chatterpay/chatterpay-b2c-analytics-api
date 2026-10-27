@@ -17,6 +17,7 @@ import type {
   InviteDelivery,
   InviteTransitionResult,
   InviteView,
+  LoginThrottle,
   MemberMutationResult,
   NetworkVisibility,
   NetworkVisibilityChange,
@@ -91,7 +92,9 @@ export class MemoryStore implements Store {
   readonly kind: 'memory' = 'memory';
   private readonly users = new Map<string, User>();
   private readonly sessions = new Map<string, Session>();
+  /** By email key: one challenge per email. */
   private readonly challenges = new Map<string, Challenge>();
+  private readonly throttles = new Map<string, LoginThrottle>();
   private readonly invites = new Map<string, Invite>();
   private readonly activity: ActivityEvent[] = [];
   private readonly counters = new Map<string, Counter>();
@@ -144,7 +147,7 @@ export class MemoryStore implements Store {
 
   async recordLogin(userId: string, now: Date): Promise<User | null> {
     const user = this.users.get(userId);
-    if (user === undefined || user.status !== 'active') {
+    if (user === undefined || user.status !== 'active' || user.blockedAt !== null) {
       return null;
     }
     user.lastLoginAt = now;
@@ -156,7 +159,12 @@ export class MemoryStore implements Store {
     if (user === undefined || user.status !== 'active') {
       return { kind: 'not_found' };
     }
-    if (user.role === 'admin' && role !== 'admin' && this.activeAdminCount() <= 1) {
+    if (
+      user.role === 'admin' &&
+      role !== 'admin' &&
+      user.blockedAt === null &&
+      this.activeAdminCount() <= 1
+    ) {
       return { kind: 'last_admin' };
     }
     user.role = role;
@@ -168,15 +176,30 @@ export class MemoryStore implements Store {
     if (user === undefined || user.status !== 'active') {
       return { kind: 'not_found' };
     }
-    if (user.role === 'admin' && this.activeAdminCount() <= 1) {
+    if (user.role === 'admin' && user.blockedAt === null && this.activeAdminCount() <= 1) {
       return { kind: 'last_admin' };
     }
     user.status = 'removed';
-    for (const session of this.sessions.values()) {
-      if (session.userId === userId && session.revokedAt === null) {
-        session.revokedAt = now;
-      }
+    this.revokeSessionsOf(userId, now);
+    return { kind: 'ok', user: { ...user } };
+  }
+
+  async setBlocked(userId: string, blocked: boolean, now: Date): Promise<MemberMutationResult> {
+    const user = this.users.get(userId);
+    if (user === undefined || user.status !== 'active') {
+      return { kind: 'not_found' };
     }
+    if (!blocked) {
+      user.blockedAt = null;
+      return { kind: 'ok', user: { ...user } };
+    }
+    if (user.blockedAt === null) {
+      if (user.role === 'admin' && this.activeAdminCount() <= 1) {
+        return { kind: 'last_admin' };
+      }
+      user.blockedAt = now;
+    }
+    this.revokeSessionsOf(userId, now);
     return { kind: 'ok', user: { ...user } };
   }
 
@@ -198,48 +221,97 @@ export class MemoryStore implements Store {
     }
   }
 
-  async createChallenge(
-    email: string,
-    now: Date,
-    expiresAt: Date,
-    codeHash: string | null
-  ): Promise<Challenge> {
-    const challenge: Challenge = {
-      id: randomUUID(),
-      email,
-      createdAt: now,
-      expiresAt,
-      attempts: 0,
-      consumedAt: null,
-      codeHash
-    };
-    this.challenges.set(challenge.id, challenge);
-    return { ...challenge };
+  async issueChallenge(challenge: Challenge): Promise<void> {
+    this.challenges.set(challenge.emailKey, { ...challenge });
   }
 
-  async recordChallengeAttempt(
-    id: string,
-    maxAttempts: number,
-    now: Date
-  ): Promise<Challenge | null> {
-    const challenge = this.challenges.get(id);
-    if (challenge === undefined || challenge.consumedAt !== null) {
-      return null;
-    }
-    if (challenge.expiresAt.getTime() <= now.getTime() || challenge.attempts >= maxAttempts) {
+  async recordChallengeAttempt(emailKey: string, id: string, now: Date): Promise<Challenge | null> {
+    const challenge = this.challenges.get(emailKey);
+    if (
+      challenge === undefined ||
+      challenge.id !== id ||
+      challenge.consumedAt !== null ||
+      challenge.revokedAt !== null ||
+      challenge.expiresAt.getTime() <= now.getTime() ||
+      challenge.attempts >= challenge.maxAttempts
+    ) {
       return null;
     }
     challenge.attempts += 1;
     return { ...challenge };
   }
 
-  async consumeChallenge(id: string, now: Date): Promise<boolean> {
-    const challenge = this.challenges.get(id);
-    if (challenge === undefined || challenge.consumedAt !== null) {
+  async consumeChallenge(emailKey: string, id: string, now: Date): Promise<boolean> {
+    const challenge = this.challenges.get(emailKey);
+    if (
+      challenge === undefined ||
+      challenge.id !== id ||
+      challenge.consumedAt !== null ||
+      challenge.revokedAt !== null
+    ) {
       return false;
     }
     challenge.consumedAt = now;
     return true;
+  }
+
+  async revokeChallenge(emailKey: string, now: Date): Promise<void> {
+    const challenge = this.challenges.get(emailKey);
+    if (challenge !== undefined && challenge.consumedAt === null && challenge.revokedAt === null) {
+      challenge.revokedAt = now;
+    }
+  }
+
+  async loginThrottle(key: string): Promise<LoginThrottle | null> {
+    const throttle = this.throttles.get(key);
+    return throttle === undefined ? null : { ...throttle };
+  }
+
+  async loginThrottles(keys: readonly string[]): Promise<Map<string, LoginThrottle>> {
+    const found = new Map<string, LoginThrottle>();
+    for (const key of keys) {
+      const throttle = this.throttles.get(key);
+      if (throttle !== undefined) {
+        found.set(key, { ...throttle });
+      }
+    }
+    return found;
+  }
+
+  async reserveLoginThrottle(
+    key: string,
+    expectedVersion: number | null,
+    next: Pick<LoginThrottle, 'issued' | 'lastIssuedAt' | 'forgetAt'>
+  ): Promise<LoginThrottle | null> {
+    const current = this.throttles.get(key);
+    if ((current?.version ?? null) !== expectedVersion) {
+      return null;
+    }
+    const written: LoginThrottle = { ...next, version: (current?.version ?? 0) + 1 };
+    this.throttles.set(key, written);
+    return { ...written };
+  }
+
+  async restoreLoginThrottle(
+    key: string,
+    reserved: LoginThrottle,
+    previous: LoginThrottle | null
+  ): Promise<void> {
+    if (this.throttles.get(key)?.version !== reserved.version) {
+      return;
+    }
+    if (previous === null) {
+      this.throttles.delete(key);
+      return;
+    }
+    this.throttles.set(key, { ...previous, version: reserved.version + 1 });
+  }
+
+  async clearLoginLimits(keys: readonly string[]): Promise<void> {
+    for (const key of keys) {
+      this.throttles.delete(key);
+      this.counters.delete(key);
+    }
   }
 
   async createInvite(input: NewInvite, now: Date): Promise<CreateInviteResult> {
@@ -457,10 +529,11 @@ export class MemoryStore implements Store {
     return undefined;
   }
 
+  /** Active admins that are not blocked. */
   private activeAdminCount(): number {
     let count = 0;
     for (const user of this.users.values()) {
-      if (user.status === 'active' && user.role === 'admin') {
+      if (user.status === 'active' && user.role === 'admin' && user.blockedAt === null) {
         count += 1;
       }
     }
@@ -474,10 +547,19 @@ export class MemoryStore implements Store {
       name: null,
       role,
       status: 'active',
+      blockedAt: null,
       createdAt: now,
       lastLoginAt: null
     };
     this.users.set(user.id, user);
     return user;
+  }
+
+  private revokeSessionsOf(userId: string, now: Date): void {
+    for (const session of this.sessions.values()) {
+      if (session.userId === userId && session.revokedAt === null) {
+        session.revokedAt = now;
+      }
+    }
   }
 }
