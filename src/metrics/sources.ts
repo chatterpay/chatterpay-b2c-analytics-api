@@ -1,3 +1,4 @@
+import type { PolymarketCoverage } from '../ingest/types.js';
 import {
   addMonths,
   type DayHour,
@@ -26,6 +27,17 @@ export type DataStatus = 'mock' | 'mixed' | 'live';
 export interface WalletCoverage {
   wallets: number;
   verified: number;
+}
+
+/** Executed fills of the ChatterPay Polymarket accounts inside a window. */
+export interface PolymarketFigures {
+  fills: number;
+  /** pUSD paid by buys plus pUSD received by sells, in millionths; 1 pUSD = 1 USD. */
+  volumeMicro: number;
+  /** Fills of orders with a builder code, which lets a builder charge a fee of its own. */
+  attributed: number;
+  /** Blocks of Polygon the fills were read from. */
+  coverage: PolymarketCoverage;
 }
 
 /** Data the metrics of one group are computed from. */
@@ -80,6 +92,11 @@ export interface MetricsSource {
   walletCoverage(network: NetworkId, point: DayHour): WalletCoverage;
   /** First ingestion run that observed the wallets; `null` before any. */
   walletsTrackingSince(): Date | null;
+  /**
+   * Polymarket fills inside a window, over every network; `null` when the source has none read
+   * (synthetic data, builds without them, no endpoint configured yet).
+   */
+  polymarket(window: TimeWindow): PolymarketFigures | null;
 }
 
 /** Users that joined a network inside a window, per the synthetic model. */
@@ -131,7 +148,9 @@ export const MOCK_SOURCE: MetricsSource = {
     ).newWallets;
     return { wallets, verified: wallets };
   },
-  walletsTrackingSince: () => new Date(MOCK_START_DAY * 86_400_000)
+  walletsTrackingSince: () => new Date(MOCK_START_DAY * 86_400_000),
+  // The synthetic model has no Polymarket trading.
+  polymarket: () => null
 };
 
 /**
@@ -165,7 +184,8 @@ export type MetricGroup =
  *   `transactions` collection. A swap counts once, valued on its stable leg when it has one; fees
  *   are the `fee` field. An operation without a USD value counts as an operation and is left out
  *   of the money figures, which then answer `partial` or `unavailable`. Deposits and Polymarket
- *   rows are copied but not counted.
+ *   rows are copied but not counted; the Polymarket figures come from the fills of the accounts
+ *   read on Polygon (`polymarket_fills`).
  * - `activeUsers`: users whose wallet sent a counted operation.
  * - `signups`: `users.creationDate`, per network of the user's wallets. Wallets carry no date of
  *   their own, so a wallet added later counts from the user's signup.
