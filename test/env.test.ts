@@ -78,6 +78,61 @@ describe('loadEnv', () => {
     );
   });
 
+  it('keeps the shared access code and the simulated emails by default', () => {
+    const env = loadEnv({});
+
+    expect(env.LOGIN_CODE_DELIVERY).toBe('access_code');
+    expect(env.EMAIL_PROVIDER).toBe('simulated');
+    expect(env.RESEND_API_KEY).toBeNull();
+    expect(env.EMAIL_FROM).toBeNull();
+    expect(env.SITE_URL).toBeNull();
+  });
+
+  it('requires the key, the sender and the site URL to send through Resend', () => {
+    expect(() => loadEnv({ EMAIL_PROVIDER: 'resend' })).toThrow(
+      'Invalid environment variables: RESEND_API_KEY, EMAIL_FROM, SITE_URL'
+    );
+    const env = loadEnv({
+      EMAIL_PROVIDER: 'resend',
+      RESEND_API_KEY: 're_test_only',
+      EMAIL_FROM: 'ChatterPay Analytics <no-reply@example.com>',
+      SITE_URL: 'https://analytics.example.com/'
+    });
+    expect(env.SITE_URL).toBe('https://analytics.example.com');
+    expect(loadEnv({ EMAIL_FROM: 'no-reply@example.com' }).EMAIL_FROM).toBe('no-reply@example.com');
+    for (const sender of ['ChatterPay', 'ChatterPay <no-reply>', 'a@b.c\r\nBcc: x@y.z']) {
+      expect(() => loadEnv({ EMAIL_FROM: sender })).toThrow(
+        'Invalid environment variables: EMAIL_FROM'
+      );
+    }
+  });
+
+  it('logs in by email in production only through Resend and over HTTPS links', () => {
+    const { privateKey } = generateKeyPairSync('ed25519');
+    const production = {
+      NODE_ENV: 'production',
+      JWT_PRIVATE_KEY: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+      MONGO_URI: 'mongodb://127.0.0.1:27017',
+      B2C_MONGO_URI: 'mongodb://127.0.0.1:27017/chatterpay-dev',
+      LOGIN_CODE_DELIVERY: 'email'
+    };
+    expect(() => loadEnv(production)).toThrow('Invalid environment variables: EMAIL_PROVIDER');
+
+    const resend = {
+      ...production,
+      EMAIL_PROVIDER: 'resend',
+      RESEND_API_KEY: 're_test_only',
+      EMAIL_FROM: 'no-reply@example.com'
+    };
+    // The email login needs no shared access code.
+    expect(
+      loadEnv({ ...resend, SITE_URL: 'https://analytics.example.com' }).DEMO_ACCESS_CODE
+    ).toBeNull();
+    expect(() => loadEnv({ ...resend, SITE_URL: 'http://analytics.example.com' })).toThrow(
+      'Invalid environment variables: SITE_URL'
+    );
+  });
+
   it('applies the ingestion defaults', () => {
     const env = loadEnv({});
 
