@@ -2,6 +2,22 @@ import { generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env.js';
 
+/** Smallest valid production environment; test-only values, never real secrets. */
+const PRODUCTION = {
+  NODE_ENV: 'production',
+  JWT_PRIVATE_KEY: generateKeyPairSync('ed25519')
+    .privateKey.export({ format: 'pem', type: 'pkcs8' })
+    .toString(),
+  MONGO_URI: 'mongodb://127.0.0.1:27017',
+  B2C_MONGO_URI: 'mongodb://127.0.0.1:27017/chatterpay-dev',
+  OTP_HMAC_SECRET: 'a'.repeat(64),
+  OTP_EMAIL_HMAC_SECRET: 'b'.repeat(64),
+  EMAIL_PROVIDER: 'resend',
+  RESEND_API_KEY: 're_test_only',
+  EMAIL_FROM: 'no-reply@example.com',
+  SITE_URL: 'https://analytics.example.com'
+};
+
 describe('loadEnv', () => {
   it('applies defaults', () => {
     const env = loadEnv({});
@@ -35,7 +51,7 @@ describe('loadEnv', () => {
     expect(env.JWT_ISSUER).toBe('chatterpay-analytics-api');
     expect(env.JWT_AUDIENCE).toBe('chatterpay-analytics-site');
     expect(env.SESSION_TTL_MINUTES).toBe(120);
-    expect(env.CHALLENGE_TTL_MINUTES).toBe(10);
+    expect(env.OTP_TTL_SECONDS).toBe(300);
     expect(env.MONGO_URI).toBeNull();
     expect(env.MONGO_DB_NAME).toBe('chatterpay-analytics-dev');
     expect(env.B2C_MONGO_DB_NAME).toBe('chatterpay-dev');
@@ -69,19 +85,20 @@ describe('loadEnv', () => {
   it('rejects short access codes and out-of-range TTLs', () => {
     expect(() => loadEnv({ DEMO_ACCESS_CODE: 'short' })).toThrowError(/DEMO_ACCESS_CODE/);
     expect(() => loadEnv({ SESSION_TTL_MINUTES: '4' })).toThrowError(/SESSION_TTL_MINUTES/);
-    expect(() => loadEnv({ CHALLENGE_TTL_MINUTES: '61' })).toThrowError(/CHALLENGE_TTL_MINUTES/);
+    expect(() => loadEnv({ OTP_TTL_SECONDS: '601' })).toThrowError(/OTP_TTL_SECONDS/);
   });
 
-  it('requires the access code, the signing key and both MongoDB connections in production', () => {
+  it('requires Resend, the login code keys, the signing key and both MongoDB connections in production', () => {
     expect(() => loadEnv({ NODE_ENV: 'production' })).toThrowError(
-      /^Invalid environment variables: DEMO_ACCESS_CODE, JWT_PRIVATE_KEY, MONGO_URI, B2C_MONGO_URI$/
+      /^Invalid environment variables: EMAIL_PROVIDER, OTP_HMAC_SECRET, OTP_EMAIL_HMAC_SECRET, JWT_PRIVATE_KEY, MONGO_URI, B2C_MONGO_URI$/
     );
   });
 
-  it('keeps the shared access code and the simulated emails by default', () => {
+  it('keeps the demo login off and the simulated emails by default', () => {
     const env = loadEnv({});
 
-    expect(env.LOGIN_CODE_DELIVERY).toBe('access_code');
+    expect(env.DEMO_LOGIN_ENABLED).toBe(false);
+    expect(env.DEMO_LOGIN_EMAILS).toEqual([]);
     expect(env.EMAIL_PROVIDER).toBe('simulated');
     expect(env.RESEND_API_KEY).toBeNull();
     expect(env.EMAIL_FROM).toBeNull();
@@ -108,29 +125,94 @@ describe('loadEnv', () => {
   });
 
   it('logs in by email in production only through Resend and over HTTPS links', () => {
-    const { privateKey } = generateKeyPairSync('ed25519');
-    const production = {
-      NODE_ENV: 'production',
-      JWT_PRIVATE_KEY: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
-      MONGO_URI: 'mongodb://127.0.0.1:27017',
-      B2C_MONGO_URI: 'mongodb://127.0.0.1:27017/chatterpay-dev',
-      LOGIN_CODE_DELIVERY: 'email'
-    };
-    expect(() => loadEnv(production)).toThrow('Invalid environment variables: EMAIL_PROVIDER');
-
-    const resend = {
-      ...production,
-      EMAIL_PROVIDER: 'resend',
-      RESEND_API_KEY: 're_test_only',
-      EMAIL_FROM: 'no-reply@example.com'
-    };
+    expect(() => loadEnv({ ...PRODUCTION, EMAIL_PROVIDER: 'simulated' })).toThrow(
+      'Invalid environment variables: EMAIL_PROVIDER'
+    );
     // The email login needs no shared access code.
-    expect(
-      loadEnv({ ...resend, SITE_URL: 'https://analytics.example.com' }).DEMO_ACCESS_CODE
-    ).toBeNull();
-    expect(() => loadEnv({ ...resend, SITE_URL: 'http://analytics.example.com' })).toThrow(
+    expect(loadEnv(PRODUCTION).DEMO_ACCESS_CODE).toBeNull();
+    expect(() => loadEnv({ ...PRODUCTION, SITE_URL: 'http://analytics.example.com' })).toThrow(
       'Invalid environment variables: SITE_URL'
     );
+  });
+
+  it('applies the login code defaults and validates their limits', () => {
+    const env = loadEnv({});
+
+    expect(env.OTP_CODE_DIGITS).toBe(8);
+    expect(env.OTP_MAX_ATTEMPTS).toBe(5);
+    expect(env.OTP_RESEND_COOLDOWN_SECONDS).toBe(60);
+    expect(env.OTP_LOCKOUT_STEPS_SECONDS).toEqual([0, 300, 900]);
+    expect(env.OTP_MAX_LOCKOUT_SECONDS).toBe(900);
+    expect(env.OTP_SENDS_PER_EMAIL_HOUR).toBe(5);
+    expect(env.OTP_SENDS_PER_EMAIL_DAY).toBe(10);
+    expect(env.OTP_HMAC_SECRET).toBeNull();
+    expect(loadEnv({ OTP_LOCKOUT_STEPS_SECONDS: '0, 120,600' }).OTP_LOCKOUT_STEPS_SECONDS).toEqual([
+      0, 120, 600
+    ]);
+    for (const [name, value] of [
+      ['OTP_CODE_DIGITS', '6'],
+      ['OTP_MAX_LOCKOUT_SECONDS', '901'],
+      ['OTP_LOCKOUT_STEPS_SECONDS', '0,abc'],
+      ['OTP_LOCKOUT_STEPS_SECONDS', '0,1200']
+    ] as const) {
+      expect(() => loadEnv({ [name]: value })).toThrow(`Invalid environment variables: ${name}`);
+    }
+    expect(() => loadEnv({ OTP_SENDS_PER_EMAIL_HOUR: '20' })).toThrow(
+      'Invalid environment variables: OTP_SENDS_PER_EMAIL_DAY'
+    );
+  });
+
+  it('accepts login code keys of 256 bits that differ from each other', () => {
+    expect(loadEnv({ OTP_HMAC_SECRET: 'a'.repeat(64) }).OTP_HMAC_SECRET).toBe('a'.repeat(64));
+    expect(() => loadEnv({ OTP_HMAC_SECRET: 'a'.repeat(32) })).toThrow(
+      'Invalid environment variables: OTP_HMAC_SECRET'
+    );
+    expect(() =>
+      loadEnv({
+        OTP_HMAC_SECRET: 'a'.repeat(64),
+        OTP_EMAIL_HMAC_SECRET: Buffer.from('a'.repeat(64), 'hex').toString('base64')
+      })
+    ).toThrow('Invalid environment variables: OTP_EMAIL_HMAC_SECRET');
+  });
+
+  it('allows the demo login only with its code and demo accounts, and in production only on a -develop service', () => {
+    const demo = {
+      DEMO_LOGIN_ENABLED: 'true',
+      DEMO_ACCESS_CODE: 'test-only-access-code-0001',
+      DEMO_LOGIN_EMAILS: ' Admin@Demo.Example.com ,viewer@demo.example.com'
+    };
+    expect(loadEnv(demo).DEMO_LOGIN_EMAILS).toEqual([
+      'admin@demo.example.com',
+      'viewer@demo.example.com'
+    ]);
+    expect(() => loadEnv({ ...demo, DEMO_ACCESS_CODE: '' })).toThrow(
+      'Invalid environment variables: DEMO_ACCESS_CODE'
+    );
+    expect(() => loadEnv({ ...demo, DEMO_LOGIN_EMAILS: '' })).toThrow(
+      'Invalid environment variables: DEMO_LOGIN_EMAILS'
+    );
+    // A real mailbox cannot be a demo account.
+    expect(() => loadEnv({ ...demo, DEMO_LOGIN_EMAILS: 'someone@example.com' })).toThrow(
+      'Invalid environment variables: DEMO_LOGIN_EMAILS'
+    );
+
+    expect(
+      loadEnv({ ...PRODUCTION, ...demo, K_SERVICE: 'analytics-api-develop' }).DEMO_LOGIN_ENABLED
+    ).toBe(true);
+    for (const service of [{}, { K_SERVICE: 'analytics-api-main' }, { K_SERVICE: 'develop' }]) {
+      expect(() => loadEnv({ ...PRODUCTION, ...demo, ...service })).toThrow(
+        'Invalid environment variables: DEMO_LOGIN_ENABLED'
+      );
+    }
+    // Copying the demo variables without turning the flag on keeps the demo login off.
+    expect(
+      loadEnv({
+        ...PRODUCTION,
+        ...demo,
+        DEMO_LOGIN_ENABLED: 'false',
+        K_SERVICE: 'analytics-api-main'
+      }).DEMO_LOGIN_ENABLED
+    ).toBe(false);
   });
 
   it('applies the ingestion defaults', () => {
