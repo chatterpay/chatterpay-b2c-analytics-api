@@ -12,8 +12,28 @@ export interface AppEnv {
   LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
   BODY_LIMIT_BYTES: number;
   REQUEST_TIMEOUT_MS: number;
-  /** Shared demo login code; `null` disables code verification (503). */
+  /**
+   * Shared demo login code, used while `LOGIN_CODE_DELIVERY` is `access_code`; `null` disables
+   * code verification there (503).
+   */
   DEMO_ACCESS_CODE: string | null;
+  /**
+   * Source of the login code: `access_code` checks the shared `DEMO_ACCESS_CODE`; `email` sends a
+   * one-time code to the email of the challenge, which proves that the person owns it before an
+   * invited account is activated.
+   */
+  LOGIN_CODE_DELIVERY: 'access_code' | 'email';
+  /** Sender of the emails; `simulated` keeps them in memory and sends nothing. */
+  EMAIL_PROVIDER: 'simulated' | 'resend';
+  /** Sending-only Resend API key; required with `EMAIL_PROVIDER=resend`. */
+  RESEND_API_KEY: string | null;
+  /** Sender as `Name <address@domain>`, on the domain verified in Resend; required with `resend`. */
+  EMAIL_FROM: string | null;
+  /**
+   * Origin of the site, for the links of the emails; required with `resend`. Outside production
+   * `null` links to the local site.
+   */
+  SITE_URL: string | null;
   /** PEM PKCS8 Ed25519 key that signs session JWTs; `null` outside production only. */
   JWT_PRIVATE_KEY: string | null;
   JWT_KEY_ID: string;
@@ -109,6 +129,10 @@ function isEd25519PrivateKey(pem: string): boolean {
  */
 const PUBLIC_ADDRESS = /^(0x[0-9a-fA-F]{40}|addr(_test)?1[02-9ac-hj-np-z]{20,200})$/;
 
+/** `address@domain` or `Display Name <address@domain>`. */
+const EMAIL_SENDER =
+  /^([^<>@\r\n]{1,64} <[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+>|[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+)$/;
+
 const masterWalletSchema = z
   .object({
     network: z.string().regex(new RegExp(NETWORK_ID_PATTERN)).max(64),
@@ -144,6 +168,16 @@ const envSchema: z.ZodType<AppEnv> = z
     BODY_LIMIT_BYTES: z.coerce.number().int().min(1024).max(1_048_576).default(16_384),
     REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(10_000),
     DEMO_ACCESS_CODE: z.string().min(12).max(64).nullable().default(null),
+    LOGIN_CODE_DELIVERY: z.enum(['access_code', 'email']).default('access_code'),
+    EMAIL_PROVIDER: z.enum(['simulated', 'resend']).default('simulated'),
+    RESEND_API_KEY: z.string().trim().min(1).max(256).nullable().default(null),
+    EMAIL_FROM: z.string().trim().regex(EMAIL_SENDER).max(254).nullable().default(null),
+    SITE_URL: z
+      .url({ protocol: /^https?$/ })
+      .max(256)
+      .transform((value) => value.replace(/\/+$/, ''))
+      .nullable()
+      .default(null),
     // Secret managers and .env files often carry the PEM on one line with literal `\n` escapes.
     JWT_PRIVATE_KEY: z
       .string()
@@ -215,18 +249,41 @@ const envSchema: z.ZodType<AppEnv> = z
         message: 'Set together with INGEST_SCHEDULER_SA_EMAIL'
       });
     }
+    if (env.EMAIL_PROVIDER === 'resend') {
+      for (const name of ['RESEND_API_KEY', 'EMAIL_FROM', 'SITE_URL'] as const) {
+        if (env[name] === null) {
+          context.addIssue({ code: 'custom', path: [name], message: 'Required with resend' });
+        }
+      }
+    }
     if (env.NODE_ENV !== 'production') {
       return;
     }
     if (env.INGEST_DEV_TRIGGER) {
       context.addIssue({ code: 'custom', path: ['INGEST_DEV_TRIGGER'], message: 'Not allowed' });
     }
-    for (const name of [
-      'DEMO_ACCESS_CODE',
+    // A login code sent to the simulated provider reaches nobody.
+    if (env.LOGIN_CODE_DELIVERY === 'email' && env.EMAIL_PROVIDER !== 'resend') {
+      context.addIssue({
+        code: 'custom',
+        path: ['EMAIL_PROVIDER'],
+        message: 'Email login needs resend'
+      });
+    }
+    if (env.SITE_URL?.startsWith('http://')) {
+      context.addIssue({
+        code: 'custom',
+        path: ['SITE_URL'],
+        message: 'HTTPS required in production'
+      });
+    }
+    const required = [
+      ...(env.LOGIN_CODE_DELIVERY === 'access_code' ? (['DEMO_ACCESS_CODE'] as const) : []),
       'JWT_PRIVATE_KEY',
       'MONGO_URI',
       'B2C_MONGO_URI'
-    ] as const) {
+    ] as const;
+    for (const name of required) {
       if (env[name] === null) {
         context.addIssue({ code: 'custom', path: [name], message: 'Required in production' });
       }
@@ -239,7 +296,9 @@ const envSchema: z.ZodType<AppEnv> = z
  * Fails fast at startup so a misconfigured revision never starts serving requests.
  * The error lists the offending variable names only, never their values. Empty values count as
  * unset, so a `.env` copied from `.env.example` falls back to the defaults. Production requires
- * `DEMO_ACCESS_CODE`, `JWT_PRIVATE_KEY` and `MONGO_URI`.
+ * `JWT_PRIVATE_KEY`, `MONGO_URI` and `B2C_MONGO_URI`, plus `DEMO_ACCESS_CODE` with the
+ * `access_code` login or `EMAIL_PROVIDER=resend` with the `email` login. `resend` requires
+ * `RESEND_API_KEY`, `EMAIL_FROM` and `SITE_URL`.
  *
  * @param source - Environment map to read, `process.env` by default.
  * @returns The validated configuration with defaults applied.
