@@ -3,7 +3,12 @@ import { type NetworkFilter, type NetworkId, networkProfile, networksFor } from 
 import type { Facts, MoneyKey } from './facts.js';
 import { countMetric } from './format.js';
 import { buildTopCountries, buildTopTokens, buildTvl } from './holdings.js';
-import { activityTotals, buildTradedTokens, buildVolumeByProduct } from './products.js';
+import {
+  activityTotals,
+  buildTradedTokens,
+  buildVolumeByProduct,
+  polymarketIn
+} from './products.js';
 import { resolveRange } from './ranges.js';
 import { type MetricGroup, provenanceOf, sourceFor } from './sources.js';
 import {
@@ -221,6 +226,9 @@ export function buildOverview(
       source.countsByAsset()
     ),
     topCountries: buildTopCountries(network, hourIndexOf(now), visible),
-    volumeByProduct: buildVolumeByProduct(activityTotals(totals.map((t) => t.facts)))
+    volumeByProduct: buildVolumeByProduct(
+      activityTotals(totals.map((t) => t.facts)),
+      network === 'all' ? polymarketIn(resolved.current) : null
+    )
   };
 }
