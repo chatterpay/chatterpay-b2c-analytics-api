@@ -119,6 +119,14 @@ paths:
                   type: string
                   format: email
                   maxLength: 254
+                locale:
+                  type: string
+                  enum:
+                    - en
+                    - es
+                    - br
+                  description: Language of the email (`br` is Brazilian Portuguese); `en` when
+                    omitted.
       responses:
         "202":
           description: Default Response
@@ -502,6 +510,7 @@ paths:
                         - resendCount
                         - lastSentAt
                         - createdBy
+                        - delivery
                       properties:
                         id:
                           type: string
@@ -537,6 +546,48 @@ paths:
                         createdBy:
                           type: string
                           description: Email of the admin that created the invite.
+                        delivery:
+                          type: object
+                          additionalProperties: false
+                          required:
+                            - state
+                            - attempts
+                            - lastAttemptAt
+                            - failure
+                          properties:
+                            state:
+                              type: string
+                              enum:
+                                - pending
+                                - simulated
+                                - sent
+                                - failed
+                              description: "Last send of the invite: `pending` while it runs, or when it was
+                                cut short; `simulated` when no email was sent;
+                                `sent` when the email provider accepted the
+                                message; `failed` when it refused it or did not
+                                answer after the retries."
+                            attempts:
+                              type: integer
+                              minimum: 0
+                            lastAttemptAt:
+                              type:
+                                - "null"
+                                - string
+                              format: date-time
+                            failure:
+                              type:
+                                - "null"
+                                - string
+                              enum:
+                                - rejected
+                                - rate_limited
+                                - unavailable
+                                - network
+                                - null
+                              description: Cause of a `failed` delivery; `null` otherwise.
+                          description: Delivery of the last email of the invite, from its creation or its
+                            last resend.
                   nextCursor:
                     type:
                       - "null"
@@ -578,7 +629,7 @@ paths:
                 $ref: "#/components/schemas/ApiError"
     post:
       operationId: createTeamInvite
-      summary: Invite an email with a role; delivery is simulated, idempotent by
+      summary: Invite an email with a role and email the invitation, idempotent by
         mutationId
       tags:
         - team
@@ -606,6 +657,14 @@ paths:
                 mutationId:
                   type: string
                   format: uuid
+                locale:
+                  type: string
+                  enum:
+                    - en
+                    - es
+                    - br
+                  description: Language of the email (`br` is Brazilian Portuguese); `en` when
+                    omitted.
       responses:
         "201":
           description: Default Response
@@ -624,6 +683,7 @@ paths:
                   - resendCount
                   - lastSentAt
                   - createdBy
+                  - delivery
                 properties:
                   id:
                     type: string
@@ -659,6 +719,48 @@ paths:
                   createdBy:
                     type: string
                     description: Email of the admin that created the invite.
+                  delivery:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - state
+                      - attempts
+                      - lastAttemptAt
+                      - failure
+                    properties:
+                      state:
+                        type: string
+                        enum:
+                          - pending
+                          - simulated
+                          - sent
+                          - failed
+                        description: "Last send of the invite: `pending` while it runs, or when it was
+                          cut short; `simulated` when no email was sent; `sent`
+                          when the email provider accepted the message; `failed`
+                          when it refused it or did not answer after the
+                          retries."
+                      attempts:
+                        type: integer
+                        minimum: 0
+                      lastAttemptAt:
+                        type:
+                          - "null"
+                          - string
+                        format: date-time
+                      failure:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - rejected
+                          - rate_limited
+                          - unavailable
+                          - network
+                          - null
+                        description: Cause of a `failed` delivery; `null` otherwise.
+                    description: Delivery of the last email of the invite, from its creation or its
+                      last resend.
         "400":
           description: Default Response
           content:
@@ -796,7 +898,7 @@ paths:
   /v1/team/invites/{id}/resend:
     post:
       operationId: resendTeamInvite
-      summary: Simulate a new delivery of a pending invite
+      summary: Email a pending invite again
       tags:
         - team
       parameters:
@@ -824,6 +926,7 @@ paths:
                   - resendCount
                   - lastSentAt
                   - createdBy
+                  - delivery
                 properties:
                   id:
                     type: string
@@ -859,6 +962,48 @@ paths:
                   createdBy:
                     type: string
                     description: Email of the admin that created the invite.
+                  delivery:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - state
+                      - attempts
+                      - lastAttemptAt
+                      - failure
+                    properties:
+                      state:
+                        type: string
+                        enum:
+                          - pending
+                          - simulated
+                          - sent
+                          - failed
+                        description: "Last send of the invite: `pending` while it runs, or when it was
+                          cut short; `simulated` when no email was sent; `sent`
+                          when the email provider accepted the message; `failed`
+                          when it refused it or did not answer after the
+                          retries."
+                      attempts:
+                        type: integer
+                        minimum: 0
+                      lastAttemptAt:
+                        type:
+                          - "null"
+                          - string
+                        format: date-time
+                      failure:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - rejected
+                          - rate_limited
+                          - unavailable
+                          - network
+                          - null
+                        description: Cause of a `failed` delivery; `null` otherwise.
+                    description: Delivery of the last email of the invite, from its creation or its
+                      last resend.
         "400":
           description: Default Response
           content:
@@ -920,6 +1065,7 @@ paths:
                   - resendCount
                   - lastSentAt
                   - createdBy
+                  - delivery
                 properties:
                   id:
                     type: string
@@ -955,6 +1101,48 @@ paths:
                   createdBy:
                     type: string
                     description: Email of the admin that created the invite.
+                  delivery:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - state
+                      - attempts
+                      - lastAttemptAt
+                      - failure
+                    properties:
+                      state:
+                        type: string
+                        enum:
+                          - pending
+                          - simulated
+                          - sent
+                          - failed
+                        description: "Last send of the invite: `pending` while it runs, or when it was
+                          cut short; `simulated` when no email was sent; `sent`
+                          when the email provider accepted the message; `failed`
+                          when it refused it or did not answer after the
+                          retries."
+                      attempts:
+                        type: integer
+                        minimum: 0
+                      lastAttemptAt:
+                        type:
+                          - "null"
+                          - string
+                        format: date-time
+                      failure:
+                        type:
+                          - "null"
+                          - string
+                        enum:
+                          - rejected
+                          - rate_limited
+                          - unavailable
+                          - network
+                          - null
+                        description: Cause of a `failed` delivery; `null` otherwise.
+                    description: Delivery of the last email of the invite, from its creation or its
+                      last resend.
         "400":
           description: Default Response
           content:
