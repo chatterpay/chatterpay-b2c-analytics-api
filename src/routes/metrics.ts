@@ -122,11 +122,18 @@ const count = { type: 'integer', minimum: 0 } as const;
 const ingestRunStatus = object({
   status: { type: 'string', enum: ['completed', 'partial'] },
   finishedAt: instant,
-  sources: object({
-    transactions: { type: 'string', enum: ['complete', 'partial'] },
-    prices: { type: 'string', enum: ['complete', 'failed', 'skipped', 'disabled'] },
-    balances: { type: 'string', enum: ['complete', 'partial', 'failed', 'disabled'] }
-  }),
+  // `polymarket` is optional: runs stored before the Polymarket fills were read have none.
+  sources: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['transactions', 'prices', 'balances'],
+    properties: {
+      transactions: { type: 'string', enum: ['complete', 'partial'] },
+      prices: { type: 'string', enum: ['complete', 'failed', 'skipped', 'disabled'] },
+      balances: { type: 'string', enum: ['complete', 'partial', 'failed', 'disabled'] },
+      polymarket: { type: 'string', enum: ['complete', 'partial', 'failed', 'disabled'] }
+    }
+  },
   valuation: { type: 'string', enum: ['market', 'none'] }
 });
 
@@ -240,7 +247,16 @@ const averageFeeBlock = block({
   previousTransactions: { type: ['integer', 'null'], minimum: 0 }
 });
 
-const polymarketVolumeBlock = block({ valueUsd: nullableDecimal });
+const polymarketVolumeBlock = block({
+  scope: {
+    type: 'string',
+    enum: ['all_networks'],
+    description: 'Fills are read on Polygon for every account; the network filter does not apply.'
+  },
+  valueUsd: nullableDecimal,
+  fills: { type: ['integer', 'null'], minimum: 0 },
+  readThrough: nullableInstant
+});
 
 const polymarketAccountsBlock = block({
   scope: {
