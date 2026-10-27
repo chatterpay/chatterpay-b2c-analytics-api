@@ -11,8 +11,11 @@ import { createRequiredIndexes } from '../src/store/mongo-schema.js';
 import { MongoStore } from '../src/store/mongo-store.js';
 import type { Store } from '../src/store/types.js';
 
-/** Test-only access code; never a real secret. */
+/** Test-only demo access code; never a real secret. */
 export const ACCESS_CODE = 'test-only-access-code-0001';
+/** Test-only login code keys, 256 bits each; never real secrets. */
+export const OTP_HMAC_SECRET = 'a'.repeat(64);
+export const OTP_EMAIL_HMAC_SECRET = 'b'.repeat(64);
 export const ADMIN_EMAIL = 'admin@example.com';
 export const SECOND_ADMIN_EMAIL = 'second-admin@example.com';
 export const VIEWER_EMAIL = 'viewer@example.com';
@@ -26,8 +29,10 @@ export interface Harness {
   privateKey: CryptoKey;
   /** Every response seen through {@link Harness.call}, to search for leaked secrets. */
   bodies: string[];
-  /** Emails handed to the default simulated provider; empty with another provider. */
+  /** Every message handed to the email provider, each retry included. */
   outbox: EmailMessage[];
+  /** Log lines of the app, written only when `LOG_LEVEL` is not `silent`. */
+  logs: string[];
   now(): Date;
   advance(ms: number): void;
   call(options: CallOptions): Promise<LightMyRequestResponse>;
@@ -72,8 +77,8 @@ async function createStore(): Promise<{ store: Store; dispose: () => Promise<voi
  * MongoDB when `MONGO_TEST_URI` is set.
  *
  * @param overrides - Extra environment values.
- * @param emailProvider - Email provider; a simulated one whose messages land in `outbox` by default.
- *   Retries between its attempts do not wait.
+ * @param emailProvider - Email provider; a simulated one by default. Every message it gets lands in
+ *   `outbox`, and retries between its attempts do not wait.
  * @returns The harness.
  */
 export async function createHarness(
@@ -85,6 +90,8 @@ export async function createHarness(
     NODE_ENV: 'test',
     LOG_LEVEL: 'silent',
     DEMO_ACCESS_CODE: ACCESS_CODE,
+    OTP_HMAC_SECRET,
+    OTP_EMAIL_HMAC_SECRET,
     JWT_PRIVATE_KEY: await exportPKCS8(privateKey),
     JWT_KEY_ID: 'test-key',
     ...overrides
@@ -95,12 +102,22 @@ export async function createHarness(
   await store.ensureUser(ADMIN_EMAIL, 'admin', START);
   await store.ensureUser(SECOND_ADMIN_EMAIL, 'admin', START);
   await store.ensureUser(VIEWER_EMAIL, 'viewer', START);
-  const simulated = new SimulatedEmailProvider();
+  const provider = emailProvider ?? new SimulatedEmailProvider();
+  const outbox: EmailMessage[] = [];
+  const recording: EmailProvider = {
+    name: provider.name,
+    send: (message) => {
+      outbox.push(message);
+      return provider.send(message);
+    }
+  };
+  const logs: string[] = [];
   const app = await buildApp(env, {
     store,
     clock: () => current,
-    emailProvider: emailProvider ?? simulated,
-    emailSleep: async () => {}
+    emailProvider: recording,
+    emailSleep: async () => {},
+    logStream: { write: (line) => logs.push(line) }
   });
   app.addHook('onClose', dispose);
   await app.ready();
@@ -112,7 +129,8 @@ export async function createHarness(
     env,
     privateKey,
     bodies,
-    outbox: simulated.outbox,
+    outbox,
+    logs,
     now: () => current,
     advance: (ms) => {
       current = new Date(current.getTime() + ms);
@@ -154,9 +172,21 @@ export async function requestCode(harness: Harness, email: string): Promise<stri
 }
 
 /**
- * Runs the full login flow with the test access code.
+ * Login code of the last email handed to the provider for the address.
  *
  * @param harness - App under test.
+ * @param email - Recipient.
+ * @returns The code; `undefined` when no code was sent to the address.
+ */
+export function sentCode(harness: Harness, email: string): string | undefined {
+  const message = harness.outbox.filter((item) => item.to === email).at(-1);
+  return message?.text.match(/\b(\d{8,10})\b/)?.[1];
+}
+
+/**
+ * Runs the full login flow with the code emailed to the member.
+ *
+ * @param harness - App under test, whose provider accepts the login email.
  * @param email - Member email.
  * @returns The session token.
  */
@@ -165,7 +195,7 @@ export async function login(harness: Harness, email: string): Promise<string> {
   const response = await harness.call({
     method: 'POST',
     url: '/v1/auth/verify-code',
-    payload: { challengeId, email, code: ACCESS_CODE }
+    payload: { challengeId, email, code: sentCode(harness, email) ?? '' }
   });
   if (response.statusCode !== 200) {
     throw new Error(`verify-code answered ${response.statusCode}`);
