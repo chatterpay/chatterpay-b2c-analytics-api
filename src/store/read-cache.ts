@@ -19,11 +19,11 @@ interface Entry<T> {
  * database round trip, and an API request makes three before it answers.
  *
  * A change made through the wrapped store drops the entries it affects on this instance at once:
- * a revoked session, a changed role, a removed member with all its sessions, a login, an
- * activation and any visibility change. A read that was in flight during such a change is
+ * a revoked session, a changed role, a removed or blocked member with all its sessions, a login,
+ * an activation and any visibility change. A read that was in flight during such a change is
  * returned but not cached. A change made by another instance reaches this one when the entry
- * expires, so a session revoked or a member removed elsewhere keeps its access here for up to
- * `ttlMs`. Missing sessions and users are not cached.
+ * expires, so a session revoked or a member removed or blocked elsewhere keeps its access here for
+ * up to `ttlMs`. Missing sessions and users are not cached.
  *
  * @param store - Store to wrap.
  * @param options - Lifetime of an entry and clock.
@@ -121,6 +121,14 @@ export function withReadCache(store: Store, options: ReadCacheOptions): Store {
       forgetUser(userId);
       try {
         return await store.removeUser(userId, at);
+      } finally {
+        forgetUser(userId);
+      }
+    },
+    async setBlocked(userId, blocked, at) {
+      forgetUser(userId);
+      try {
+        return await store.setBlocked(userId, blocked, at);
       } finally {
         forgetUser(userId);
       }
