@@ -4,6 +4,8 @@ import { type CryptoKey, exportPKCS8, generateKeyPair } from 'jose';
 import { MongoClient } from 'mongodb';
 import { buildApp } from '../src/app.js';
 import { type AppEnv, loadEnv } from '../src/config/env.js';
+import { SimulatedEmailProvider } from '../src/email/simulated-provider.js';
+import type { EmailMessage, EmailProvider } from '../src/email/types.js';
 import { MemoryStore } from '../src/store/memory-store.js';
 import { createRequiredIndexes } from '../src/store/mongo-schema.js';
 import { MongoStore } from '../src/store/mongo-store.js';
@@ -24,6 +26,8 @@ export interface Harness {
   privateKey: CryptoKey;
   /** Every response seen through {@link Harness.call}, to search for leaked secrets. */
   bodies: string[];
+  /** Emails handed to the default simulated provider; empty with another provider. */
+  outbox: EmailMessage[];
   now(): Date;
   advance(ms: number): void;
   call(options: CallOptions): Promise<LightMyRequestResponse>;
@@ -68,9 +72,14 @@ async function createStore(): Promise<{ store: Store; dispose: () => Promise<voi
  * MongoDB when `MONGO_TEST_URI` is set.
  *
  * @param overrides - Extra environment values.
+ * @param emailProvider - Email provider; a simulated one whose messages land in `outbox` by default.
+ *   Retries between its attempts do not wait.
  * @returns The harness.
  */
-export async function createHarness(overrides: NodeJS.ProcessEnv = {}): Promise<Harness> {
+export async function createHarness(
+  overrides: NodeJS.ProcessEnv = {},
+  emailProvider?: EmailProvider
+): Promise<Harness> {
   const { privateKey } = await generateKeyPair('EdDSA', { extractable: true });
   const env = loadEnv({
     NODE_ENV: 'test',
@@ -86,7 +95,13 @@ export async function createHarness(overrides: NodeJS.ProcessEnv = {}): Promise<
   await store.ensureUser(ADMIN_EMAIL, 'admin', START);
   await store.ensureUser(SECOND_ADMIN_EMAIL, 'admin', START);
   await store.ensureUser(VIEWER_EMAIL, 'viewer', START);
-  const app = await buildApp(env, { store, clock: () => current });
+  const simulated = new SimulatedEmailProvider();
+  const app = await buildApp(env, {
+    store,
+    clock: () => current,
+    emailProvider: emailProvider ?? simulated,
+    emailSleep: async () => {}
+  });
   app.addHook('onClose', dispose);
   await app.ready();
   const bodies: string[] = [];
@@ -97,6 +112,7 @@ export async function createHarness(overrides: NodeJS.ProcessEnv = {}): Promise<
     env,
     privateKey,
     bodies,
+    outbox: simulated.outbox,
     now: () => current,
     advance: (ms) => {
       current = new Date(current.getTime() + ms);
