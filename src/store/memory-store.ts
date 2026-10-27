@@ -14,6 +14,7 @@ import type {
   Invite,
   InviteCounts,
   InviteCursor,
+  InviteDelivery,
   InviteTransitionResult,
   InviteView,
   MemberMutationResult,
@@ -28,6 +29,15 @@ import type {
   TokenVisibilityResult,
   User
 } from './types.js';
+
+/** Delivery of an invite whose send has not ended. */
+const PENDING_DELIVERY: InviteDelivery = {
+  state: 'pending',
+  attempts: 0,
+  lastAttemptAt: null,
+  messageId: null,
+  failure: null
+};
 
 /** Counters kept before expired windows are swept. */
 const RATE_LIMIT_SWEEP_THRESHOLD = 10_000;
@@ -188,14 +198,20 @@ export class MemoryStore implements Store {
     }
   }
 
-  async createChallenge(email: string, now: Date, expiresAt: Date): Promise<Challenge> {
+  async createChallenge(
+    email: string,
+    now: Date,
+    expiresAt: Date,
+    codeHash: string | null
+  ): Promise<Challenge> {
     const challenge: Challenge = {
       id: randomUUID(),
       email,
       createdAt: now,
       expiresAt,
       attempts: 0,
-      consumedAt: null
+      consumedAt: null,
+      codeHash
     };
     this.challenges.set(challenge.id, challenge);
     return { ...challenge };
@@ -251,7 +267,9 @@ export class MemoryStore implements Store {
       createdBy: input.createdBy,
       resendCount: 0,
       lastSentAt: now,
-      mutationId: input.mutationId
+      mutationId: input.mutationId,
+      locale: input.locale,
+      delivery: PENDING_DELIVERY
     };
     this.invites.set(invite.id, invite);
     return { kind: 'created', invite: { ...invite } };
@@ -288,6 +306,7 @@ export class MemoryStore implements Store {
     invite.resendCount += 1;
     invite.lastSentAt = now;
     invite.status = 'simulated';
+    invite.delivery = PENDING_DELIVERY;
     return { kind: 'ok', invite: { ...invite } };
   }
 
@@ -301,6 +320,23 @@ export class MemoryStore implements Store {
     }
     invite.status = 'revoked';
     return { kind: 'ok', invite: { ...invite } };
+  }
+
+  async recordInviteDelivery(
+    id: string,
+    delivery: InviteDelivery,
+    now: Date
+  ): Promise<Invite | null> {
+    const invite = this.invites.get(id);
+    if (invite === undefined) {
+      return null;
+    }
+    invite.delivery = { ...delivery };
+    return readInvite(invite, now);
+  }
+
+  async hasPendingInvite(email: string, now: Date): Promise<boolean> {
+    return this.pendingInviteByEmail(email, now) !== undefined;
   }
 
   async appendActivity(event: Omit<ActivityEvent, 'id'>): Promise<ActivityEvent> {
