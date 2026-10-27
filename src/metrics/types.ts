@@ -28,6 +28,12 @@ export interface IngestRunStatus {
     prices: 'complete' | 'failed' | 'skipped' | 'disabled';
     /** Balance snapshot of the run. */
     balances: 'complete' | 'partial' | 'failed' | 'disabled';
+    /**
+     * Polygon reads of the Polymarket fills: `complete` up to the confirmed head, `partial` or
+     * `failed` when a limit or a failed request stopped them, `disabled` without an endpoint.
+     * Absent in runs stored before the fills were read.
+     */
+    polymarket?: 'complete' | 'partial' | 'failed' | 'disabled';
   };
   /**
    * USD valuation of the run (`USD_VALUATION`): `market` values balances and operations with
@@ -398,9 +404,20 @@ export interface AverageFeeBlock extends BlockStatus {
   previousTransactions: number | null;
 }
 
-/** USD volume of the Polymarket product in the range. */
+/**
+ * Executed volume of the Polymarket orders of the users in the range: pUSD paid by buys plus pUSD
+ * received by sells of their fills on Polygon. Polygon is outside the networks of the catalog, so
+ * the figure covers every user whatever the network filter (`scope: all_networks`) and is not in
+ * the total volume.
+ */
 export interface PolymarketVolumeBlock extends BlockStatus {
+  scope: 'all_networks';
+  /** `null` when `unavailable`. */
   valueUsd: string | null;
+  /** Fills counted; `null` when `unavailable`. */
+  fills: number | null;
+  /** Time of the last Polygon block read; `null` when no block was read. */
+  readThrough: string | null;
 }
 
 /**
