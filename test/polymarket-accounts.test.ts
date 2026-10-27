@@ -42,10 +42,26 @@ function user(id: string, polymarket: PolymarketAccountRecord | null | undefined
  * date, one with an address that is not an EVM address, one user without an account.
  */
 const USERS: User[] = [
-  user('a', { validAddress: true, createdAt: new Date('2026-10-20T12:30:00.000Z') }),
-  user('b', { validAddress: true, createdAt: new Date('2026-09-10T08:00:00.000Z') }),
-  user('c', { validAddress: true, createdAt: null }),
-  user('d', { validAddress: false, createdAt: new Date('2026-10-21T00:00:00.000Z') }),
+  user('a', {
+    validAddress: true,
+    address: '0x1111111111111111111111111111111111111111',
+    createdAt: new Date('2026-10-20T12:30:00.000Z')
+  }),
+  user('b', {
+    validAddress: true,
+    address: '0x1111111111111111111111111111111111111111',
+    createdAt: new Date('2026-09-10T08:00:00.000Z')
+  }),
+  user('c', {
+    validAddress: true,
+    address: '0x1111111111111111111111111111111111111111',
+    createdAt: null
+  }),
+  user('d', {
+    validAddress: false,
+    address: null,
+    createdAt: new Date('2026-10-21T00:00:00.000Z')
+  }),
   user('e', null)
 ];
 
@@ -95,7 +111,11 @@ describe('Polymarket accounts in the ingestion', () => {
 
   it('counts a user with several wallets once', async () => {
     const owner: User = {
-      ...user('f', { validAddress: true, createdAt: new Date('2026-10-20T12:30:00.000Z') }),
+      ...user('f', {
+        validAddress: true,
+        address: '0x1111111111111111111111111111111111111111',
+        createdAt: new Date('2026-10-20T12:30:00.000Z')
+      }),
       wallets: [
         { chainId: '84532', address: '0xf1' },
         { chainId: '534351', address: '0xf2' }
@@ -154,7 +174,7 @@ describe('Polymarket accounts block', () => {
     );
     expect(all.polymarketVolume).toMatchObject({
       availability: 'unavailable',
-      reason: 'not_recorded',
+      reason: 'not_configured',
       valueUsd: null
     });
     const polymarketFees = all.feesByProduct.items.find(
