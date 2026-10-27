@@ -1,6 +1,7 @@
 import type { NetworkId } from '../metrics/catalog.js';
 import { formatUnits } from '../metrics/decimal.js';
 import type { NativeCoverage, NetworkReadReason, UsdValuation } from '../metrics/types.js';
+import { isBlockfrost, KOIOS_BATCH_SIZE, MULTICALL_BATCH_SIZE } from './balance-reader.js';
 import type {
   BalanceReader,
   BalanceSnapshot,
@@ -67,6 +68,13 @@ export type NetworkRead = Required<SnapshotNetwork> & {
   durationMs: number;
   /** Assets held by the user wallets of the network without a USD value. */
   unpricedAssets: number;
+  /**
+   * Requests a full read of the network takes, before any is sent: one `eth_call` per
+   * {@link MULTICALL_BATCH_SIZE} balances on EVM, one per address on Blockfrost and one per
+   * {@link KOIOS_BATCH_SIZE} addresses on Koios, which also takes one per additional page of UTxOs
+   * that is not known in advance. Zero when no request is sent for the network.
+   */
+  plannedCalls: number;
 };
 
 /** Result of {@link takeBalanceSnapshot}. */
@@ -225,8 +233,16 @@ function unreadReason(
 
 /** The fields of a network read that the snapshot stores. */
 function storedRow(row: NetworkRead): SnapshotNetwork {
-  const { chainId, endpointPresent, startedAt, finishedAt, durationMs, unpricedAssets, ...stored } =
-    row;
+  const {
+    chainId,
+    endpointPresent,
+    startedAt,
+    finishedAt,
+    durationMs,
+    unpricedAssets,
+    plannedCalls,
+    ...stored
+  } = row;
   return stored;
 }
 
@@ -361,22 +377,32 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
     const masterAddresses = masters.map((wallet) => normalize(wallet.address));
 
     let balances: WalletBalances = new Map();
+    let plannedCalls = 0;
     const callsBefore = input.budget.used;
     const failedBefore = input.budget.failed;
     if (supported && endpoint !== undefined) {
       const addresses = [...new Set([...holders, ...masterAddresses])];
-      balances =
-        endpoint.family === 'cardano'
-          ? await readCardano(input.reader, endpoint.url, addresses, assets, input.budget)
-          : await readEvm(
-              input.reader,
-              endpoint.url,
-              addresses,
-              assets,
-              // With the native coin in the list every address already reads it.
-              new Set(native === null ? masterAddresses : []),
-              input.budget
-            );
+      if (endpoint.family === 'cardano') {
+        plannedCalls = isBlockfrost(endpoint.url)
+          ? addresses.length
+          : Math.ceil(addresses.length / KOIOS_BATCH_SIZE);
+        balances = await readCardano(input.reader, endpoint.url, addresses, assets, input.budget);
+      } else {
+        // With the native coin in the list every address already reads it.
+        const withNative = new Set(native === null ? masterAddresses : []);
+        const queries =
+          addresses.length * assets.length +
+          addresses.filter((address) => withNative.has(address)).length;
+        plannedCalls = Math.ceil(queries / MULTICALL_BATCH_SIZE);
+        balances = await readEvm(
+          input.reader,
+          endpoint.url,
+          addresses,
+          assets,
+          withNative,
+          input.budget
+        );
+      }
     }
 
     const read = holders.filter((holder) => balances.has(holder));
@@ -430,7 +456,8 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
       startedAt: new Date(startedAt).toISOString(),
       finishedAt: new Date(finishedAt).toISOString(),
       durationMs: finishedAt - startedAt,
-      unpricedAssets: held.filter((holding) => holding.valueCents === null).length
+      unpricedAssets: held.filter((holding) => holding.valueCents === null).length,
+      plannedCalls
     });
 
     masters.forEach((wallet, position) => {
