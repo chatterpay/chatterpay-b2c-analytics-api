@@ -21,6 +21,8 @@ yarn dev
 
 The server listens on `http://127.0.0.1:4001`. `yarn dev` loads `.env` when it exists; outside production every variable has a default or is optional, see `.env.example` for the names and [Configuration](#configuration) for the rules.
 
+Local runs use the `simulated` email provider, which sends nothing, so an emailed code reaches nobody. Sign-in locally goes through the demo accounts: `DEMO_LOGIN_ENABLED=true`, `DEMO_LOGIN_EMAILS` with the demo members of the local database and `DEMO_ACCESS_CODE`. `OTP_HMAC_SECRET` and `OTP_EMAIL_HMAC_SECRET` go in `.env` as described in [Login code keys](#login-code-keys); without them each restart generates new keys.
+
 | Script | Purpose |
 |---|---|
 | `yarn dev` | Watch mode with `tsx` |
@@ -47,13 +49,16 @@ The contract lives in [`openapi/openapi.yaml`](openapi/openapi.yaml) (OpenAPI 3.
 | `GET /v1/metrics/users?network&granularity` | admin, viewer | Daily/monthly/yearly active users, new and total users, retention cohorts; new wallets, retention at 1/3/6 months |
 | `GET /v1/metrics/revenue?network&range` | admin, viewer | Transfer and swap fees, volume, swap volume, network and asset breakdowns; average fee per transaction, Polymarket volume, fees by product, master wallets |
 | `POST /v1/internal/ingest` | scheduler service account | One ingestion run; returns its summary. 503 when not configured, 401 for any other caller |
-| `POST /v1/auth/request-code` | public (BFF) | Opens a login challenge for `{ email, locale? }`; 202 `{ challengeId, expiresAt }`. With the email login it emails the code |
-| `POST /v1/auth/verify-code` | public (BFF) | Exchanges challenge, email and access code for `{ token, expiresAt, user }` |
+| `POST /v1/auth/request-code` | public (BFF) | Opens a login challenge for `{ email, locale? }` and emails the code; 202 `{ challengeId, expiresAt, delivery, codeLength }`, 429 `RATE_LIMITED` with `Retry-After` |
+| `POST /v1/auth/verify-code` | public (BFF) | Exchanges challenge, email and code for `{ token, expiresAt, user }` |
 | `GET /v1/auth/me` | admin, viewer | Member and session expiry behind the bearer token |
 | `POST /v1/auth/logout` | admin, viewer | Revokes the session; 204 |
-| `GET /v1/team/members` | admin | Active members sorted by email, with `name`, `lastLoginAt` and `lastActivityAt` |
+| `GET /v1/team/members` | admin | Active members, blocked ones included, sorted by email, with `name`, `status` (`active` or `blocked`), `blockedAt`, `lastLoginAt`, `lastActivityAt` and `loginLockedUntil` |
 | `PATCH /v1/team/members/:id` | admin | Changes the role `{ role }`; 409 when no active admin would remain |
-| `DELETE /v1/team/members/:id` | admin | Removes the member and revokes its sessions; 204, 409 when no active admin would remain |
+| `DELETE /v1/team/members/:id` | admin | Removes the member and revokes its sessions and open login code; 204, 409 when no active admin would remain |
+| `POST /v1/team/members/:id/block` | admin | Blocks the member and revokes its sessions and open login code; 200 with the member, 403 `CANNOT_BLOCK_SELF`, 409 when no unblocked admin would remain |
+| `POST /v1/team/members/:id/unblock` | admin | Lifts the block; 200 with the member. Opens no session and brings back no session or code |
+| `POST /v1/team/members/:id/unlock-login` | admin | Clears the automatic wait between login codes of the member; 204 |
 | `GET /v1/team/invites?view&limit&cursor` | admin | Invites of one view, newest first: `pending` (default) or `history` (accepted, revoked and expired); `limit` 1-100, default 25; `nextCursor` of the next page of the same view and `counts` of both views |
 | `POST /v1/team/invites` | admin | Creates an invite `{ email, role, mutationId, locale? }` and emails it; 201 with its `delivery`, idempotent by `mutationId` (a replay sends no email), 409 for members and pending invites |
 | `POST /v1/team/invites/:id/resend` | admin | Emails a pending invite again; 409 when not pending |
@@ -101,36 +106,56 @@ Every error response has the shape `{ code, message, requestId }`. The `x-reques
 
 ## Authentication
 
-1. The BFF calls `request-code` with the email and forwards the browser IP in `x-client-ip` (used only when it is an IPv4 or IPv6 literal; otherwise the socket address applies). A challenge is created for every email, members or not, so the answer reveals nothing. The source of the code depends on `LOGIN_CODE_DELIVERY`:
-   - `access_code` (default): no email is sent and no code is generated; the code is the shared `DEMO_ACCESS_CODE`.
-   - `email`: every challenge gets a six-digit code from the CSPRNG, stored as a salted SHA-256 digest (`codeHash`), never in clear. The code is emailed, in the `locale` of the request (`en`, `es` or `br`, default `en`), only to active members and to emails with a pending invite; other emails get the same 202 and no email. The idempotency key is `login-code/<challengeId>`. A failed delivery still answers 202 and logs the challenge id and the failure, without the email or the code. The send happens before the answer, so its duration is visible to the caller.
-2. The BFF calls `verify-code` with the challenge id, the email and the code. Any failure answers the same 401 `Invalid or expired code`: unknown, expired or consumed challenge, email different from the challenge, wrong code, or an email that is neither an active member nor holder of a pending invite. A challenge admits 5 attempts. The shared code is compared in constant time (HMAC-SHA256 with a per-process key, then `timingSafeEqual`); an emailed code is compared with the digest of its challenge in constant time, and the shared code does not open a session. Without `DEMO_ACCESS_CODE` the `access_code` login answers 503.
-3. On success the challenge is consumed. An email without an active member but with a pending invite becomes a member with the invite role and the invite turns `accepted`. With the `email` login this happens only after the code sent to that email was verified, which proves that the person owns it. The API stores a session (`jti`, expiry `SESSION_TTL_MINUTES`) and returns a JWT signed with EdDSA, header `kid`, claims `iss`, `aud`, `sub` (user id), `jti`, `role`, `iat`, `exp`.
-4. Protected routes take `Authorization: Bearer <jwt>`. The token is verified with the public key (EdDSA only), issuer and audience; then the session must exist, be neither revoked nor expired, and belong to an active member. The role applied is the current role in the store, not the `role` claim. The session and member reads are cached in memory for 30 seconds and dropped on the instance that revokes a session, changes a role or removes a member, so those changes apply to its next request and to the other instances within 30 seconds.
+1. The BFF calls `request-code` with the email and forwards the browser IP in `x-client-ip` (used only when it is an IPv4 or IPv6 literal; otherwise the socket address applies). Every email gets the same 202 `{ challengeId, expiresAt, delivery: 'email', codeLength }` and goes through the same limits, members or not, so the answer reveals nothing. A code is generated and emailed only to unblocked active members and to emails with a pending invite:
+   - The code has `OTP_CODE_DIGITS` digits (default 8) from the CSPRNG and lives `OTP_TTL_SECONDS` (default 300). It is emailed in the `locale` of the request (`en`, `es` or `br`, default `en`) with the idempotency key `login-code/<challengeId>`.
+   - One challenge per email: a new code replaces the open one. The challenge stores neither the code nor the email: its `_id` is HMAC-SHA256 of the normalized email under `OTP_EMAIL_HMAC_SECRET`, and `codeDigest` is HMAC-SHA256 under `OTP_HMAC_SECRET` of the challenge id, the email and the code, so a code verifies only for the challenge and email it was issued for. `keyVersion` is a fingerprint of the code key.
+   - The send happens before the challenge is stored. A failed delivery still answers 202, keeps the previous code valid, does not count against the limits and logs the challenge id and the failure, without the email or the code. The duration of the send is visible to the caller.
+2. The BFF calls `verify-code` with the challenge id, the email and the code. Any failure answers the same 401 `Invalid or expired code`: unknown, expired, consumed, replaced or revoked challenge, email or challenge different from the one of the code, wrong code, code issued under another `OTP_HMAC_SECRET`, blocked member, or an email that is neither an active member nor holder of a pending invite. A challenge admits `OTP_MAX_ATTEMPTS` (default 5) wrong codes and then stops accepting any; each attempt is counted with a conditional update, so concurrent verifications of one code open one session. Codes are compared in constant time.
+3. On success the challenge is consumed and the waits and code counters of the email are cleared. An email without an active member but with a pending invite becomes a member with the invite role and the invite turns `accepted`, only after the code sent to that email was verified. The API stores a session (`jti`, expiry `SESSION_TTL_MINUTES`) and returns a JWT signed with EdDSA, header `kid`, claims `iss`, `aud`, `sub` (user id), `jti`, `role`, `iat`, `exp`.
+4. Protected routes take `Authorization: Bearer <jwt>`. The token is verified with the public key (EdDSA only), issuer and audience; then the session must exist, be neither revoked nor expired, and belong to an active, unblocked member. The role applied is the current role in the store, not the `role` claim. The session and member reads are cached in memory for 30 seconds and dropped on the instance that revokes a session, changes a role, blocks or removes a member, so those changes apply to its next request and to the other instances within 30 seconds.
 
-| Limit | Scope | Window | Answer |
-|---|---|---|---|
-| 5 `request-code` | normalized email | 15 min | 429 `RATE_LIMITED` with `Retry-After` |
-| 20 `request-code` | client IP | 15 min | 429 with `Retry-After` |
-| 30 `verify-code` | client IP | 15 min | 429 with `Retry-After` |
-| 5 attempts | challenge | challenge lifetime | 401, the challenge stops accepting codes |
+| Limit | Scope | Answer |
+|---|---|---|
+| Wait between codes: none before the 2nd beyond `OTP_RESEND_COOLDOWN_SECONDS` (60 s), then the steps of `OTP_LOCKOUT_STEPS_SECONDS`: 5 min before the 3rd, 15 min before the 4th and later ones, never above `OTP_MAX_LOCKOUT_SECONDS` (15 min) | normalized email | 429 `RATE_LIMITED` with `Retry-After` |
+| `OTP_SENDS_PER_EMAIL_HOUR` (5) per hour and `OTP_SENDS_PER_EMAIL_DAY` (10) per 24 hours | email and client IP | 429 with `Retry-After` |
+| `OTP_REQUESTS_PER_IP` (30) `request-code` per 15 min | client IP | 429 with `Retry-After` |
+| `OTP_VERIFICATIONS_PER_IP` (60) `verify-code` per 15 min | client IP | 429 with `Retry-After` |
+| `OTP_MAX_ATTEMPTS` (5) wrong codes | challenge | 401, the challenge stops accepting codes |
+
+The wait counts from the issue of the previous code, so requests refused during it do not extend it. The email state is forgotten 24 hours after its last code, and cleared by a login or by an admin through `unlock-login`. The code caps count per email and client IP, so requests from one IP cannot use up the codes of an email asked from another; the wait per email bounds the codes an email gets from any number of IPs. Emails and IPs reach the `rate_limits` keys only as HMAC identifiers. `unlock-login` does not reset the per-IP counters.
+
+Blocking: `block` sets `blockedAt` on the member, revokes its sessions and its open code, and refuses its codes and sessions until an admin calls `unblock`; no limit expiry lifts it. `unblock` opens no session and brings back neither the revoked sessions nor the revoked code. A blocked member keeps its email, so it cannot be invited again. An admin cannot block itself, and a block, role change or removal that would leave no unblocked active admin answers 409. The UI states are `ACTIVE`, `ADMIN_BLOCKED` (`status: blocked`), `TEMPORARILY_RATE_LIMITED` (`loginLockedUntil` set) and `DELETED` (removed members are not listed and cannot sign in).
+
+Demo accounts: with `DEMO_LOGIN_ENABLED=true`, the unblocked active members whose email is in `DEMO_LOGIN_EMAILS` get a challenge verified against `DEMO_ACCESS_CODE` instead of an emailed code, and the answer carries `delivery: 'access_code'` and `codeLength: null`. The other emails keep the emailed code, and the demo code opens no session for them. The flag is off by default, and production refuses it unless the Cloud Run service name (`K_SERVICE`) ends in `-develop`.
+
+### Login code keys
+
+`OTP_HMAC_SECRET` and `OTP_EMAIL_HMAC_SECRET` are dedicated keys of at least 256 bits from a CSPRNG, written as hex or base64, different from each other and from any other secret of the system (`JWT_PRIVATE_KEY`, session keys, Resend or OAuth credentials). Production refuses to start without them; outside production an unset key is generated at startup with a warning, and codes and limits end on restart.
+
+Provisioning: each value is generated with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` on the machine that stores it, without copying it to logs or tickets. Locally it goes in `.env`, which Git ignores. In Cloud Run each key is a Secret Manager secret per environment, read through `secretKeyRef` in the service YAML; develop and main use different values.
+
+Rotation:
+
+- `OTP_HMAC_SECRET`: open codes stop verifying (401) and the member asks for a new one; limits and sessions are not affected.
+- `OTP_EMAIL_HMAC_SECRET`: open challenges become unreachable and expire through their TTL, and the waits and code counters start over for every email and IP; sessions are not affected.
+- Procedure: add a secret version with the new value, deploy a revision that reads it, and disable the old version once the new revision serves. Rotate after any suspected exposure.
 
 Members carry `name` when the `users` document of the member has a non-empty `name`, set by an operator; otherwise `null`, never derived from the email. `lastActivityAt` is the instant of the latest activity event the member performed, separate from `lastLoginAt`.
 
-Team rules: invites last 7 days and are reported `expired` afterwards. A pending invite carries status `simulated` whatever its delivery, the value persisted invites and the unique pending index use. Role changes and removals never leave the team without an active admin. The activity log records `login`, `login_failed` (only for emails of active members), `logout`, `invite_created`, `invite_resent`, `invite_revoked`, `invite_accepted`, `role_changed` and `member_removed`; it never holds codes or tokens.
+Team rules: invites last 7 days and are reported `expired` afterwards. A pending invite carries status `simulated` whatever its delivery, the value persisted invites and the unique pending index use. Role changes, blocks and removals never leave the team without an unblocked active admin. The activity log records `login`, `login_failed` (only for emails of active members), `logout`, `invite_created`, `invite_resent`, `invite_revoked`, `invite_accepted`, `role_changed`, `member_removed`, `member_blocked`, `member_unblocked` and `login_lockout_cleared`; it never holds codes or tokens.
 
 ## Emails
 
 Invitations and login codes go through `EmailService`, which renders the templates (`src/email/templates.ts`, English, Spanish and Brazilian Portuguese), derives the idempotency keys and applies the retry policy. The routes depend on the `EmailProvider` contract, never on a provider:
 
-- `simulated` (default): keeps the last 100 messages in memory and sends nothing; deliveries report `simulated`. Production refuses it with the `email` login.
+- `simulated` (default): keeps the last 100 messages in memory and sends nothing; deliveries report `simulated`. Production refuses it.
 - `resend`: `POST https://api.resend.com/emails` with `fetch` and the `Idempotency-Key` header; Resend accepts each key once for 24 hours. It needs `RESEND_API_KEY` (a sending-only key restricted to the sender domain), `EMAIL_FROM` on the domain verified in Resend and `SITE_URL` for the links.
 
 The templates live in the code, not in Resend, so the simulated provider and the tests render the same copy that is sent.
 
 Retries: up to 3 requests per message, 0.5 s and 1 s apart, or the `retry-after` of the provider up to 5 s; a longer `retry-after` ends the send as failed. Network errors, 429, 5xx and 409 `concurrent_idempotent_requests` are retried with the same idempotency key, so a request that reached Resend but lost its answer is not delivered twice. Any other 4xx (unverified domain, invalid sender or recipient, a key reused with another payload) is a rejection and is not retried.
 
-Invites: creating or resending one stores it first, then sends it with the key `invite/<id>/<resendCount>` and records the outcome in `delivery` (`state`, `attempts`, `lastAttemptAt`, `failure`; the provider message id is stored and not exposed). `state` is `pending` from the store write until the send ends, then `simulated`, `sent` or `failed`. A failed send answers 201 or 200 with the invite, which stays pending; the admin resends it. An invite left `pending` lost its send when the instance stopped, and a resend sends it again. Revoking sends no email. Invites stored before the emails read as `simulated` with `lastSentAt` as `lastAttemptAt` and locale `en`; challenges without `codeHash` match no emailed code.
+Invites: creating or resending one stores it first, then sends it with the key `invite/<id>/<resendCount>` and records the outcome in `delivery` (`state`, `attempts`, `lastAttemptAt`, `failure`; the provider message id is stored and not exposed). `state` is `pending` from the store write until the send ends, then `simulated`, `sent` or `failed`. A failed send answers 201 or 200 with the invite, which stays pending; the admin resends it. An invite left `pending` lost its send when the instance stopped, and a resend sends it again. Revoking sends no email. Invites stored before the emails read as `simulated` with `lastSentAt` as `lastAttemptAt` and locale `en`. Challenges stored before the HMAC keys, with a random `_id` and the email in clear, match no request and expire through their TTL.
 
 ## Configuration
 
@@ -142,9 +167,21 @@ Invites: creating or resending one stores it first, then sends it with the key `
 | `HOST` / `PORT` | `127.0.0.1` / `4001` | The container sets `0.0.0.0` / `8080` |
 | `LOG_LEVEL` | `info` | |
 | `BODY_LIMIT_BYTES` / `REQUEST_TIMEOUT_MS` | `16384` / `10000` | |
-| `DEMO_ACCESS_CODE` | unset | At least 12 characters. Required in production with the `access_code` login; unset answers 503 on `verify-code` there |
-| `LOGIN_CODE_DELIVERY` | `access_code` | `access_code` (shared `DEMO_ACCESS_CODE`) or `email` (one-time code sent by email). Production requires `EMAIL_PROVIDER=resend` with `email` |
-| `EMAIL_PROVIDER` | `simulated` | `simulated` sends nothing; `resend` requires the three variables below |
+| `OTP_HMAC_SECRET` | unset | Key of the login code verifiers, at least 32 bytes as hex or base64; secret. Required in production; unset generates an ephemeral key at startup (warning logged) |
+| `OTP_EMAIL_HMAC_SECRET` | unset | Key of the email and IP identifiers of challenges and counters; same format, different from `OTP_HMAC_SECRET`; secret. Required in production |
+| `OTP_CODE_DIGITS` | `8` | 8-10 |
+| `OTP_TTL_SECONDS` | `300` | 60-600 |
+| `OTP_MAX_ATTEMPTS` | `5` | Wrong codes per challenge, 1-10 |
+| `OTP_RESEND_COOLDOWN_SECONDS` | `60` | Minimum wait between two codes of an email, 10-600 |
+| `OTP_LOCKOUT_STEPS_SECONDS` | `0,300,900` | Comma list: wait before the 2nd, 3rd... code; the last step repeats. None above `OTP_MAX_LOCKOUT_SECONDS` |
+| `OTP_MAX_LOCKOUT_SECONDS` | `900` | 60-900 |
+| `OTP_SENDS_PER_EMAIL_HOUR` / `OTP_SENDS_PER_EMAIL_DAY` | `5` / `10` | Codes per email and client IP per hour and per 24 hours; the daily cap is not below the hourly one |
+| `OTP_REQUESTS_PER_IP` / `OTP_VERIFICATIONS_PER_IP` | `30` / `60` | `request-code` and `verify-code` calls per client IP per 15 minutes |
+| `DEMO_LOGIN_ENABLED` | `false` | `true` lets the emails of `DEMO_LOGIN_EMAILS` sign in with `DEMO_ACCESS_CODE`, with no email. Production refuses it unless `K_SERVICE` ends in `-develop` |
+| `DEMO_LOGIN_EMAILS` | unset | Comma list, at most 10, of emails on a `demo.` subdomain. Required with `DEMO_LOGIN_ENABLED` |
+| `DEMO_ACCESS_CODE` | unset | At least 12 characters; secret. Required with `DEMO_LOGIN_ENABLED`, unused otherwise |
+| `K_SERVICE` | unset | Set by Cloud Run to the service name; read only for the demo rule |
+| `EMAIL_PROVIDER` | `simulated` | `simulated` sends nothing; `resend` requires the three variables below. Production requires `resend` |
 | `RESEND_API_KEY` | unset | Sending-only Resend key restricted to the sender domain; secret |
 | `EMAIL_FROM` | unset | `address@domain` or `Name <address@domain>`, on the domain verified in Resend |
 | `SITE_URL` | unset | Origin of the site for the email links (trailing slash removed); HTTPS in production. Outside production unset links to `http://localhost:4000` |
@@ -152,7 +189,6 @@ Invites: creating or resending one stores it first, then sends it with the key `
 | `JWT_KEY_ID` | `dev` | `kid` header |
 | `JWT_ISSUER` / `JWT_AUDIENCE` | `chatterpay-analytics-api` / `chatterpay-analytics-site` | |
 | `SESSION_TTL_MINUTES` | `120` | 5-1440 |
-| `CHALLENGE_TTL_MINUTES` | `10` | 1-60 |
 | `MONGO_URI` | unset | `mongodb://` or `mongodb+srv://`. Required in production; unset uses the in-memory store |
 | `MONGO_DB_NAME` | `chatterpay-analytics-dev` | Analytics-only database |
 | `B2C_MONGO_URI` | unset | Connection string of the ChatterPay B2C database, with the database in its path; its `blockchains` collection lists the networks of the environment. Required in production; unset reuses `MONGO_URI` |
@@ -181,10 +217,10 @@ Invites: creating or resending one stores it first, then sends it with the key `
 |---|---|---|
 | `users` | Members; removed members keep their record | `email_active_unique` (unique `email` where `status` is `active`), `status_role` |
 | `sessions` | Issued session JWTs by `jti` | `user_id`, `expires_at_ttl` |
-| `login_challenges` | Login challenges; never the code in clear, only the salted digest of an emailed code | `expires_at_ttl` |
+| `login_challenges` | One open challenge per email, keyed by the HMAC identifier of the email: challenge id, kind, code verifier and key version, attempts. Never the code or the email in clear | `expires_at_ttl` |
 | `invites` | Invites with the delivery of their last send | `email_pending_unique` (unique `email` where `status` is `simulated`), `mutation_id_unique`, `created_at` |
 | `activity` | Login and team events | `at` |
-| `rate_limits` | Fixed-window counters | `reset_at_ttl` |
+| `rate_limits` | Fixed-window counters and the login code state of each email (codes issued, last issue, version), keyed by HMAC identifiers of emails and IPs | `reset_at_ttl` |
 | `ingest_state` | Ingestion checkpoints (`checkpoints`, with `walletsTrackingSince` and the Polygon block reads of the Polymarket fills: `polymarketNextBlock`, `polymarketFrom`, `polymarketThrough`), run lock (`lock`) and last aggregate build (`aggregates`, with the run status, the wallets per network and the Polymarket fills per hour with their coverage) | default |
 | `ingest_snapshots` | One document per run, keyed by the run start: balance totals per network and asset, read coverage per network, master wallet balances, and user counts per network and country and per set of networks and country. No per-wallet balance and no phone number | default |
 | `wallet_first_seen` | First run that observed each wallet, keyed by chain id and address, with `bounded` (an earlier run had not seen it); inserted once, never updated | default |
@@ -291,8 +327,8 @@ Valuation and counting (`src/metrics/live.ts`):
 | `_SERVICE_NAME` | `chatterpay-analytics-back-develop` or `chatterpay-analytics-back-main` |
 | `_DEPLOY_REGION` / `_AR_HOSTNAME` / `_TRIGGER_ID` | Region, Artifact Registry host, trigger id |
 
-- Server variables (`LOG_LEVEL`, `BODY_LIMIT_BYTES`, `REQUEST_TIMEOUT_MS`, `JWT_KEY_ID`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SESSION_TTL_MINUTES`, `CHALLENGE_TTL_MINUTES`, `MONGO_DB_NAME` and the `INGEST_*`, `PRICES_*`, `BALANCES_*`, `POLYMARKET_*`, `MASTER_WALLETS` and `METRICS_*` variables) are defined in the Cloud Run service YAML. The image only sets `NODE_ENV`, `HOST` and `PORT`; the deploy keeps the variables already defined on the service.
-- Secrets never enter the image: `DEMO_ACCESS_CODE`, `JWT_PRIVATE_KEY` and `MONGO_URI` come from Secret Manager through `secretKeyRef` in the Cloud Run service YAML, and so does `CARDANO_PROVIDER_API_KEY` when a Cardano network reads through Blockfrost. With `EMAIL_PROVIDER=resend`, `RESEND_API_KEY` reads `CHATTERPAY_RESEND_API_KEY_DEV` / `_MAIN` the same way, and `LOGIN_CODE_DELIVERY`, `EMAIL_PROVIDER`, `EMAIL_FROM` and `SITE_URL` are plain variables of the service YAML. `POLYMARKET_POLYGON_RPC_URL` and `POLYMARKET_MAX_CALLS_PER_RUN` are plain variables of the service YAML; an endpoint whose URL carries a key goes through `secretKeyRef` instead. `MONGO_URI` reads `ANALYTICS_BACKEND_MONGO_CONN_STRING_DEV` / `_MAIN`: the connection string of a database user whose only role is `readWrite` on the analytics database of the same Atlas cluster as the backend.
+- Server variables (`LOG_LEVEL`, `BODY_LIMIT_BYTES`, `REQUEST_TIMEOUT_MS`, `JWT_KEY_ID`, `JWT_ISSUER`, `JWT_AUDIENCE`, `SESSION_TTL_MINUTES`, `MONGO_DB_NAME`, the `OTP_*` limits and the `INGEST_*`, `PRICES_*`, `BALANCES_*`, `POLYMARKET_*`, `MASTER_WALLETS` and `METRICS_*` variables) are defined in the Cloud Run service YAML. The image only sets `NODE_ENV`, `HOST` and `PORT`; the deploy keeps the variables already defined on the service.
+- Secrets never enter the image: `OTP_HMAC_SECRET`, `OTP_EMAIL_HMAC_SECRET`, `DEMO_ACCESS_CODE`, `JWT_PRIVATE_KEY` and `MONGO_URI` come from Secret Manager through `secretKeyRef` in the Cloud Run service YAML, and so does `CARDANO_PROVIDER_API_KEY` when a Cardano network reads through Blockfrost. With `EMAIL_PROVIDER=resend`, `RESEND_API_KEY` reads `CHATTERPAY_RESEND_API_KEY_DEV` / `_MAIN` the same way, and `EMAIL_PROVIDER`, `EMAIL_FROM`, `SITE_URL`, `DEMO_LOGIN_ENABLED` and `DEMO_LOGIN_EMAILS` are plain variables of the service YAML. The main service leaves `DEMO_LOGIN_ENABLED` unset. `POLYMARKET_POLYGON_RPC_URL` and `POLYMARKET_MAX_CALLS_PER_RUN` are plain variables of the service YAML; an endpoint whose URL carries a key goes through `secretKeyRef` instead. `MONGO_URI` reads `ANALYTICS_BACKEND_MONGO_CONN_STRING_DEV` / `_MAIN`: the connection string of a database user whose only role is `readWrite` on the analytics database of the same Atlas cluster as the backend.
 - The service name selects the VPC: `*-develop` deploys on `chatterpay-dev-vpc` / `chatterpay-dev-run`, `*-main` on `chatterpay-main-vpc` / `chatterpay-main-run`; any other name stops the build.
 - The service sits behind the HTTPS load balancer on `dev.back.analytics.chatterpay.net` and `back.analytics.chatterpay.net`, with ingress `internal-and-cloud-load-balancing`. The deploy uses `--no-allow-unauthenticated`: only the service account of the site has `roles/run.invoker`. The BFF sends a Google-signed ID token whose audience is the API domain, declared on the service as a custom audience (`run.googleapis.com/custom-audiences`).
 - The container listens on `0.0.0.0:8080` as the non-root `node` user.
