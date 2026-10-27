@@ -1,8 +1,28 @@
 import { randomUUID } from 'node:crypto';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { createCodeMatcher } from '../auth/access-code.js';
 import { clientIp } from '../auth/client-ip.js';
-import { generateLoginCode, hashLoginCode, loginCodeMatches } from '../auth/login-code.js';
+import {
+  codeMatches,
+  codeVerifier,
+  emailKey,
+  generateLoginCode,
+  type LoginCodeKeys,
+  originKey
+} from '../auth/login-code.js';
+import {
+  IP_WINDOW_MS,
+  liveThrottle,
+  nextCodeAt,
+  requestCounterKey,
+  SEND_DAY_WINDOW_MS,
+  SEND_HOUR_WINDOW_MS,
+  secondsUntil,
+  sendCounterKeys,
+  THROTTLE_FORGET_MS,
+  throttleKey,
+  verifyCounterKey
+} from '../auth/login-limits.js';
 import { requireRoles } from '../auth/principal.js';
 import { type SigningKeys, signSessionToken } from '../auth/session-token.js';
 import { type AppEnv, normalizeEmail } from '../config/env.js';
@@ -18,16 +38,12 @@ export interface AuthRoutesOptions {
   env: AppEnv;
   store: Store;
   keys: SigningKeys;
+  loginKeys: LoginCodeKeys;
   clock: () => Date;
   email: EmailService;
 }
 
-const RATE_WINDOW_MS = 15 * 60 * 1000;
-const REQUEST_CODE_PER_EMAIL = 5;
-const REQUEST_CODE_PER_IP = 20;
-const VERIFY_CODE_PER_IP = 30;
-const MAX_CHALLENGE_ATTEMPTS = 5;
-const MINUTE_MS = 60 * 1000;
+const SECOND_MS = 1000;
 
 const INVALID_CODE_MESSAGE = 'Invalid or expired code';
 
@@ -37,7 +53,20 @@ const requestCodeBody = {
   ...object({ email: emailSchema }),
   properties: { email: emailSchema, locale: emailLocaleSchema }
 };
-const requestCodeResponse = object({ challengeId: { type: 'string' }, expiresAt: instant });
+const requestCodeResponse = object({
+  challengeId: { type: 'string' },
+  expiresAt: instant,
+  delivery: {
+    type: 'string',
+    enum: ['email', 'access_code'],
+    description:
+      '`email`: a code is emailed to members and invited emails, and the answer is the same for any other email. `access_code`: a demo account, which signs in with the shared demo code.'
+  },
+  codeLength: {
+    type: ['integer', 'null'],
+    description: 'Digits of the emailed code; `null` with `access_code`.'
+  }
+});
 
 const verifyCodeBody = object({
   challengeId: { type: 'string', minLength: 1, maxLength: 64 },
@@ -52,17 +81,22 @@ const verifyCodeResponse = object({
 
 const meResponse = object({ user: memberSchema, session: object({ expiresAt: instant }) });
 
+function tooManyRequests(retryAfterSeconds: number): ApiError {
+  return new ApiError(429, 'RATE_LIMITED', 'Too many requests', {
+    'retry-after': String(retryAfterSeconds)
+  });
+}
+
 async function enforceRateLimit(
   store: Store,
   key: string,
   limit: number,
+  windowMs: number,
   now: Date
 ): Promise<void> {
-  const result = await store.hit(key, limit, RATE_WINDOW_MS, now);
+  const result = await store.hit(key, limit, windowMs, now);
   if (!result.allowed) {
-    throw new ApiError(429, 'RATE_LIMITED', 'Too many requests', {
-      'retry-after': String(result.retryAfterSeconds)
-    });
+    throw tooManyRequests(result.retryAfterSeconds);
   }
 }
 
@@ -70,36 +104,64 @@ function invalidCode(): ApiError {
   return new ApiError(401, 'UNAUTHORIZED', INVALID_CODE_MESSAGE);
 }
 
+/** Short pseudonymous reference of an email for the logs: a prefix of its email key. */
+function emailRef(key: string): string {
+  return key.slice(0, 12);
+}
+
+/** Logs why a login step was refused, with the pseudonymous email reference only. */
+function logRefusal(request: FastifyRequest, key: string, step: string, reason: string): void {
+  request.log.info({ emailRef: emailRef(key), step, reason }, 'login step refused');
+}
+
 /**
  * Registers the login and session endpoints under the plugin prefix.
  *
  * `request-code` and `verify-code` are public: the BFF calls them for the browser and forwards
  * the browser IP in `x-client-ip`. Every verification failure answers the same 401, so callers
- * cannot tell an unknown email from a wrong or expired code. The code is never returned or logged.
+ * cannot tell an unknown email from a wrong or expired code.
  *
- * With `LOGIN_CODE_DELIVERY=access_code` the code is the shared `DEMO_ACCESS_CODE` and no email is
- * sent. With `email` every challenge gets a one-time code, stored as a salted digest, and the code
- * is emailed only to active members and emails with a pending invite. Verifying it proves that the
- * person owns the email, which is when an invited account is activated. A failed delivery still
- * answers 202 and is logged with the challenge id, without the email or the code; the person asks
- * for a new code. The send happens before the answer, so its duration is visible to the caller.
- * Every response carries `Cache-Control: private, no-store`.
+ * `request-code` issues a code of `OTP_CODE_DIGITS` digits that lives `OTP_TTL_SECONDS` and allows
+ * `OTP_MAX_ATTEMPTS` verifications. It is emailed only to active members that are not blocked and
+ * to emails with a pending invite; any other email gets the same answer and no email. The
+ * challenge keeps an HMAC verifier bound to its id and email, never the code, and replaces the
+ * previous challenge of the email once the new code was sent: a failed send keeps the previous
+ * code valid and does not count. The send happens before the answer, so its duration is visible
+ * to the caller. The code is never returned or logged.
+ *
+ * Limits, the same for every email, known or not:
+ * - per email, the codes issued since its last login set the wait before the next one (see
+ *   `nextCodeAt`), counted from the previous code, so refused requests do not extend it;
+ * - per email and client IP, `OTP_SENDS_PER_EMAIL_HOUR` and `OTP_SENDS_PER_EMAIL_DAY` codes;
+ * - per client IP, `OTP_REQUESTS_PER_IP` requests and `OTP_VERIFICATIONS_PER_IP` verifications
+ *   in 15 minutes.
+ * A refusal answers 429 with `retry-after`. A login clears the limits of the email and the IP it
+ * came from. Refusals are logged with a prefix of the email key, never the email.
+ *
+ * With `DEMO_LOGIN_ENABLED`, an email of `DEMO_LOGIN_EMAILS` that is an active member gets a
+ * challenge verified against `DEMO_ACCESS_CODE` instead, and no email.
+ *
+ * Verifying a code proves that the person owns the email, which is when an invited account is
+ * activated. Every response carries `Cache-Control: private, no-store`.
  *
  * @param app - Fastify instance (encapsulated by the prefix).
- * @param options - Configuration, store, signing keys and clock.
+ * @param options - Configuration, store, signing and login code keys, clock and email service.
  */
 export async function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): Promise<void> {
-  const { env, store, keys, clock, email: emails } = options;
-  const accessCodeMatches =
-    env.DEMO_ACCESS_CODE === null ? null : createCodeMatcher(env.DEMO_ACCESS_CODE);
-  // `null` while login is not configured.
-  let codeMatches: ((code: string, challenge: Challenge | null) => boolean) | null = null;
-  if (env.LOGIN_CODE_DELIVERY === 'email') {
-    codeMatches = (code, challenge) => loginCodeMatches(code, challenge?.codeHash ?? null);
-  } else if (accessCodeMatches !== null) {
-    codeMatches = (code) => accessCodeMatches(code);
-  }
+  const { env, store, keys, loginKeys, clock, email: emails } = options;
+  const demoEmails = new Set(env.DEMO_LOGIN_ENABLED ? env.DEMO_LOGIN_EMAILS : []);
+  const demoCodeMatches =
+    env.DEMO_LOGIN_ENABLED && env.DEMO_ACCESS_CODE !== null
+      ? createCodeMatcher(env.DEMO_ACCESS_CODE)
+      : null;
   const signedIn = requireRoles(['admin', 'viewer']);
+
+  const matches = (challenge: Challenge, email: string, code: string): boolean => {
+    if (challenge.kind === 'access_code') {
+      return demoCodeMatches !== null && demoEmails.has(email) && demoCodeMatches(code);
+    }
+    return codeMatches(loginKeys, challenge, email, code, env.OTP_CODE_DIGITS);
+  };
 
   app.addHook('onSend', async (_request, reply) => {
     reply.header('cache-control', 'private, no-store');
@@ -119,42 +181,120 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     async (request, reply) => {
       const now = clock();
       const email = normalizeEmail(request.body.email);
+      const origin = originKey(loginKeys, clientIp(request));
       await enforceRateLimit(
         store,
-        `request-code:ip:${clientIp(request)}`,
-        REQUEST_CODE_PER_IP,
+        requestCounterKey(origin),
+        env.OTP_REQUESTS_PER_IP,
+        IP_WINDOW_MS,
         now
       );
-      await enforceRateLimit(store, `request-code:email:${email}`, REQUEST_CODE_PER_EMAIL, now);
-      // Created for every email so the answer does not reveal which emails are members.
-      const expiresAt = new Date(now.getTime() + env.CHALLENGE_TTL_MINUTES * MINUTE_MS);
-      if (env.LOGIN_CODE_DELIVERY === 'access_code') {
-        const challenge = await store.createChallenge(email, now, expiresAt, null);
-        reply.status(202);
-        return { challengeId: challenge.id, expiresAt: challenge.expiresAt.toISOString() };
+      const key = emailKey(loginKeys, email);
+      const stored = await store.loginThrottle(throttleKey(key));
+      const live = liveThrottle(stored, now);
+      const next = nextCodeAt(live, env);
+      if (next !== null && next.getTime() > now.getTime()) {
+        logRefusal(request, key, 'request', 'wait');
+        throw tooManyRequests(secondsUntil(next, now));
       }
-      const code = generateLoginCode();
-      const challenge = await store.createChallenge(email, now, expiresAt, hashLoginCode(code));
-      const known =
-        (await store.findActiveUserByEmail(email)) !== null ||
-        (await store.hasPendingInvite(email, now));
-      if (known) {
+      const sends = sendCounterKeys(key, origin);
+      await enforceRateLimit(
+        store,
+        sends.hour,
+        env.OTP_SENDS_PER_EMAIL_HOUR,
+        SEND_HOUR_WINDOW_MS,
+        now
+      );
+      await enforceRateLimit(
+        store,
+        sends.day,
+        env.OTP_SENDS_PER_EMAIL_DAY,
+        SEND_DAY_WINDOW_MS,
+        now
+      );
+      const reserved = await store.reserveLoginThrottle(throttleKey(key), stored?.version ?? null, {
+        issued: (live?.issued ?? 0) + 1,
+        lastIssuedAt: now,
+        forgetAt: new Date(now.getTime() + THROTTLE_FORGET_MS)
+      });
+      if (reserved === null) {
+        // Another request for the email took this slot first.
+        logRefusal(request, key, 'request', 'concurrent');
+        throw tooManyRequests(env.OTP_RESEND_COOLDOWN_SECONDS);
+      }
+
+      const challengeId = randomUUID();
+      const expiresAt = new Date(now.getTime() + env.OTP_TTL_SECONDS * SECOND_MS);
+      const opened = {
+        id: challengeId,
+        emailKey: key,
+        createdAt: now,
+        expiresAt,
+        consumedAt: null,
+        revokedAt: null,
+        attempts: 0,
+        maxAttempts: env.OTP_MAX_ATTEMPTS
+      };
+      const member = await store.findActiveUserByEmail(email);
+      reply.status(202);
+
+      if (demoEmails.has(email)) {
+        if (member !== null && member.blockedAt === null) {
+          await store.issueChallenge({
+            ...opened,
+            userId: member.id,
+            kind: 'access_code',
+            codeDigest: null,
+            keyVersion: null
+          });
+        }
+        return {
+          challengeId,
+          expiresAt: expiresAt.toISOString(),
+          delivery: 'access_code',
+          codeLength: null
+        };
+      }
+
+      const eligible =
+        member !== null ? member.blockedAt === null : await store.hasPendingInvite(email, now);
+      if (eligible) {
+        const code = generateLoginCode(env.OTP_CODE_DIGITS);
         const outcome = await emails.sendLoginCode({
           email,
-          challengeId: challenge.id,
+          challengeId,
           code,
           locale: request.body.locale ?? 'en',
-          expiresInMinutes: env.CHALLENGE_TTL_MINUTES
+          expiresInMinutes: Math.ceil(env.OTP_TTL_SECONDS / 60)
         });
         if (outcome.state === 'failed') {
+          // The previous challenge, if any, stays the open one, and the failed code does not count.
+          await store.restoreLoginThrottle(throttleKey(key), reserved, stored);
           request.log.warn(
-            { challengeId: challenge.id, failure: outcome.failure, attempts: outcome.attempts },
+            {
+              emailRef: emailRef(key),
+              challengeId,
+              failure: outcome.failure,
+              attempts: outcome.attempts
+            },
             'login code email not delivered'
           );
+        } else {
+          await store.issueChallenge({
+            ...opened,
+            userId: member?.id ?? null,
+            kind: 'otp',
+            codeDigest: codeVerifier(loginKeys, challengeId, email, code),
+            keyVersion: loginKeys.codeKeyVersion
+          });
         }
       }
-      reply.status(202);
-      return { challengeId: challenge.id, expiresAt: challenge.expiresAt.toISOString() };
+      return {
+        challengeId,
+        expiresAt: expiresAt.toISOString(),
+        delivery: 'email',
+        codeLength: env.OTP_CODE_DIGITS
+      };
     }
   );
 
@@ -163,34 +303,47 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     {
       schema: {
         operationId: 'verifyLoginCode',
-        summary: 'Exchange a challenge and access code for a session token',
+        summary: 'Exchange a challenge and its code for a session token',
         tags: ['auth'],
         body: verifyCodeBody,
-        response: { 200: verifyCodeResponse, ...errorResponsesFor([400, 401, 429, 503]) }
+        response: { 200: verifyCodeResponse, ...errorResponsesFor([400, 401, 429]) }
       }
     },
     async (request) => {
-      if (codeMatches === null) {
-        throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'Login is not configured');
-      }
       const now = clock();
-      await enforceRateLimit(store, `verify-code:ip:${clientIp(request)}`, VERIFY_CODE_PER_IP, now);
-      const email = normalizeEmail(request.body.email);
-      const challenge = await store.recordChallengeAttempt(
-        request.body.challengeId,
-        MAX_CHALLENGE_ATTEMPTS,
+      const origin = originKey(loginKeys, clientIp(request));
+      await enforceRateLimit(
+        store,
+        verifyCounterKey(origin),
+        env.OTP_VERIFICATIONS_PER_IP,
+        IP_WINDOW_MS,
         now
       );
-      const codeOk = codeMatches(request.body.code, challenge);
+      const email = normalizeEmail(request.body.email);
+      const key = emailKey(loginKeys, email);
+      const challenge = await store.recordChallengeAttempt(key, request.body.challengeId, now);
+      const member = await store.findActiveUserByEmail(email);
 
-      if (
-        challenge === null ||
-        challenge.email !== email ||
-        !codeOk ||
-        !(await store.consumeChallenge(challenge.id, now))
-      ) {
+      let reason: string | null = null;
+      if (challenge === null) {
+        reason = 'no_open_challenge';
+      } else if (!matches(challenge, email, request.body.code)) {
+        reason =
+          challenge.attempts >= challenge.maxAttempts ? 'wrong_code_last_attempt' : 'wrong_code';
+      } else if (!(await store.consumeChallenge(key, challenge.id, now))) {
+        reason = 'already_used';
+      } else if (member?.blockedAt != null) {
+        reason = 'blocked';
+      } else if (challenge.userId !== null && member?.id !== challenge.userId) {
+        reason = 'member_changed';
+      }
+      const activated = reason === null ? await store.activateMember(email, now) : null;
+      if (reason === null && activated === null) {
+        reason = 'not_a_member';
+      }
+      if (reason !== null || activated === null) {
+        logRefusal(request, key, 'verify', reason ?? 'not_a_member');
         // Only failures against existing members are recorded, so the log holds no unknown emails.
-        const member = await store.findActiveUserByEmail(email);
         if (member !== null) {
           await store.appendActivity({
             at: now,
@@ -203,10 +356,10 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
         throw invalidCode();
       }
 
-      const activated = await store.activateMember(email, now);
-      if (activated === null) {
-        throw invalidCode();
-      }
+      await store.clearLoginLimits([
+        throttleKey(key),
+        ...Object.values(sendCounterKeys(key, origin))
+      ]);
       if (activated.acceptedInvite !== null) {
         await store.appendActivity({
           at: now,
@@ -217,7 +370,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
         });
       }
       const user = (await store.recordLogin(activated.user.id, now)) ?? activated.user;
-      const expiresAt = new Date(now.getTime() + env.SESSION_TTL_MINUTES * MINUTE_MS);
+      const expiresAt = new Date(now.getTime() + env.SESSION_TTL_MINUTES * 60 * SECOND_MS);
       const session = await store.createSession({
         jti: randomUUID(),
         userId: user.id,
