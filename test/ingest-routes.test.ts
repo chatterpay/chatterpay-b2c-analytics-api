@@ -31,6 +31,7 @@ const REPORT: IngestionReport = {
     catalogUsers: 2,
     prices: 0,
     snapshot: 0,
+    polymarket: 0,
     aggregateRebuild: 4,
     persist: 2
   },
@@ -39,7 +40,16 @@ const REPORT: IngestionReport = {
     users: { read: 2, newWallets: 2, countedInCountries: 2, polymarketAccounts: 1 },
     catalog: { tokens: 6, networks: 2, retainedTokens: 0, retainedNetworks: 0 },
     prices: { provider: null, calls: 0, prices: 0, failed: false },
-    balances: { status: 'disabled', calls: 0, failedCalls: 0, networks: [], masterWallets: 0 }
+    balances: { status: 'disabled', calls: 0, failedCalls: 0, networks: [], masterWallets: 0 },
+    polymarket: {
+      status: 'disabled',
+      calls: 0,
+      failedCalls: 0,
+      accounts: 0,
+      fills: 0,
+      from: null,
+      through: null
+    }
   },
   aggregates: {
     transfers: 3,
