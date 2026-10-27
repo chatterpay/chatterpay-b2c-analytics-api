@@ -11,6 +11,8 @@ import type {
   IngestRepository,
   LiveAggregates,
   NetworkWallets,
+  PolymarketAggregates,
+  PolymarketFill,
   RunSnapshot,
   StoredAggregates,
   TokenInfo,
@@ -27,7 +29,8 @@ import { COLLECTIONS, NETWORK_SETTINGS_ID } from './mongo-schema.js';
  * Collections of the ingestion in the analytics database. Copies are keyed by the B2C id and
  * aggregates by a build stamp; every read is by `_id`, by that stamp over collections that are
  * replaced as a whole, or a full read of a small collection (one snapshot per run, one observation
- * per wallet), so none needs an index besides the default one. The usage checks of a network or
+ * per wallet, one fill per executed Polymarket order fill, keyed by its event), so none needs an
+ * index besides the default one. The usage checks of a network or
  * token the B2C database dropped scan the copies, which only happens in the runs after a drop.
  */
 export const INGEST_COLLECTIONS = {
@@ -41,7 +44,8 @@ export const INGEST_COLLECTIONS = {
   activity: 'agg_user_activity',
   signups: 'agg_user_signups',
   snapshots: 'ingest_snapshots',
-  walletObservations: 'wallet_first_seen'
+  walletObservations: 'wallet_first_seen',
+  polymarketFills: 'polymarket_fills'
 } as const;
 
 const CHECKPOINTS_ID = 'checkpoints';
@@ -54,11 +58,15 @@ interface StateDoc {
   transactionsLastId?: string | null;
   pricesLastDay?: string | null;
   walletsTrackingSince?: Date | null;
+  polymarketNextBlock?: number | null;
+  polymarketFrom?: Date | null;
+  polymarketThrough?: Date | null;
   owner?: string | null;
   until?: Date | null;
   builtAt?: Date | null;
   run?: IngestRunStatus | null;
   wallets?: NetworkWallets[];
+  polymarket?: PolymarketAggregates;
 }
 
 type TransactionDoc = Omit<IngestedTransaction, 'id'> & { _id: string };
@@ -80,6 +88,7 @@ interface NetworkSettingsDoc {
   uncollectedChainIds?: unknown;
 }
 type ObservationDoc = WalletObservation & { _id: string };
+type FillDoc = Omit<PolymarketFill, 'id'> & { _id: string };
 type Stamped<T> = T & { _id: string; builtAt: Date };
 
 /** Connection settings of {@link MongoIngestRepository.connect}. */
@@ -140,7 +149,10 @@ export class MongoIngestRepository implements IngestRepository {
     return {
       transactionsLastId: doc?.transactionsLastId ?? null,
       pricesLastDay: doc?.pricesLastDay ?? null,
-      walletsTrackingSince: doc?.walletsTrackingSince ?? null
+      walletsTrackingSince: doc?.walletsTrackingSince ?? null,
+      polymarketNextBlock: doc?.polymarketNextBlock ?? null,
+      polymarketFrom: doc?.polymarketFrom ?? null,
+      polymarketThrough: doc?.polymarketThrough ?? null
     };
   }
 
@@ -305,6 +317,25 @@ export class MongoIngestRepository implements IngestRepository {
     );
   }
 
+  async upsertPolymarketFills(items: readonly PolymarketFill[]): Promise<void> {
+    if (items.length === 0) {
+      return;
+    }
+    await this.collection<FillDoc>(INGEST_COLLECTIONS.polymarketFills).bulkWrite(
+      items.map(({ id, ...fill }) => ({
+        replaceOne: { filter: { _id: id }, replacement: fill, upsert: true }
+      })),
+      { ordered: false }
+    );
+  }
+
+  async polymarketFills(): Promise<PolymarketFill[]> {
+    const docs = await this.collection<FillDoc>(INGEST_COLLECTIONS.polymarketFills)
+      .find({})
+      .toArray();
+    return docs.map(({ _id, ...fill }) => ({ id: _id, ...fill }));
+  }
+
   async transactions(): Promise<IngestedTransaction[]> {
     const docs = await this.collection<TransactionDoc>(INGEST_COLLECTIONS.transactions)
       .find({})
@@ -447,7 +478,14 @@ export class MongoIngestRepository implements IngestRepository {
     ];
     await this.state.updateOne(
       { _id: AGGREGATES_ID },
-      { $set: { builtAt, run, wallets: aggregates.wallets } },
+      {
+        $set: {
+          builtAt,
+          run,
+          wallets: aggregates.wallets,
+          polymarket: aggregates.polymarket ?? { hours: [], coverage: null }
+        }
+      },
       { upsert: true }
     );
     for (const collection of written) {
@@ -485,7 +523,8 @@ export class MongoIngestRepository implements IngestRepository {
       hourly: await read<HourlyFacts>(INGEST_COLLECTIONS.hourly),
       activity: await read<UserActivity>(INGEST_COLLECTIONS.activity),
       signups: await read<UserSignup>(INGEST_COLLECTIONS.signups),
-      wallets: state?.wallets ?? []
+      wallets: state?.wallets ?? [],
+      ...(state?.polymarket === undefined ? {} : { polymarket: state.polymarket })
     };
   }
 
