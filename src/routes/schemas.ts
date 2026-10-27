@@ -18,6 +18,7 @@ const apiErrorSchema = {
         'CANNOT_CHANGE_OWN_ROLE',
         'CANNOT_REMOVE_SELF',
         'CANNOT_BLOCK_SELF',
+        'MEMBER_BLOCKED',
         'NOT_FOUND',
         'CONFLICT',
         'CONFIG_CONFLICT',
