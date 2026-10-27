@@ -1,4 +1,5 @@
-import type { ActivityEvent, Invite, Store, User } from '../store/types.js';
+import { EMAIL_LOCALES } from '../email/types.js';
+import type { ActivityEvent, Invite, InviteDelivery, Store, User } from '../store/types.js';
 import { object } from './schemas.js';
 
 /** Member as exposed by the API. */
@@ -30,6 +31,12 @@ export interface InviteBody {
   resendCount: number;
   lastSentAt: string | null;
   createdBy: string;
+  delivery: {
+    state: InviteDelivery['state'];
+    attempts: number;
+    lastAttemptAt: string | null;
+    failure: InviteDelivery['failure'];
+  };
 }
 
 /**
@@ -54,6 +61,13 @@ export const emailSchema: Record<string, unknown> = {
   type: 'string',
   format: 'email',
   maxLength: 254
+};
+
+/** Schema of the optional language of an email. */
+export const emailLocaleSchema: Record<string, unknown> = {
+  type: 'string',
+  enum: EMAIL_LOCALES,
+  description: 'Language of the email (`br` is Brazilian Portuguese); `en` when omitted.'
 };
 
 /** Schema of a role. */
@@ -100,7 +114,25 @@ export const inviteSchema: Record<string, unknown> = object({
   expiresAt: instant,
   resendCount: { type: 'integer', minimum: 0 },
   lastSentAt: nullableInstant,
-  createdBy: { type: 'string', description: 'Email of the admin that created the invite.' }
+  createdBy: { type: 'string', description: 'Email of the admin that created the invite.' },
+  delivery: {
+    ...object({
+      state: {
+        type: 'string',
+        enum: ['pending', 'simulated', 'sent', 'failed'],
+        description:
+          'Last send of the invite: `pending` while it runs, or when it was cut short; `simulated` when no email was sent; `sent` when the email provider accepted the message; `failed` when it refused it or did not answer after the retries.'
+      },
+      attempts: { type: 'integer', minimum: 0 },
+      lastAttemptAt: nullableInstant,
+      failure: {
+        type: ['string', 'null'],
+        enum: ['rejected', 'rate_limited', 'unavailable', 'network', null],
+        description: 'Cause of a `failed` delivery; `null` otherwise.'
+      }
+    }),
+    description: 'Delivery of the last email of the invite, from its creation or its last resend.'
+  }
 });
 
 /** Response schema of an {@link ActivityEventBody}. */
@@ -191,7 +223,13 @@ export async function toInviteBody(store: Store, invite: Invite): Promise<Invite
     resendCount: invite.resendCount,
     lastSentAt: invite.lastSentAt === null ? null : invite.lastSentAt.toISOString(),
     // Users are never deleted, so the creator always resolves.
-    createdBy: (await emailOf(store, invite.createdBy)) ?? ''
+    createdBy: (await emailOf(store, invite.createdBy)) ?? '',
+    delivery: {
+      state: invite.delivery.state,
+      attempts: invite.delivery.attempts,
+      lastAttemptAt: invite.delivery.lastAttemptAt?.toISOString() ?? null,
+      failure: invite.delivery.failure
+    }
   };
 }
 
