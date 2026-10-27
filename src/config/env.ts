@@ -64,6 +64,14 @@ export interface AppEnv {
    * Cardano network whose `providerUrl` is Blockfrost is not read (`unsupported_provider`).
    */
   CARDANO_PROVIDER_API_KEY: string | null;
+  /**
+   * HTTPS JSON-RPC endpoint of Polygon mainnet, the variable the B2C backend uses for the same
+   * chain. The ingestion reads the fills of the Polymarket orders of the B2C accounts through it;
+   * unset leaves the Polymarket volume unavailable (`not_configured`).
+   */
+  POLYMARKET_POLYGON_RPC_URL: string | null;
+  /** Ceiling on Polygon requests for Polymarket fills per run; 0 stops the reads. */
+  POLYMARKET_MAX_CALLS_PER_RUN: number;
   /** Public addresses of the signers whose balances the snapshots read. */
   MASTER_WALLETS: MasterWalletConfig[];
   /**
@@ -189,6 +197,12 @@ const envSchema: z.ZodType<AppEnv> = z
     BALANCES_PROVIDER: z.enum(['none', 'rpc']).default('none'),
     BALANCES_MAX_CALLS_PER_RUN: z.coerce.number().int().min(0).max(2000).default(100),
     CARDANO_PROVIDER_API_KEY: z.string().trim().min(1).max(256).nullable().default(null),
+    POLYMARKET_POLYGON_RPC_URL: z
+      .url({ protocol: /^https$/ })
+      .max(512)
+      .nullable()
+      .default(null),
+    POLYMARKET_MAX_CALLS_PER_RUN: z.coerce.number().int().min(0).max(2000).default(500),
     MASTER_WALLETS: masterWalletsSchema.default([]),
     USD_VALUATION: z.enum(['market', 'none']).default('market'),
     METRICS_REFRESH_SECONDS: z.coerce.number().int().min(30).max(86_400).default(300)
