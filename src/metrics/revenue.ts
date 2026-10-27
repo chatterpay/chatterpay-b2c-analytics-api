@@ -9,7 +9,8 @@ import {
   buildAverageFee,
   buildFeesByProduct,
   buildPolymarketAccounts,
-  buildPolymarketVolume
+  buildPolymarketVolume,
+  polymarketIn
 } from './products.js';
 import { resolveRange } from './ranges.js';
 import { sourceFor } from './sources.js';
@@ -57,10 +58,11 @@ function assetCents(facts: Facts, asset: string, keys: readonly MoneyKey[]): num
  * then answer `partial` (subtotal of the valued ones) or `unavailable`, `valuation` says which
  * networks and assets, an asset row has no value for a figure it was not valued in, and a network
  * row or series point whose operations have none answers `null` instead of zero. The
- * average fee per transaction divides those fees by the counted transfers and swaps; Polymarket
- * volume and fees are `unavailable` because the B2C data does not record them verifiably. Master
- * wallets come from the balance snapshots and are balances, not revenue. Polymarket accounts
- * come from the last ingestion run and cover every network.
+ * average fee per transaction divides those fees by the counted transfers and swaps. Polymarket
+ * volume is the executed volume of the fills read on Polygon and covers every network; the
+ * Polymarket fee item is listed only for every network. Master wallets come from the balance
+ * snapshots and are balances, not revenue. Polymarket accounts come from the last ingestion run
+ * and cover every network.
  *
  * Hidden tokens (`meta.tokenScope`) leave every money figure, the asset breakdown, the average
  * fee and the master wallet balances before anything is added.
@@ -160,9 +162,12 @@ export function buildRevenue(
     })),
     valuation: buildValuation(current),
     avgFeePerTransaction: buildAverageFee(currentTotals, previousTotals),
-    polymarketVolume: buildPolymarketVolume(),
+    polymarketVolume: buildPolymarketVolume(resolved.current),
     polymarketAccounts: buildPolymarketAccounts(resolved, hourIndexOf(now)),
-    feesByProduct: buildFeesByProduct(currentTotals),
+    feesByProduct: buildFeesByProduct(
+      currentTotals,
+      network === 'all' ? polymarketIn(resolved.current) : null
+    ),
     masterWallets: buildMasterWallets(networks, hourIndexOf(now), hidden)
   };
 }
