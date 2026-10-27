@@ -5,6 +5,7 @@ import { type AppEnv, loadEnv } from './config/env.js';
 import { rpcBalanceReader } from './ingest/balance-reader.js';
 import { coingeckoPriceProvider } from './ingest/coingecko.js';
 import { refreshLiveMetrics } from './ingest/live-loader.js';
+import { polygonFillReader } from './ingest/polymarket-fills.js';
 import { type IngestionReport, runIngestion } from './ingest/run.js';
 import { failedRunEvent, type IngestRunEvent, ingestRunEvent } from './ingest/run-event.js';
 import { listNetworks, type NetworkDefinition, setNetworks } from './metrics/catalog.js';
@@ -79,6 +80,10 @@ function ingestionHandle(
             env.BALANCES_PROVIDER === 'rpc'
               ? rpcBalanceReader(fetch, Date.now, env.CARDANO_PROVIDER_API_KEY)
               : null,
+          polygon:
+            env.POLYMARKET_POLYGON_RPC_URL === null
+              ? null
+              : polygonFillReader(env.POLYMARKET_POLYGON_RPC_URL),
           masterWallets: env.MASTER_WALLETS,
           valuation: env.USD_VALUATION,
           clock: () => new Date(),
@@ -88,6 +93,7 @@ function ingestionHandle(
             revisitHours: env.INGEST_REVISIT_HOURS,
             maxProviderCallsPerRun: env.PRICES_MAX_CALLS_PER_RUN,
             maxBalanceCallsPerRun: env.BALANCES_MAX_CALLS_PER_RUN,
+            maxPolymarketCallsPerRun: env.POLYMARKET_MAX_CALLS_PER_RUN,
             maxRunMs,
             lockTtlMs: maxRunMs + LOCK_MARGIN_MS
           },
