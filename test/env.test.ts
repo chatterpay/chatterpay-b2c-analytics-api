@@ -101,6 +101,21 @@ describe('loadEnv', () => {
     expect(env.MASTER_WALLETS).toEqual([]);
   });
 
+  it('reads the Polymarket fills only through an HTTPS Polygon endpoint', () => {
+    const env = loadEnv({});
+    expect(env.POLYMARKET_POLYGON_RPC_URL).toBeNull();
+    expect(env.POLYMARKET_MAX_CALLS_PER_RUN).toBe(500);
+
+    const url = 'https://polygon.example/rpc';
+    expect(loadEnv({ POLYMARKET_POLYGON_RPC_URL: url }).POLYMARKET_POLYGON_RPC_URL).toBe(url);
+    expect(() => loadEnv({ POLYMARKET_POLYGON_RPC_URL: 'http://polygon.example/rpc' })).toThrow(
+      'Invalid environment variables: POLYMARKET_POLYGON_RPC_URL'
+    );
+    expect(() => loadEnv({ POLYMARKET_MAX_CALLS_PER_RUN: '2001' })).toThrow(
+      'Invalid environment variables: POLYMARKET_MAX_CALLS_PER_RUN'
+    );
+  });
+
   it('accepts public master wallet addresses only, without echoing rejected values', () => {
     const signer = '0x9999999999999999999999999999999999999999';
     const cardano = `addr_test1${'q'.repeat(50)}`;
