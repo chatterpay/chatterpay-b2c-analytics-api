@@ -300,7 +300,12 @@ describe('runIngestion snapshots', () => {
     expect(repository.stored?.run).toEqual({
       status: 'completed',
       finishedAt: NOW.toISOString(),
-      sources: { transactions: 'complete', prices: 'complete', balances: 'complete' },
+      sources: {
+        transactions: 'complete',
+        prices: 'complete',
+        balances: 'complete',
+        polymarket: 'disabled'
+      },
       valuation: 'market'
     });
   });
@@ -324,7 +329,8 @@ describe('runIngestion snapshots', () => {
     expect(repository.stored?.run?.sources).toEqual({
       transactions: 'complete',
       prices: 'disabled',
-      balances: 'disabled'
+      balances: 'disabled',
+      polymarket: 'disabled'
     });
   });
 
@@ -361,7 +367,7 @@ describe('runIngestion snapshots', () => {
       });
       expect(revenue.polymarketVolume).toMatchObject({
         availability: 'unavailable',
-        reason: 'not_recorded'
+        reason: 'not_configured'
       });
       expect(users.newWallets).toMatchObject({
         source: 'live',
