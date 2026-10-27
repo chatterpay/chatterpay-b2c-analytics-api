@@ -30,7 +30,8 @@ const TRANSACTION_PROJECTION = {
  * Fields of a B2C `users` document that the ingestion reads. The phone number is read only to
  * derive the country of its calling code and is dropped right after; nothing else that identifies
  * a person is read. Of the Polymarket account only the address and its creation date are read, to
- * count accounts; the encrypted API credentials and the signer stay out of the projection.
+ * count accounts and to read the fills of their orders on Polygon; the address is not stored. The
+ * encrypted API credentials and the signer stay out of the projection.
  */
 const USER_PROJECTION = {
   creationDate: 1,
@@ -103,8 +104,8 @@ export function toIngestedTransaction(document: MongoDocument): IngestedTransact
  * Polymarket account of a B2C `users` document.
  *
  * @param value - Raw `polymarket_account`, with the fields of the user projection.
- * @returns Whether its `polygon_address` is an EVM address and its `created_at`; `null` when the
- *   document has no account.
+ * @returns Whether its `polygon_address` is an EVM address, the address in lower case when it is,
+ *   and its `created_at`; `null` when the document has no account.
  */
 export function polymarketAccountOf(value: unknown): PolymarketAccountRecord | null {
   if (typeof value !== 'object' || value === null) {
@@ -112,8 +113,10 @@ export function polymarketAccountOf(value: unknown): PolymarketAccountRecord | n
   }
   const account = value as MongoDocument;
   const address = account.polygon_address;
+  const validAddress = typeof address === 'string' && /^0x[0-9a-fA-F]{40}$/.test(address);
   return {
-    validAddress: typeof address === 'string' && /^0x[0-9a-fA-F]{40}$/.test(address),
+    validAddress,
+    address: validAddress ? address.toLowerCase() : null,
     createdAt: account.created_at instanceof Date ? account.created_at : null
   };
 }
