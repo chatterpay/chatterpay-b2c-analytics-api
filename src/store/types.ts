@@ -140,6 +140,26 @@ export type ActivityAction =
   | 'token_hidden'
   | 'token_shown';
 
+/**
+ * Browser of the request behind an activity event, as the BFF forwards it. Personal data: it is
+ * shown until `expiresAt` and then removed from the event, which stays in the log.
+ */
+export interface ActivityClient {
+  /** Browser IP forwarded by the BFF; `null` when not forwarded. */
+  ip: string | null;
+  /** `User-Agent` of the browser; `null` when not sent. */
+  userAgent: string | null;
+  /** `Accept-Language` of the browser; `null` when not sent. */
+  language: string | null;
+  /** `Sec-CH-UA-Platform`; `null` when the browser does not send client hints. */
+  platform: string | null;
+  /** `Sec-CH-UA-Mobile`; `null` when the browser does not send client hints. */
+  mobile: boolean | null;
+  /** `Sec-CH-UA`, the brand list with major versions; `null` without client hints. */
+  brands: string | null;
+  expiresAt: Date;
+}
+
 /** Activity log entry. Never carries codes or tokens. */
 export interface ActivityEvent {
   id: string;
@@ -152,6 +172,8 @@ export interface ActivityEvent {
    */
   target: string | null;
   outcome: 'success' | 'failure';
+  /** Browser of the request; `null` when the event has none or its data expired. */
+  client: ActivityClient | null;
 }
 
 /**
@@ -403,6 +425,14 @@ export interface Store {
    * @param after - Last event of the previous page; omitted for the first page.
    */
   listActivity(limit: number, after?: ActivityCursor): Promise<ActivityEvent[]>;
+
+  /**
+   * Removes the browser data of the events whose data expired at `now`; the events stay.
+   *
+   * @param now - Current instant.
+   * @returns How many events lost their browser data.
+   */
+  purgeActivityClients(now: Date): Promise<number>;
   /**
    * Instant of the last event each user acted in, of any action and outcome.
    *
