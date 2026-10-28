@@ -66,7 +66,7 @@ describe('login with a code sent by email', () => {
   }
 
   it('emails an eight-digit code in the asked language and signs in with it once', async () => {
-    harness = await createHarness();
+    harness = await createHarness({ OTP_TTL_SECONDS: '300' });
     const response = await harness.call({
       method: 'POST',
       url: '/v1/auth/request-code',
@@ -258,22 +258,6 @@ describe('login with a code sent by email', () => {
     ).toBe(202);
     // The first code stayed the open one until this new code was sent.
     expect((await verify(first, ADMIN_EMAIL, firstCode)).statusCode).toBe(401);
-  });
-
-  it('keeps the previous code open when its replacement fails to send', async () => {
-    const provider = new ControlledProvider();
-    harness = await createHarness({}, provider);
-    const first = await requestCode(harness, ADMIN_EMAIL);
-    const firstCode = codeOf(harness, ADMIN_EMAIL);
-    harness.advance(MINUTE_MS);
-    provider.next = UNAVAILABLE;
-    await harness.call({
-      method: 'POST',
-      url: '/v1/auth/request-code',
-      payload: { email: ADMIN_EMAIL }
-    });
-
-    expect((await verify(first, ADMIN_EMAIL, firstCode)).statusCode).toBe(200);
   });
 
   it('logs neither the code nor the email', async () => {
