@@ -94,6 +94,9 @@ export async function createHarness(
     OTP_EMAIL_HMAC_SECRET,
     JWT_PRIVATE_KEY: await exportPKCS8(privateKey),
     JWT_KEY_ID: 'test-key',
+    // The shortest code life, so the wait before another code is the one minute cooldown and the
+    // penalty steps; the tests of the wait until the open code expires set the default life.
+    OTP_TTL_SECONDS: '60',
     ...overrides
   });
   let current = START;
