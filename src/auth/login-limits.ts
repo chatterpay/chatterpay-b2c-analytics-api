@@ -4,6 +4,7 @@ import type { LoginThrottle } from '../store/types.js';
 /** Settings of the login code limits. */
 export type LoginLimits = Pick<
   AppEnv,
+  | 'OTP_TTL_SECONDS'
   | 'OTP_RESEND_COOLDOWN_SECONDS'
   | 'OTP_LOCKOUT_STEPS_SECONDS'
   | 'OTP_MAX_LOCKOUT_SECONDS'
@@ -69,17 +70,25 @@ export function liveThrottle(throttle: LoginThrottle | null, now: Date): LoginTh
 
 /**
  * Earliest instant of the next code for the email. Each wait counts from the issue of the previous
- * code, so requests refused meanwhile do not move it.
+ * code, so requests refused meanwhile do not move it. For an emailed code the wait lasts at least
+ * the life of the previous code, so a new code is sent only after the open one expired.
  *
  * @param throttle - Live throttle state of the email; `null` when none.
  * @param limits - Limit settings.
+ * @param untilExpiry - Whether the wait lasts at least the life of the previous code; `false` for
+ *   the shared code of a demo account, which several people use and no email carries.
  * @returns The instant; `null` when a code may be issued at any time.
  */
-export function nextCodeAt(throttle: LoginThrottle | null, limits: LoginLimits): Date | null {
+export function nextCodeAt(
+  throttle: LoginThrottle | null,
+  limits: LoginLimits,
+  untilExpiry = true
+): Date | null {
   if (throttle === null) {
     return null;
   }
   const wait = Math.max(
+    untilExpiry ? limits.OTP_TTL_SECONDS * SECOND_MS : 0,
     limits.OTP_RESEND_COOLDOWN_SECONDS * SECOND_MS,
     penaltyMs(throttle.issued, limits)
   );
