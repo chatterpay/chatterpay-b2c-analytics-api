@@ -81,7 +81,7 @@ describe('login with a code sent by email', () => {
     const message = harness.outbox[0];
     expect(message?.to).toBe(ADMIN_EMAIL);
     expect(message?.idempotencyKey).toBe(`login-code/${challengeId}`);
-    expect(message?.subject).toMatch(/^\d{8} es tu código de ChatterPay Analytics$/);
+    expect(message?.subject).toBe('Tu código para ingresar a ChatterPay Analytics');
     expect(message?.text).toContain('5');
     const code = codeOf(harness, ADMIN_EMAIL);
     expect(harness.bodies.join('\n')).not.toContain(code);
