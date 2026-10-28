@@ -130,8 +130,9 @@ function logRefusal(request: FastifyRequest, key: string, step: string, reason: 
  * to the caller. The code is never returned or logged.
  *
  * Limits, the same for every email, known or not:
- * - per email, the codes issued since its last login set the wait before the next one (see
- *   `nextCodeAt`), counted from the previous code, so refused requests do not extend it;
+ * - per email, no new code until the previous one expired, and the codes issued since its last
+ *   login set a longer wait before the next one (see `nextCodeAt`), counted from the previous
+ *   code, so refused requests do not extend it;
  * - per email and client IP, `OTP_SENDS_PER_EMAIL_HOUR` and `OTP_SENDS_PER_EMAIL_DAY` codes;
  * - per client IP, `OTP_REQUESTS_PER_IP` requests and `OTP_VERIFICATIONS_PER_IP` verifications
  *   in 15 minutes.
@@ -139,7 +140,9 @@ function logRefusal(request: FastifyRequest, key: string, step: string, reason: 
  * came from. Refusals are logged with a prefix of the email key, never the email.
  *
  * With `DEMO_LOGIN_ENABLED`, an email of `DEMO_LOGIN_EMAILS` that is an active member gets a
- * challenge verified against `DEMO_ACCESS_CODE` instead, and no email.
+ * challenge verified against `DEMO_ACCESS_CODE` instead, and no email. Several people share a demo
+ * account, so its next challenge waits the cooldown and the penalty steps, not the life of the
+ * previous one.
  *
  * Verifying a code proves that the person owns the email, which is when an invited account is
  * activated. Every response carries `Cache-Control: private, no-store`.
@@ -192,7 +195,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       const key = emailKey(loginKeys, email);
       const stored = await store.loginThrottle(throttleKey(key));
       const live = liveThrottle(stored, now);
-      const next = nextCodeAt(live, env);
+      const next = nextCodeAt(live, env, !demoEmails.has(email));
       if (next !== null && next.getTime() > now.getTime()) {
         logRefusal(request, key, 'request', 'wait');
         throw tooManyRequests(secondsUntil(next, now));
