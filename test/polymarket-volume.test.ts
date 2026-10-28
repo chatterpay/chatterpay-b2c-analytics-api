@@ -175,7 +175,8 @@ describe('Polymarket executed volume', () => {
       scope: 'all_networks',
       valueUsd: '7.50',
       fills: 2,
-      readThrough: blockTime(HEAD).toISOString()
+      readThrough: blockTime(HEAD).toISOString(),
+      lastFillAt: '2026-10-22T02:00:00.000Z'
     });
     expect(buildRevenue('base-sepolia', 'month', NOW).polymarketVolume).toEqual(
       revenue.polymarketVolume
@@ -203,6 +204,18 @@ describe('Polymarket executed volume', () => {
         share: '0.4286'
       }
     ]);
+  });
+
+  it('states the hour of the last fill when the range has none', async () => {
+    await ingest(new FakePolygon(CHAIN));
+
+    // The last fill is at block 90000, two days before the start of today.
+    expect(buildRevenue('all', 'today', NOW).polymarketVolume).toMatchObject({
+      availability: 'available',
+      valueUsd: '0.00',
+      fills: 0,
+      lastFillAt: '2026-10-22T02:00:00.000Z'
+    });
   });
 
   it('leaves Polymarket out of the products of a single network', async () => {
@@ -286,7 +299,8 @@ describe('Polymarket executed volume', () => {
     expect(buildRevenue('all', 'month', NOW).polymarketVolume).toMatchObject({
       availability: 'unavailable',
       reason: 'not_configured',
-      readThrough: null
+      readThrough: null,
+      lastFillAt: null
     });
     expect(buildOverview('all', 'month', NOW).volumeByProduct).toMatchObject({
       availability: 'partial',
