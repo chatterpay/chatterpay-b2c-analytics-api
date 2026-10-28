@@ -108,13 +108,14 @@ describe('email templates', () => {
   });
 
   it.each([
-    ['en', '042137 is your ChatterPay Analytics code', '10 minutes'],
-    ['es', '042137 es tu código de ChatterPay Analytics', '10 minutos'],
-    ['br', '042137 é o seu código do ChatterPay Analytics', '10 minutos']
-  ] as const)('renders the %s login code', (locale, subject, minutes) => {
+    ['en', 'Your ChatterPay Analytics sign-in code', '10 minutes'],
+    ['es', 'Tu código para ingresar a ChatterPay Analytics', '10 minutos'],
+    ['br', 'Seu código para entrar no ChatterPay Analytics', '10 minutos']
+  ] as const)('renders the %s login code, only in the body', (locale, subject, minutes) => {
     const email = renderLoginCodeEmail({ locale, code: '042137', expiresInMinutes: 10 });
 
     expect(email.subject).toBe(subject);
+    expect(email.subject).not.toContain('042137');
     expect(email.text).toContain('042137');
     expect(email.text).toContain(minutes);
     expect(email.html).toContain('042137');
