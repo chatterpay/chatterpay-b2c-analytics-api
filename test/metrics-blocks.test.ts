@@ -270,6 +270,110 @@ describe('live blocks', () => {
     });
   });
 
+  describe('master wallets with assets without a USD price', () => {
+    const READ = {
+      network: 'base-sepolia',
+      status: 'complete',
+      wallets: 2,
+      walletsRead: 2,
+      native: 'included'
+    } as const;
+
+    function signer(
+      address: string,
+      balances: Array<{ asset: string; amount: string; valueCents: number | null }>
+    ): NonNullable<RunSnapshot['balances']>['masterWallets'][number] {
+      return {
+        network: 'base-sepolia',
+        role: 'Backend signer',
+        address,
+        explorerUrl: null,
+        status: 'complete',
+        balances
+      };
+    }
+
+    function installSigners(
+      masterWallets: NonNullable<RunSnapshot['balances']>['masterWallets']
+    ): void {
+      install([snapshot({ balances: { networks: [READ], holdings: [], masterWallets } })]);
+    }
+
+    it('lists every balance and totals the priced ones as a partial subtotal', () => {
+      installSigners([
+        signer('0x000000000000000000000000000000000000c0d1', [
+          { asset: 'ETH', amount: '0.5', valueCents: 150_000 },
+          { asset: 'SCR', amount: '120.0', valueCents: null }
+        ]),
+        signer('0x000000000000000000000000000000000000c0d2', [
+          { asset: 'USDC', amount: '500.0', valueCents: 50_000 }
+        ])
+      ]);
+
+      const { masterWallets } = buildRevenue('base-sepolia', 'month', NOW);
+      expect(masterWallets).toMatchObject({
+        availability: 'partial',
+        reason: 'unpriced_assets',
+        totalUsd: '2000.00'
+      });
+      expect(masterWallets.items.map((item) => [item.valueUsd, item.share])).toEqual([
+        ['1500.00', '0.7500'],
+        ['500.00', '0.2500']
+      ]);
+      expect(masterWallets.items[0]?.balances).toEqual([
+        { asset: 'ETH', amount: '0.5', valueUsd: '1500.00' },
+        { asset: 'SCR', amount: '120.0', valueUsd: null }
+      ]);
+    });
+
+    it('gives no value to a wallet whose balances all lack a price', () => {
+      installSigners([
+        signer('0x000000000000000000000000000000000000c0d1', [
+          { asset: 'SCR', amount: '120.0', valueCents: null }
+        ]),
+        signer('0x000000000000000000000000000000000000c0d2', [
+          { asset: 'USDC', amount: '500.0', valueCents: 50_000 }
+        ]),
+        signer('0x000000000000000000000000000000000000c0d3', [])
+      ]);
+
+      const { masterWallets } = buildRevenue('base-sepolia', 'month', NOW);
+      expect(masterWallets).toMatchObject({
+        availability: 'partial',
+        reason: 'unpriced_assets',
+        totalUsd: '500.00'
+      });
+      expect(masterWallets.items.map((item) => [item.valueUsd, item.share])).toEqual([
+        [null, null],
+        ['500.00', '1.0000'],
+        ['0.00', '0.0000']
+      ]);
+    });
+
+    it('answers unavailable without a total when no balance has a price, listing them', () => {
+      installSigners([
+        signer('0x000000000000000000000000000000000000c0d1', [
+          { asset: 'SCR', amount: '120.0', valueCents: null }
+        ])
+      ]);
+
+      const { masterWallets } = buildRevenue('base-sepolia', 'month', NOW);
+      expect(masterWallets).toMatchObject({
+        availability: 'unavailable',
+        reason: 'unpriced_assets',
+        totalUsd: null
+      });
+      expect(masterWallets.items).toEqual([
+        expect.objectContaining({
+          status: 'complete',
+          valueUsd: null,
+          share: null,
+          balances: [{ asset: 'SCR', amount: '120.0', valueUsd: null }]
+        })
+      ]);
+    });
+  });
+
   it('reads the countries of the last run, with or without balances', () => {
     install([snapshot({ balances: null })]);
 
