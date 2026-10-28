@@ -45,6 +45,8 @@ export interface CallOptions {
   token?: string;
   payload?: Record<string, unknown>;
   ip?: string;
+  /** Extra headers, such as the browser data the BFF forwards. */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -139,7 +141,10 @@ export async function createHarness(
       current = new Date(current.getTime() + ms);
     },
     call: async (options) => {
-      const headers: Record<string, string> = { 'x-client-ip': options.ip ?? '203.0.113.10' };
+      const headers: Record<string, string> = {
+        'x-client-ip': options.ip ?? '203.0.113.10',
+        ...options.headers
+      };
       if (options.token !== undefined) {
         headers.authorization = `Bearer ${options.token}`;
       }
