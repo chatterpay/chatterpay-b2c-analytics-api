@@ -154,7 +154,8 @@ function inviteViewFilter(view: InviteView, now: Date): Filter<InviteDoc> {
 }
 
 function toActivity({ _id, ...rest }: ActivityDoc): ActivityEvent {
-  return { id: _id.toHexString(), ...rest };
+  // Events stored before the browser data was recorded have no `client` field.
+  return { id: _id.toHexString(), ...rest, client: rest.client ?? null };
 }
 
 /** Connection settings of {@link MongoStore.connect}. */
@@ -633,6 +634,16 @@ export class MongoStore implements Store {
       .limit(limit)
       .toArray();
     return events.map(toActivity);
+  }
+
+  async purgeActivityClients(now: Date): Promise<number> {
+    // No index on `client.expiresAt`: the log holds team events only, and the purge runs on a
+    // login or on a read of the log, not per request.
+    const result = await this.activity.updateMany(
+      { 'client.expiresAt': { $lte: now } },
+      { $set: { client: null } }
+    );
+    return result.modifiedCount;
   }
 
   async lastActivityOf(userIds: readonly string[]): Promise<Map<string, Date>> {
