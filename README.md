@@ -116,7 +116,7 @@ Every error response has the shape `{ code, message, requestId }`. The `x-reques
 
 | Limit | Scope | Answer |
 |---|---|---|
-| Wait between codes: none before the 2nd beyond `OTP_RESEND_COOLDOWN_SECONDS` (60 s), then the steps of `OTP_LOCKOUT_STEPS_SECONDS`: 5 min before the 3rd, 15 min before the 4th and later ones, never above `OTP_MAX_LOCKOUT_SECONDS` (15 min) | normalized email | 429 `RATE_LIMITED` with `Retry-After` |
+| Wait between codes: no emailed code until the previous one expired (`OTP_TTL_SECONDS`, 5 min), and at least `OTP_RESEND_COOLDOWN_SECONDS` (60 s); then the steps of `OTP_LOCKOUT_STEPS_SECONDS`: 5 min before the 3rd, 15 min before the 4th and later ones, never above `OTP_MAX_LOCKOUT_SECONDS` (15 min). A demo account waits the cooldown and the steps only | normalized email | 429 `RATE_LIMITED` with `Retry-After` |
 | `OTP_SENDS_PER_EMAIL_HOUR` (5) per hour and `OTP_SENDS_PER_EMAIL_DAY` (10) per 24 hours | email and client IP | 429 with `Retry-After` |
 | `OTP_REQUESTS_PER_IP` (30) `request-code` per 15 min | client IP | 429 with `Retry-After` |
 | `OTP_VERIFICATIONS_PER_IP` (60) `verify-code` per 15 min | client IP | 429 with `Retry-After` |
@@ -126,7 +126,7 @@ The wait counts from the issue of the previous code, so requests refused during 
 
 Blocking: `block` sets `blockedAt` on the member, revokes its sessions and its open code, and opens no session for it until an admin calls `unblock`; no limit expiry lifts it. The member still gets codes like anyone else, and verifying one shows the block (`MEMBER_BLOCKED`). `unblock` opens no session and brings back neither the revoked sessions nor the revoked code. A blocked member keeps its email, so it cannot be invited again. An admin cannot block itself, and a block, role change or removal that would leave no unblocked active admin answers 409. The UI states are `ACTIVE`, `ADMIN_BLOCKED` (`status: blocked`), `TEMPORARILY_RATE_LIMITED` (`loginLockedUntil` set) and `DELETED` (removed members are not listed and cannot sign in).
 
-Demo accounts: with `DEMO_LOGIN_ENABLED=true`, the unblocked active members whose email is in `DEMO_LOGIN_EMAILS` get a challenge verified against `DEMO_ACCESS_CODE` instead of an emailed code, and the answer carries `delivery: 'access_code'` and `codeLength: null`. The other emails keep the emailed code, and the demo code opens no session for them. The flag is off by default, and production refuses it unless the Cloud Run service name (`K_SERVICE`) ends in `-develop`.
+Demo accounts: with `DEMO_LOGIN_ENABLED=true`, the unblocked active members whose email is in `DEMO_LOGIN_EMAILS` get a challenge verified against `DEMO_ACCESS_CODE` instead of an emailed code, and the answer carries `delivery: 'access_code'` and `codeLength: null`. The other emails keep the emailed code, and the demo code opens no session for them. The flag is off by default.
 
 ### Login code keys
 
@@ -177,10 +177,9 @@ Invites: creating or resending one stores it first, then sends it with the key `
 | `OTP_MAX_LOCKOUT_SECONDS` | `900` | 60-900 |
 | `OTP_SENDS_PER_EMAIL_HOUR` / `OTP_SENDS_PER_EMAIL_DAY` | `5` / `10` | Codes per email and client IP per hour and per 24 hours; the daily cap is not below the hourly one |
 | `OTP_REQUESTS_PER_IP` / `OTP_VERIFICATIONS_PER_IP` | `30` / `60` | `request-code` and `verify-code` calls per client IP per 15 minutes |
-| `DEMO_LOGIN_ENABLED` | `false` | `true` lets the emails of `DEMO_LOGIN_EMAILS` sign in with `DEMO_ACCESS_CODE`, with no email. Production refuses it unless `K_SERVICE` ends in `-develop` |
+| `DEMO_LOGIN_ENABLED` | `false` | `true` lets the emails of `DEMO_LOGIN_EMAILS` sign in with `DEMO_ACCESS_CODE`, with no email |
 | `DEMO_LOGIN_EMAILS` | unset | Comma list, at most 10, of emails on a `demo.` subdomain. Required with `DEMO_LOGIN_ENABLED` |
 | `DEMO_ACCESS_CODE` | unset | At least 12 characters; secret. Required with `DEMO_LOGIN_ENABLED`, unused otherwise |
-| `K_SERVICE` | unset | Set by Cloud Run to the service name; read only for the demo rule |
 | `EMAIL_PROVIDER` | `simulated` | `simulated` sends nothing; `resend` requires the three variables below. Production requires `resend` |
 | `RESEND_API_KEY` | unset | Sending-only Resend key restricted to the sender domain; secret |
 | `EMAIL_FROM` | unset | `address@domain` or `Name <address@domain>`, on the domain verified in Resend |
