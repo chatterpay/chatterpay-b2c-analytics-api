@@ -32,6 +32,46 @@ describe('login code limits', () => {
     return Number(response.headers['retry-after']);
   }
 
+  it('sends no new code until the open one expired, even after the cooldown', async () => {
+    harness = await createHarness({ OTP_TTL_SECONDS: '300' });
+    const challengeId = await requestCode(harness, ADMIN_EMAIL);
+    const code = sentCode(harness, ADMIN_EMAIL) ?? '';
+
+    harness.advance(MINUTE_MS);
+    const early = await ask(ADMIN_EMAIL);
+    expect(early.statusCode).toBe(429);
+    expect(retryAfter(early)).toBe(4 * 60);
+    expect(harness.outbox).toHaveLength(1);
+
+    harness.advance(4 * MINUTE_MS);
+    expect((await ask(ADMIN_EMAIL)).statusCode).toBe(202);
+    expect(
+      (
+        await harness.call({
+          method: 'POST',
+          url: '/v1/auth/verify-code',
+          payload: { challengeId, email: ADMIN_EMAIL, code }
+        })
+      ).statusCode
+    ).toBe(401);
+  });
+
+  it('lets a demo account ask again after the cooldown, before its challenge expires', async () => {
+    const demo = 'admin@demo.example.com';
+    harness = await createHarness({
+      OTP_TTL_SECONDS: '300',
+      DEMO_LOGIN_ENABLED: 'true',
+      DEMO_LOGIN_EMAILS: demo
+    });
+    await harness.store.ensureUser(demo, 'admin', harness.now());
+    expect((await ask(demo)).statusCode).toBe(202);
+
+    harness.advance(30 * SECOND_MS);
+    expect(retryAfter(await ask(demo))).toBe(30);
+    harness.advance(30 * SECOND_MS);
+    expect((await ask(demo)).statusCode).toBe(202);
+  });
+
   it('waits the cooldown between two codes for the same email', async () => {
     harness = await createHarness();
     expect((await ask(ADMIN_EMAIL)).statusCode).toBe(202);
