@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { createCodeMatcher } from '../auth/access-code.js';
-import { clientIp } from '../auth/client-ip.js';
+import { activityAt, clientIp } from '../auth/client-ip.js';
 import {
   codeMatches,
   codeVerifier,
@@ -350,7 +350,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
         // Only failures against existing members are recorded, so the log holds no unknown emails.
         if (member !== null) {
           await store.appendActivity({
-            at: now,
+            ...activityAt(request, now),
             actorId: member.id,
             action: 'login_failed',
             target: null,
@@ -370,7 +370,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       ]);
       if (activated.acceptedInvite !== null) {
         await store.appendActivity({
-          at: now,
+          ...activityAt(request, now),
           actorId: activated.user.id,
           action: 'invite_accepted',
           target: email,
@@ -393,12 +393,14 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
         expiresAt
       });
       await store.appendActivity({
-        at: now,
+        ...activityAt(request, now),
         actorId: user.id,
         action: 'login',
         target: null,
         outcome: 'success'
       });
+      // Logins are frequent enough to remove the expired browser data of the log without a job.
+      await store.purgeActivityClients(now);
       return { token, expiresAt: expiresAt.toISOString(), user: toMemberBody(user) };
     }
   );
@@ -448,7 +450,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       const now = clock();
       await store.revokeSession(principal.sessionId, now);
       await store.appendActivity({
-        at: now,
+        ...activityAt(request, now),
         actorId: principal.userId,
         action: 'logout',
         target: null,
