@@ -59,7 +59,8 @@ const INVITE_COPY: Readonly<Record<EmailLocale, InviteCopy>> = {
 };
 
 interface LoginCodeCopy {
-  subject: (code: string) => string;
+  /** Fixed text: the code goes only in the body, so notifications and inbox lists do not show it. */
+  subject: string;
   intro: string;
   expires: (minutes: number) => string;
   ignore: string;
@@ -67,19 +68,19 @@ interface LoginCodeCopy {
 
 const LOGIN_CODE_COPY: Readonly<Record<EmailLocale, LoginCodeCopy>> = {
   en: {
-    subject: (code) => `${code} is your ${PRODUCT} code`,
+    subject: `Your ${PRODUCT} sign-in code`,
     intro: `Use this code to sign in to ${PRODUCT}:`,
     expires: (minutes) => `It expires in ${minutes} minutes and works once.`,
     ignore: 'If you did not try to sign in, you can ignore this email.'
   },
   es: {
-    subject: (code) => `${code} es tu código de ${PRODUCT}`,
+    subject: `Tu código para ingresar a ${PRODUCT}`,
     intro: `Usá este código para ingresar a ${PRODUCT}:`,
     expires: (minutes) => `Vence en ${minutes} minutos y sirve una sola vez.`,
     ignore: 'Si no intentaste ingresar, podés ignorar este email.'
   },
   br: {
-    subject: (code) => `${code} é o seu código do ${PRODUCT}`,
+    subject: `Seu código para entrar no ${PRODUCT}`,
     intro: `Use este código para entrar no ${PRODUCT}:`,
     expires: (minutes) => `Ele expira em ${minutes} minutos e só pode ser usado uma vez.`,
     ignore: 'Se você não tentou entrar, pode ignorar este email.'
@@ -193,5 +194,5 @@ export function renderLoginCodeEmail(input: {
     ].join('')
   );
   const text = [copy.intro, input.code, expires, copy.ignore].join('\n\n');
-  return { subject: copy.subject(input.code), html, text };
+  return { subject: copy.subject, html, text };
 }
