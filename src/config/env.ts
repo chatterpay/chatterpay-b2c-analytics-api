@@ -17,14 +17,11 @@ export interface AppEnv {
   DEMO_ACCESS_CODE: string | null;
   /**
    * Lets the emails of `DEMO_LOGIN_EMAILS` sign in with `DEMO_ACCESS_CODE` instead of a code sent
-   * by email. Off by default. In production it is accepted only on a Cloud Run service whose name
-   * ends in `-develop` (`K_SERVICE`); any other production service refuses to start with it on.
+   * by email. Off by default.
    */
   DEMO_LOGIN_ENABLED: boolean;
   /** Demo accounts, all under a `demo.` domain, normalized; empty unless the demo login is on. */
   DEMO_LOGIN_EMAILS: string[];
-  /** Name of the Cloud Run service, set by Cloud Run itself; `null` elsewhere. */
-  K_SERVICE: string | null;
   /**
    * Key of the verifiers of the login codes, hex or base64, at least 256 bits, dedicated to this
    * use. Required in production; outside production `null` uses a key generated at startup.
@@ -156,9 +153,6 @@ export function normalizeEmail(email: string): string {
 /** Domain of a demo account: its first label is `demo`, a domain that receives no mail. */
 const DEMO_EMAIL = /^[^\s@]+@demo\.[^\s@]+\.[^\s@]+$/;
 
-/** Cloud Run services that may run the demo login in production. */
-const DEMO_SERVICE = /-develop$/;
-
 function isEd25519PrivateKey(pem: string): boolean {
   try {
     return createPrivateKey({ key: pem, format: 'pem' }).asymmetricKeyType === 'ed25519';
@@ -226,7 +220,6 @@ const envSchema: z.ZodType<AppEnv> = z
       )
       .pipe(z.array(z.string().regex(DEMO_EMAIL).max(254)).max(10))
       .default([]),
-    K_SERVICE: z.string().min(1).max(128).nullable().default(null),
     OTP_HMAC_SECRET: z
       .string()
       .refine((value) => decodeKeyMaterial(value) !== null)
@@ -388,15 +381,6 @@ const envSchema: z.ZodType<AppEnv> = z
         message: 'Login codes need resend in production'
       });
     }
-    // `K_SERVICE` is set by Cloud Run from the service name, so a variable copied from the develop
-    // service into another one does not carry the demo login with it.
-    if (env.DEMO_LOGIN_ENABLED && !DEMO_SERVICE.test(env.K_SERVICE ?? '')) {
-      context.addIssue({
-        code: 'custom',
-        path: ['DEMO_LOGIN_ENABLED'],
-        message: 'Only on a -develop service'
-      });
-    }
     if (env.SITE_URL?.startsWith('http://')) {
       context.addIssue({
         code: 'custom',
@@ -425,7 +409,7 @@ const envSchema: z.ZodType<AppEnv> = z
  * The error lists the offending variable names only, never their values. Empty values count as
  * unset, so a `.env` copied from `.env.example` falls back to the defaults. Production requires
  * `OTP_HMAC_SECRET`, `OTP_EMAIL_HMAC_SECRET`, `JWT_PRIVATE_KEY`, `MONGO_URI`, `B2C_MONGO_URI` and
- * `EMAIL_PROVIDER=resend`, and refuses the demo login outside a `-develop` Cloud Run service.
+ * `EMAIL_PROVIDER=resend`.
  * `resend` requires `RESEND_API_KEY`, `EMAIL_FROM` and `SITE_URL`; the demo login requires
  * `DEMO_ACCESS_CODE` and `DEMO_LOGIN_EMAILS`.
  *
