@@ -342,7 +342,8 @@ export function buildPolymarketVolume(window: TimeWindow): PolymarketVolumeBlock
     scope: 'all_networks',
     valueUsd: served ? centsToUsd(polymarketCents(polymarket)) : null,
     fills: served ? (polymarket.figures?.fills ?? 0) : null,
-    readThrough: polymarket.figures?.coverage.through.toISOString() ?? null
+    readThrough: polymarket.figures?.coverage.through.toISOString() ?? null,
+    lastFillAt: polymarket.figures?.lastFillAt?.toISOString() ?? null
   };
 }
 
