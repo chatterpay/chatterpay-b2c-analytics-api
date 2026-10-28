@@ -4418,6 +4418,7 @@ paths:
                       - valueUsd
                       - fills
                       - readThrough
+                      - lastFillAt
                     properties:
                       source:
                         type: string
@@ -4476,6 +4477,14 @@ paths:
                           - type: string
                             format: date-time
                           - type: "null"
+                      lastFillAt:
+                        anyOf:
+                          - type: string
+                            format: date-time
+                          - type: "null"
+                        description: Start of the UTC hour of the last fill up to the end of the range,
+                          inside it or before it; null when no fill was read up
+                          to then.
                   polymarketAccounts:
                     type: object
                     additionalProperties: false
