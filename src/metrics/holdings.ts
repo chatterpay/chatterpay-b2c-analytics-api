@@ -474,7 +474,12 @@ export function buildTopCountries(
  * Builds the Master Wallets block: the configured signers of the selected networks with their
  * balances in the last snapshot. Balances are not fees: nothing here is attributed as revenue.
  * When none of the listed wallets was read the block is `unavailable` (`not_read`) and its total
- * `null`; the wallets stay listed with their status. Balances of hidden tokens are left out.
+ * `null`; the wallets stay listed with their status. A balance without a USD price keeps its
+ * amount with `valueUsd: null` and leaves the block `partial` (`unpriced_assets`), whose total and
+ * wallet values are the subtotal of the priced balances. A wallet holding only unpriced balances
+ * has no value, not a value of zero; when no read wallet holds a priced balance the block is
+ * `unavailable` (`unpriced_assets`) with a `null` total, and the balances stay listed. Balances of
+ * hidden tokens are left out.
  *
  * @param networks - Networks of the filter.
  * @param now - Current hour, in hours since 1970-01-01T00:00Z.
@@ -514,30 +519,39 @@ export function buildMasterWallets(
   }
   const valued = wallets.map((wallet) => {
     const read = wallet.status === 'complete';
+    // A read wallet without balances holds a measured zero; one whose balances all lack a price
+    // has no USD value.
+    const priced =
+      wallet.balances.length === 0 ||
+      wallet.balances.some((balance) => balance.valueCents !== null);
     const cents = sum(wallet.balances.map((balance) => balance.valueCents ?? 0));
-    return { wallet, cents: read ? cents : null };
+    return { wallet, cents: read && priced ? cents : null };
   });
   const total = sum(valued.map((item) => item.cents ?? 0));
   const unread = wallets.some((wallet) => wallet.status !== 'complete');
   const noneRead = wallets.every((wallet) => wallet.status !== 'complete');
-  const unpriced = wallets.some((wallet) =>
-    wallet.balances.some((balance) => balance.valueCents === null)
-  );
+  const held = wallets
+    .filter((wallet) => wallet.status === 'complete')
+    .flatMap((wallet) => wallet.balances);
+  const unpriced = held.some((balance) => balance.valueCents === null);
+  const unpricedOnly = held.length > 0 && held.every((balance) => balance.valueCents === null);
   // The balances of an unvalued run stay listed with their amounts; the USD figures are `null`.
   const notValued = !noneRead && !isValued(current);
+  const withoutTotal = noneRead || notValued || unpricedOnly;
   return {
     source: source.kind,
-    availability:
-      noneRead || notValued ? 'unavailable' : unread || unpriced ? 'partial' : 'available',
+    availability: withoutTotal ? 'unavailable' : unread || unpriced ? 'partial' : 'available',
     reason: noneRead
       ? 'not_read'
       : notValued
         ? 'not_valued'
-        : unread
-          ? 'partial_coverage'
-          : unpriced
-            ? 'unpriced_assets'
-            : null,
+        : unpricedOnly
+          ? 'unpriced_assets'
+          : unread
+            ? 'partial_coverage'
+            : unpriced
+              ? 'unpriced_assets'
+              : null,
     asOf: asOfOf(source, current),
     items: valued.map(({ wallet, cents }) => ({
       network: wallet.network,
@@ -554,6 +568,6 @@ export function buildMasterWallets(
       valueUsd: cents === null || notValued ? null : centsToUsd(cents),
       share: cents === null || notValued ? null : shareOf(cents, total)
     })),
-    totalUsd: noneRead || notValued ? null : centsToUsd(total)
+    totalUsd: withoutTotal ? null : centsToUsd(total)
   };
 }
