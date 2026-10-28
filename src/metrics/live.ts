@@ -935,7 +935,16 @@ class LiveSource implements MetricsSource {
       volumeMicro += item.buyMicro + item.sellMicro;
       attributed += item.attributed;
     }
-    return { fills, volumeMicro, attributed, coverage: this.polymarketCoverage };
+    // A stored hour exists only when it has fills, so the last hour up to the window end is the
+    // hour of the last fill.
+    const lastHour = hours[lowerBound(hours, last + 1) - 1];
+    return {
+      fills,
+      volumeMicro,
+      attributed,
+      coverage: this.polymarketCoverage,
+      lastFillAt: lastHour === undefined ? null : new Date(lastHour * HOUR_MS)
+    };
   }
 }
 
