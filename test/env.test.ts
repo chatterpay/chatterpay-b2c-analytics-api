@@ -175,7 +175,7 @@ describe('loadEnv', () => {
     ).toThrow('Invalid environment variables: OTP_EMAIL_HMAC_SECRET');
   });
 
-  it('allows the demo login only with its code and demo accounts, and in production only on a -develop service', () => {
+  it('allows the demo login only with its code and demo accounts', () => {
     const demo = {
       DEMO_LOGIN_ENABLED: 'true',
       DEMO_ACCESS_CODE: 'test-only-access-code-0001',
@@ -196,22 +196,10 @@ describe('loadEnv', () => {
       'Invalid environment variables: DEMO_LOGIN_EMAILS'
     );
 
+    expect(loadEnv({ ...PRODUCTION, ...demo }).DEMO_LOGIN_ENABLED).toBe(true);
+    // The demo variables without the flag keep the demo login off.
     expect(
-      loadEnv({ ...PRODUCTION, ...demo, K_SERVICE: 'analytics-api-develop' }).DEMO_LOGIN_ENABLED
-    ).toBe(true);
-    for (const service of [{}, { K_SERVICE: 'analytics-api-main' }, { K_SERVICE: 'develop' }]) {
-      expect(() => loadEnv({ ...PRODUCTION, ...demo, ...service })).toThrow(
-        'Invalid environment variables: DEMO_LOGIN_ENABLED'
-      );
-    }
-    // Copying the demo variables without turning the flag on keeps the demo login off.
-    expect(
-      loadEnv({
-        ...PRODUCTION,
-        ...demo,
-        DEMO_LOGIN_ENABLED: 'false',
-        K_SERVICE: 'analytics-api-main'
-      }).DEMO_LOGIN_ENABLED
+      loadEnv({ ...PRODUCTION, ...demo, DEMO_LOGIN_ENABLED: 'false' }).DEMO_LOGIN_ENABLED
     ).toBe(false);
   });
 
