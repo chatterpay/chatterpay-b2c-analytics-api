@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { activityAt } from '../auth/client-ip.js';
 import { emailKey, type LoginCodeKeys } from '../auth/login-code.js';
 import {
   type LoginLimits,
@@ -269,7 +270,7 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
       await store.revokeChallenge(emailKey(loginKeys, user.email), now);
     }
     await store.appendActivity({
-      at: now,
+      ...activityAt(request, now),
       actorId: actor,
       action: blocked ? 'member_blocked' : 'member_unblocked',
       target: user.email,
@@ -364,12 +365,14 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
     async (request) => {
       const { limit, cursor } = request.query;
       const after = cursor === undefined ? undefined : decodeActivityCursor(cursor);
+      const now = clock();
+      await store.purgeActivityClients(now);
       // One event past the page tells whether another page exists without a count query.
       const events = await store.listActivity(limit + 1, after);
       const page = events.slice(0, limit);
       const last = page.at(-1);
       return {
-        items: await Promise.all(page.map((event) => toActivityEventBody(store, event))),
+        items: await Promise.all(page.map((event) => toActivityEventBody(store, event, now))),
         nextCursor:
           events.length > limit && last !== undefined ? encodeCursor(last.at, last.id) : null
       };
@@ -409,7 +412,7 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
       let invite = result.invite;
       if (result.kind === 'created') {
         await store.appendActivity({
-          at: now,
+          ...activityAt(request, now),
           actorId: createdBy,
           action: 'invite_created',
           target: email,
@@ -437,7 +440,7 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
       const now = clock();
       const invite = inviteOrThrow(await store.resendInvite(request.params.id, now));
       await store.appendActivity({
-        at: now,
+        ...activityAt(request, now),
         actorId: actorId(request),
         action: 'invite_resent',
         target: invite.email,
@@ -462,7 +465,7 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
       const now = clock();
       const invite = inviteOrThrow(await store.revokeInvite(request.params.id, now));
       await store.appendActivity({
-        at: now,
+        ...activityAt(request, now),
         actorId: actorId(request),
         action: 'invite_revoked',
         target: invite.email,
@@ -491,7 +494,7 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
       }
       const user = memberOrThrow(await store.changeRole(request.params.id, request.body.role));
       await store.appendActivity({
-        at: clock(),
+        ...activityAt(request, clock()),
         actorId: actor,
         action: 'role_changed',
         target: user.email,
@@ -525,7 +528,7 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
       const user = memberOrThrow(await store.removeUser(request.params.id, now));
       await store.revokeChallenge(emailKey(loginKeys, user.email), now);
       await store.appendActivity({
-        at: now,
+        ...activityAt(request, now),
         actorId: actor,
         action: 'member_removed',
         target: user.email,
@@ -588,7 +591,7 @@ export async function teamRoutes(app: FastifyInstance, options: TeamRoutesOption
       // The per-IP code counters of the email cannot be listed by member; they end by themselves.
       await store.clearLoginLimits([throttleKey(key)]);
       await store.appendActivity({
-        at: clock(),
+        ...activityAt(request, clock()),
         actorId: actorId(request),
         action: 'login_lockout_cleared',
         target: user.email,
