@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { activityAt } from '../auth/client-ip.js';
 import { requireRoles } from '../auth/principal.js';
 import { ApiError } from '../errors/api-error.js';
 import { listNetworks, NETWORK_ID_PATTERN, type NetworkDefinition } from '../metrics/catalog.js';
@@ -285,7 +286,7 @@ export async function adminRoutes(
       }
       if (result.kind !== 'ok' || result.changed) {
         await store.appendActivity({
-          at: now,
+          ...activityAt(request, now),
           actorId: actor,
           action: analyticsEnabled ? 'network_shown' : 'network_hidden',
           target: `${network.label} (${network.chainId})`,
@@ -346,7 +347,7 @@ export async function adminRoutes(
       }
       if (result.kind !== 'ok' || result.changed) {
         await store.appendActivity({
-          at: now,
+          ...activityAt(request, now),
           actorId: actor,
           action: analyticsEnabled ? 'token_shown' : 'token_hidden',
           target: `${token.symbol} on ${network?.label ?? token.network} (${token.id})`,
