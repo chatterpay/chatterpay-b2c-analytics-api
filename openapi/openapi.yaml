@@ -889,6 +889,7 @@ paths:
                         - action
                         - target
                         - outcome
+                        - client
                       properties:
                         id:
                           type: string
@@ -930,6 +931,82 @@ paths:
                           enum:
                             - success
                             - failure
+                        client:
+                          anyOf:
+                            - type: object
+                              additionalProperties: false
+                              required:
+                                - ip
+                                - userAgent
+                                - language
+                                - platform
+                                - mobile
+                                - brands
+                                - browser
+                                - os
+                                - device
+                                - expiresAt
+                              properties:
+                                ip:
+                                  type:
+                                    - string
+                                    - "null"
+                                  description: Browser IP forwarded by the BFF.
+                                userAgent:
+                                  type:
+                                    - string
+                                    - "null"
+                                  description: User-Agent of the browser.
+                                language:
+                                  type:
+                                    - string
+                                    - "null"
+                                  description: Accept-Language of the browser.
+                                platform:
+                                  type:
+                                    - string
+                                    - "null"
+                                  description: Sec-CH-UA-Platform client hint.
+                                mobile:
+                                  type:
+                                    - boolean
+                                    - "null"
+                                  description: Sec-CH-UA-Mobile client hint.
+                                brands:
+                                  type:
+                                    - string
+                                    - "null"
+                                  description: Sec-CH-UA client hint.
+                                browser:
+                                  type:
+                                    - string
+                                    - "null"
+                                  description: Browser and major version read from the user agent and client
+                                    hints.
+                                os:
+                                  type:
+                                    - string
+                                    - "null"
+                                  description: Operating system read from the same.
+                                device:
+                                  type:
+                                    - string
+                                    - "null"
+                                  enum:
+                                    - desktop
+                                    - mobile
+                                    - tablet
+                                    - bot
+                                    - null
+                                  description: Kind of device read from the same.
+                                expiresAt:
+                                  type: string
+                                  format: date-time
+                                  description: When the browser data is removed from the event; the event stays.
+                            - type: "null"
+                          description: Browser of the request, kept 60 days; `null` for older events and
+                            once it expired. What the browser claims, not a
+                            verified device.
                   nextCursor:
                     type:
                       - "null"
