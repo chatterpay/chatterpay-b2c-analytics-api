@@ -38,6 +38,11 @@ export interface PolymarketFigures {
   attributed: number;
   /** Blocks of Polygon the fills were read from. */
   coverage: PolymarketCoverage;
+  /**
+   * Start of the UTC hour of the last fill up to the end of the window, inside it or before it;
+   * `null` when no fill was read up to then.
+   */
+  lastFillAt: Date | null;
 }
 
 /** Data the metrics of one group are computed from. */
