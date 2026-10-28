@@ -86,7 +86,12 @@ export async function buildApp(env: AppEnv, options: AppOptions = {}): Promise<F
           'req.headers.authorization',
           'req.headers["x-serverless-authorization"]',
           'req.headers.cookie',
-          'req.headers["x-client-ip"]'
+          'req.headers["x-client-ip"]',
+          'req.headers["x-client-user-agent"]',
+          'req.headers["x-client-language"]',
+          'req.headers["x-client-platform"]',
+          'req.headers["x-client-mobile"]',
+          'req.headers["x-client-brands"]'
         ],
         censor: '[redacted]'
       }
