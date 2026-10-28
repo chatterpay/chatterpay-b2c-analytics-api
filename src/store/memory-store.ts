@@ -417,6 +417,17 @@ export class MemoryStore implements Store {
     return { ...stored };
   }
 
+  async purgeActivityClients(now: Date): Promise<number> {
+    let purged = 0;
+    for (const event of this.activity) {
+      if (event.client !== null && event.client.expiresAt.getTime() <= now.getTime()) {
+        event.client = null;
+        purged += 1;
+      }
+    }
+    return purged;
+  }
+
   async lastActivityOf(userIds: readonly string[]): Promise<Map<string, Date>> {
     const wanted = new Set(userIds);
     const last = new Map<string, Date>();
