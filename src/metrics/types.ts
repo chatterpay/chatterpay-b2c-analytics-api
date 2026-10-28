@@ -418,6 +418,11 @@ export interface PolymarketVolumeBlock extends BlockStatus {
   fills: number | null;
   /** Time of the last Polygon block read; `null` when no block was read. */
   readThrough: string | null;
+  /**
+   * Start of the UTC hour of the last fill up to the end of the range, inside it or before it, so
+   * a range without fills can say when the last one was; `null` when no fill was read up to then.
+   */
+  lastFillAt: string | null;
 }
 
 /**
