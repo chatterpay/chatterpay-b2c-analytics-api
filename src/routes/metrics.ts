@@ -255,7 +255,12 @@ const polymarketVolumeBlock = block({
   },
   valueUsd: nullableDecimal,
   fills: { type: ['integer', 'null'], minimum: 0 },
-  readThrough: nullableInstant
+  readThrough: nullableInstant,
+  lastFillAt: {
+    ...nullableInstant,
+    description:
+      'Start of the UTC hour of the last fill up to the end of the range, inside it or before it; null when no fill was read up to then.'
+  }
 });
 
 const polymarketAccountsBlock = block({
