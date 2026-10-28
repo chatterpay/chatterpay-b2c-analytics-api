@@ -1,3 +1,4 @@
+import { type DeviceType, deviceInfo } from '../auth/user-agent.js';
 import { EMAIL_LOCALES } from '../email/types.js';
 import type { ActivityEvent, Invite, InviteDelivery, Store, User } from '../store/types.js';
 import { object } from './schemas.js';
@@ -58,6 +59,21 @@ export interface ActivityEventBody {
   action: ActivityEvent['action'];
   target: string | null;
   outcome: ActivityEvent['outcome'];
+  client: ActivityClientBody | null;
+}
+
+/** Browser of an activity event, with the browser, system and device read from it. */
+export interface ActivityClientBody {
+  ip: string | null;
+  userAgent: string | null;
+  language: string | null;
+  platform: string | null;
+  mobile: boolean | null;
+  brands: string | null;
+  browser: string | null;
+  os: string | null;
+  device: DeviceType | null;
+  expiresAt: string;
 }
 
 const ROLE_ENUM = ['admin', 'viewer'];
@@ -185,7 +201,36 @@ export const activityEventSchema: Record<string, unknown> = object({
     description:
       'Email the action applies to, the network as "Label (chainId)" or the token as "SYMBOL on Label (tokenId)".'
   },
-  outcome: { type: 'string', enum: ['success', 'failure'] }
+  outcome: { type: 'string', enum: ['success', 'failure'] },
+  client: {
+    anyOf: [
+      object({
+        ip: { type: ['string', 'null'], description: 'Browser IP forwarded by the BFF.' },
+        userAgent: { type: ['string', 'null'], description: 'User-Agent of the browser.' },
+        language: { type: ['string', 'null'], description: 'Accept-Language of the browser.' },
+        platform: { type: ['string', 'null'], description: 'Sec-CH-UA-Platform client hint.' },
+        mobile: { type: ['boolean', 'null'], description: 'Sec-CH-UA-Mobile client hint.' },
+        brands: { type: ['string', 'null'], description: 'Sec-CH-UA client hint.' },
+        browser: {
+          type: ['string', 'null'],
+          description: 'Browser and major version read from the user agent and client hints.'
+        },
+        os: { type: ['string', 'null'], description: 'Operating system read from the same.' },
+        device: {
+          type: ['string', 'null'],
+          enum: ['desktop', 'mobile', 'tablet', 'bot', null],
+          description: 'Kind of device read from the same.'
+        },
+        expiresAt: {
+          ...instant,
+          description: 'When the browser data is removed from the event; the event stays.'
+        }
+      }),
+      { type: 'null' }
+    ],
+    description:
+      'Browser of the request, kept 60 days; `null` for older events and once it expired. What the browser claims, not a verified device.'
+  }
 });
 
 /**
@@ -263,22 +308,40 @@ export async function toInviteBody(store: Store, invite: Invite): Promise<Invite
 }
 
 /**
- * Maps an activity event to its API body, resolving the actor email.
+ * Maps an activity event to its API body, resolving the actor email. Browser data that expired at
+ * `now` is left out even before the purge removes it.
  *
  * @param store - Store to resolve the actor.
  * @param event - Stored event.
+ * @param now - Current instant.
  * @returns The event body.
  */
 export async function toActivityEventBody(
   store: Store,
-  event: ActivityEvent
+  event: ActivityEvent,
+  now: Date
 ): Promise<ActivityEventBody> {
+  const client =
+    event.client !== null && event.client.expiresAt.getTime() > now.getTime() ? event.client : null;
   return {
     id: event.id,
     at: event.at.toISOString(),
     actor: await emailOf(store, event.actorId),
     action: event.action,
     target: event.target,
-    outcome: event.outcome
+    outcome: event.outcome,
+    client:
+      client === null
+        ? null
+        : {
+            ip: client.ip,
+            userAgent: client.userAgent,
+            language: client.language,
+            platform: client.platform,
+            mobile: client.mobile,
+            brands: client.brands,
+            ...deviceInfo(client.userAgent, client),
+            expiresAt: client.expiresAt.toISOString()
+          }
   };
 }
