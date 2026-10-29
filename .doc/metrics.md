@@ -14,7 +14,7 @@ Cada pantalla usa estas reglas.
 
 ### Origen de los datos
 
-Una actualización de datos (`POST /v1/internal/ingest`, disparada por Cloud Scheduler) hace tres cosas: copia de la base B2C las colecciones `transactions`, `users`, `tokens` y `blockchains`, lee los saldos on-chain de las wallets y lee los fills de Polymarket en Polygon. Después reconstruye los agregados. El sitio no lee nunca la base B2C ni blockchain.
+Cada actualización de datos toma de la base B2C las transacciones, los usuarios, los tokens y las redes, lee los saldos on-chain de las wallets y lee los fills de Polymarket en Polygon. Las cifras reflejan la última actualización.
 
 | Tipo de fila B2C (`transactions`) | Qué es | Dónde cuenta |
 |---|---|---|
@@ -73,7 +73,7 @@ La variación es (actual − anterior) / anterior × 100. Sin valor anterior, o 
 - **Qué muestra:** valor en USD de los saldos de las wallets de usuarios en las redes seleccionadas.
 - **Cálculo:** se suman los saldos del último snapshot y se valúan con el precio del día del snapshot.
 - **Saldos leídos:**
-  - EVM: los tokens ERC-20 de la lista B2C y la moneda nativa cuando la lista la incluye o una master wallet de la red declara `nativeSymbol`.
+  - EVM: los tokens ERC-20 de la lista B2C y la moneda nativa cuando la lista la incluye o una master wallet de la red declara su moneda nativa.
   - Cardano: ADA y los activos nativos listados.
 - **Ventana:** la cifra es el último snapshot. El período seleccionado no la cambia y la comparación es con el último snapshot del período anterior.
 - **Valor bloqueado en el tiempo:** el gráfico toma el último snapshot de cada intervalo del período.
@@ -283,7 +283,7 @@ El indicador muestra Volumen de Polymarket cuando hay fills leídos. Si no hay, 
 
 ### Master wallets
 
-- **Qué muestra:** saldos de las direcciones de los firmantes configuradas en `MASTER_WALLETS`. Cada fila muestra la red, el rol, la dirección con link al explorador, el valor en USD, la participación y los saldos en unidades.
+- **Qué muestra:** saldos de las direcciones de los firmantes de ChatterPay. Cada fila muestra la red, el rol, la dirección con link al explorador, el valor en USD, la participación y los saldos en unidades.
 - **Cálculo:**
   - Toma el último snapshot y valúa con el precio del día.
   - El total junto al título suma los saldos con precio.
