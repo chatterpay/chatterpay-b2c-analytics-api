@@ -1710,6 +1710,7 @@ paths:
                 additionalProperties: false
                 required:
                   - networks
+                  - tokenLogos
                 properties:
                   networks:
                     type: array
@@ -1732,6 +1733,25 @@ paths:
                           enum:
                             - evm
                             - cardano
+                  tokenLogos:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required:
+                        - symbol
+                        - logo
+                      properties:
+                        symbol:
+                          type: string
+                        logo:
+                          type: string
+                          description: The image as a `data:` URI (SVG, PNG, WebP, JPEG or GIF), at most
+                            64 KiB.
+                    description: Logo of each token symbol, downloaded by the ingestion from the
+                      `logo` of the B2C token list. A symbol without a
+                      downloaded logo is not listed; the list is empty while the
+                      dataset is synthetic.
         "400":
           description: Default Response
           content:
