@@ -3,6 +3,7 @@ import { type AggregationStats, aggregateActivity, aggregatePolymarket } from '.
 import type { IngestRunStatus, UsdValuation } from '../metrics/types.js';
 import { collectPolymarketFills } from './polymarket-fills.js';
 import { type MasterWalletConfig, type NetworkRead, takeBalanceSnapshot } from './snapshot.js';
+import { collectTokenLogos, type LogoFetcher } from './token-logos.js';
 import type {
   B2cActivityReader,
   B2cUserRecord,
@@ -59,6 +60,8 @@ export interface IngestionDependencies {
   polygon?: PolygonFillReader | null;
   /** Configured signers whose balances the snapshot reads. */
   masterWallets: readonly MasterWalletConfig[];
+  /** Downloader of the token logos; `null` or absent keeps the stored logos. */
+  logos?: LogoFetcher | null;
   /** USD valuation of balances and operations (`USD_VALUATION`); `market` when omitted. */
   valuation?: UsdValuation;
   clock: () => Date;
@@ -443,6 +446,11 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
 
     const [tokens, chains] = await Promise.all([reader.tokens(), reader.chains()]);
     const retained = await repository.replaceCatalog(tokens, chains, startedAt);
+    const tokenLogos = await collectTokenLogos(
+      tokens,
+      await repository.tokenLogos(),
+      deps.logos ?? null
+    );
     report.sources.catalog = {
       tokens: tokens.length,
       networks: chains.length,
@@ -656,7 +664,11 @@ export async function runIngestion(deps: IngestionDependencies): Promise<Ingesti
     const builtAt = deps.clock();
     report.status = stopped ? 'partial' : 'completed';
     await repository.saveAggregates(
-      { ...aggregates, polymarket: aggregatePolymarket(fills, polymarketCoverage) },
+      {
+        ...aggregates,
+        polymarket: aggregatePolymarket(fills, polymarketCoverage),
+        tokenLogos: tokenLogos.logos
+      },
       builtAt,
       {
         status: report.status,
