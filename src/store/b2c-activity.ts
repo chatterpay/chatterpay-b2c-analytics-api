@@ -1,5 +1,6 @@
 import { parsePhoneNumberFromString } from 'libphonenumber-js/max';
 import { type Db, type Filter, type Document as MongoDocument, ObjectId } from 'mongodb';
+import { logoUrlOf } from '../ingest/token-logos.js';
 import type {
   B2cActivityReader,
   B2cUserRecord,
@@ -207,7 +208,8 @@ export class MongoB2cActivityReader implements B2cActivityReader {
             type: 1,
             address: 1,
             decimals: 1,
-            enabled: 1
+            enabled: 1,
+            logo: 1
           }
         }
       )
@@ -225,7 +227,8 @@ export class MongoB2cActivityReader implements B2cActivityReader {
           document.decimals <= 36
             ? document.decimals
             : null,
-        b2cEnabled: typeof document.enabled === 'boolean' ? document.enabled : null
+        b2cEnabled: typeof document.enabled === 'boolean' ? document.enabled : null,
+        logoUrl: logoUrlOf(document.logo)
       }))
       .filter((token) => token.chainId !== '' && token.symbol !== '');
   }
