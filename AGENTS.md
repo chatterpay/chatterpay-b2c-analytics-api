@@ -8,6 +8,7 @@ Instructions for coding agents working in this repository.
 - Metrics come from aggregates in the analytics database. Only the ingestion (`src/ingest/`, behind `POST /v1/internal/ingest`) reads the ChatterPay B2C database (read-only) or calls a provider, within its per-run budget; request handlers never do. Do not copy production data into fixtures.
 - `LIVE_METRIC_GROUPS` states which metric groups are live; the others stay synthetic. Changing how B2C rows become metrics requires a new `LIVE_DATASET_VERSION`.
 - Mock datasets live in this repo, never in the site.
+- `.doc/metrics.md` documents how each figure of the site is calculated. A change to a metric calculation updates it in the same change (see `.claude/rules/metrics-doc.md`).
 
 ## Code rules
 
