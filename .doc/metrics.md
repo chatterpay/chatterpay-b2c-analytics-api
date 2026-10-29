@@ -14,7 +14,7 @@ Cada pantalla usa estas reglas.
 
 ### Origen de los datos
 
-Una actualización de datos (`POST /v1/internal/ingest`, disparada por Cloud Scheduler) hace tres cosas: copia de la base B2C las colecciones `transactions`, `users`, `tokens` y `blockchains`, lee los saldos on-chain de las wallets y lee los fills de Polymarket en Polygon. Después reconstruye los agregados. El sitio no lee nunca la base B2C ni la blockchain.
+Una actualización de datos (`POST /v1/internal/ingest`, disparada por Cloud Scheduler) hace tres cosas: copia de la base B2C las colecciones `transactions`, `users`, `tokens` y `blockchains`, lee los saldos on-chain de las wallets y lee los fills de Polymarket en Polygon. Después reconstruye los agregados. El sitio no lee nunca la base B2C ni blockchain.
 
 | Tipo de fila B2C (`transactions`) | Qué es | Dónde cuenta |
 |---|---|---|
