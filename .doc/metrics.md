@@ -1,35 +1,56 @@
 # Métricas de ChatterPay Analytics
 
-Cálculo de cada dato que muestra el sitio. La definición técnica de cada bloque de la API está en el [README](../README.md#metric-blocks); este documento la describe por pantalla.
+Cálculo de cada dato del sitio, por pantalla y en el orden en que aparece. Los nombres son los de la versión en español del sitio. La definición técnica de cada bloque de la API está en el [README](../README.md#metric-blocks).
 
-## Origen de los datos
+- [Reglas comunes](#reglas-comunes)
+- [Resumen](#resumen)
+- [Usuarios](#usuarios)
+- [Ingresos](#ingresos)
+- [Diferencias con un conteo on-chain](#diferencias-con-un-conteo-on-chain)
 
-Una actualización de datos (`POST /v1/internal/ingest`, disparada por Cloud Scheduler) copia de la base B2C las colecciones `transactions`, `users`, `tokens` y `blockchains`, lee los saldos on-chain de las wallets y los fills de Polymarket en Polygon, y reconstruye los agregados. El sitio nunca lee la base B2C ni la blockchain.
+## Reglas comunes
 
-Tipos de fila de `transactions` que usa cada métrica:
+Cada pantalla usa estas reglas.
 
-| Tipo B2C | Qué es | Uso |
+### Origen de los datos
+
+Una actualización de datos (`POST /v1/internal/ingest`, disparada por Cloud Scheduler) hace tres cosas: copia de la base B2C las colecciones `transactions`, `users`, `tokens` y `blockchains`, lee los saldos on-chain de las wallets y lee los fills de Polymarket en Polygon. Después reconstruye los agregados. El sitio no lee nunca la base B2C ni la blockchain.
+
+| Tipo de fila B2C (`transactions`) | Qué es | Dónde cuenta |
 |---|---|---|
-| `transfer` | Envío desde una wallet de ChatterPay a otro usuario o a una wallet externa. Una transferencia entre dos usuarios de ChatterPay es una sola fila | Volumen, operaciones, comisiones, usuarios activos |
-| `swap` | Dos filas por swap: la wallet envía al router y el router devuelve a la wallet | Volumen, operaciones, comisiones, usuarios activos |
-| `deposit` | Ingreso desde una wallet fuera de ChatterPay. El backend no la registra cuando el hash ya existe, así que una transferencia entre usuarios no genera un depósito | No se usa |
-| `polymarket_bridge`, `polymarket_claim`, `polymarket_withdraw` | Movimientos de fondos hacia o desde la cuenta de Polymarket | No se usan |
+| `transfer` | Envío desde una wallet de ChatterPay a otro usuario o a una wallet externa. Una transferencia entre dos usuarios de ChatterPay es una sola fila | Volumen, transacciones, comisiones, usuarios activos |
+| `swap` | Dos filas por swap: la wallet envía al router y el router le devuelve a la wallet | Volumen, transacciones, comisiones, usuarios activos |
+| `deposit` | Ingreso desde una wallet fuera de ChatterPay. El backend no la registra cuando el hash ya existe, así que una transferencia entre usuarios no genera un depósito | En ninguna |
+| `polymarket_bridge`, `polymarket_claim`, `polymarket_withdraw` | Movimientos de fondos hacia la cuenta de Polymarket o desde ella | En ninguna |
 
-Sólo cuentan las filas con `status: completed`. Las filas de una red que no está en el catálogo no cuentan.
+### Operación contada
 
-## Valuación en USD
+Es una transferencia con `status: completed` o un swap completo. Un swap está completo cuando sus dos filas (mismo hash, mismo par de direcciones, sentidos opuestos) están completadas. Un swap con una sola fila, con una fila pendiente o con filas de más no cuenta en ninguna cifra. Las filas de una red fuera del catálogo tampoco cuentan.
+
+### Usuario activo
+
+Es un usuario que inició al menos una operación contada en la ventana. La actividad es de la wallet que envía; en un swap, la del lado de entrada. Una persona cuenta una vez, aunque opere en varias redes.
+
+Estas acciones no vuelven activo a un usuario:
+
+- recibir una transferencia;
+- recibir un depósito;
+- operar en Polymarket;
+- darse de alta sin operar.
+
+### Valuación en USD
 
 - Las stablecoins valen 1 USD.
 - El resto toma el precio diario de CoinGecko. Sólo están mapeados ETH, WETH, BTC, WBTC, ADA, POL y MATIC.
-- Un swap entre una stablecoin y otro token fija el precio de ese token para ese día; el precio de CoinGecko del mismo día tiene prioridad.
+- Un swap entre una stablecoin y otro token fija el precio de ese token para ese día. El precio de CoinGecko del mismo día tiene prioridad.
 - Volumen y comisiones: un día sin precio toma el día anterior más cercano con precio y, si no hay, el posterior más cercano.
-- Saldos (TVL, saldos por token, master wallets): sólo el precio del mismo día del snapshot.
-- Una operación o saldo sin precio queda afuera de la cifra en USD, nunca se toma como cero. La cifra pasa a ser un subtotal y no tiene comparación con el período anterior.
+- Saldos: sólo cuenta el precio del mismo día del snapshot.
+- Una operación o un saldo sin precio queda fuera de la cifra en USD, nunca se toma como cero. La cifra pasa a ser un subtotal y no se compara con el período anterior. Ejemplo: SCR (Scroll) no tiene precio.
 - Los activos de redes de prueba no tienen valor de mercado.
 
-Ejemplo: SCR (Scroll) no tiene precio, así que sus transferencias y saldos quedan fuera de los totales en USD y se muestran en unidades del token.
+### Períodos
 
-## Períodos y comparación
+El selector de período de Resumen e Ingresos:
 
 | Período | Ventana | Comparado con |
 |---|---|---|
@@ -38,103 +59,243 @@ Ejemplo: SCR (Scroll) no tiene precio, así que sus transferencias y saldos qued
 | Año en curso | Desde el 1 de enero hasta la hora actual | Las mismas fechas del año anterior |
 | Histórico | Desde el inicio de los datos | Sin comparación |
 
-Variación = (actual − anterior) / anterior × 100. Sin valor anterior, o con valor anterior 0, no hay variación.
+La variación es (actual − anterior) / anterior × 100. Sin valor anterior, o con valor anterior 0, no hay variación.
 
-Las redes y los tokens ocultos desde Configuración quedan fuera de todas las cifras, comparaciones incluidas.
+### Filtros
 
-## Operaciones
+- **Red:** el selector de red limita todas las cifras a las redes elegidas.
+- **Ocultos:** las redes y los tokens ocultos en Configuración quedan fuera de todas las cifras, comparaciones incluidas.
 
-| Dato | Cálculo |
-|---|---|
-| Operaciones | Transferencias completadas + swaps completos del período. Un swap cuenta una vez aunque tenga dos filas |
-| Swap completo | Las dos filas del swap (mismo hash, mismo par de direcciones, sentidos opuestos) completadas. Un swap con una sola fila, con una fila pendiente o con filas de más queda afuera de todos los conteos |
-| Volumen | Valor en USD de las transferencias enviadas + valor en USD del lado de entrada de los swaps |
-| Volumen de swaps | Valor en USD del token del que parte cada swap. Si ese token no tiene precio y el que recibe es una stablecoin, se usa el monto de la stablecoin |
-| Comisiones | Campo `fee` registrado en cada transferencia y en el lado de entrada de cada swap, valuado en USD. Es la comisión registrada, no un cobro conciliado |
-| Comisión promedio por operación | Comisiones / operaciones, con hasta 4 decimales |
-| Tasa de comisión | Comisiones / volumen. Sólo cuando las dos cifras tienen todas sus operaciones valuadas |
+## Resumen
 
-Reglas del volumen:
+### Valor total bloqueado
 
-- Una transferencia cuenta una vez, del lado que la envía, vaya a otro usuario de ChatterPay o a una wallet externa. La recepción no suma otra vez.
-- Un swap cuenta una vez, por el valor del token de entrada. El token de salida no suma.
-- Los depósitos desde wallets externas no se cuentan.
-- Polymarket no suma en Volumen total: sus fills están en Polygon, fuera de las redes de ChatterPay. Se muestra como cifra aparte.
+- **Qué muestra:** valor en USD de los saldos de las wallets de usuarios en las redes seleccionadas.
+- **Cálculo:** se suman los saldos del último snapshot y se valúan con el precio del día del snapshot.
+- **Saldos leídos:**
+  - EVM: los tokens ERC-20 de la lista B2C y la moneda nativa cuando la lista la incluye o una master wallet de la red declara `nativeSymbol`.
+  - Cardano: ADA y los activos nativos listados.
+- **Ventana:** la cifra es el último snapshot. El período seleccionado no la cambia y la comparación es con el último snapshot del período anterior.
+- **Valor bloqueado en el tiempo:** el gráfico toma el último snapshot de cada intervalo del período.
+- **Valor bloqueado por red:** el mismo snapshot por red, con su participación.
+- **Límites:**
+  - Las master wallets no se cuentan.
+  - Una wallet cuenta sólo si se leyeron todos sus saldos.
+  - Una red que no se pudo leer no cuenta como cero: la cifra pasa a ser el subtotal de las redes leídas.
+  - No hay datos anteriores al primer snapshot.
 
-### Volumen por producto
+### Volumen total
 
-Volumen de transferencias, de swaps y de Polymarket, con su participación. Polymarket aparece sólo con Todas las redes, y las participaciones son sobre los tres productos.
+- **Qué muestra:** valor en USD de las transferencias y los swaps completados del período.
+- **Cálculo:** transferencias enviadas + swaps, cada swap al valor del token del que parte.
+- **Cómo cuenta cada operación:**
+  - Una transferencia cuenta una vez, del lado que la envía, vaya a otro usuario de ChatterPay o a una wallet externa.
+  - Un swap cuenta una vez, no una por cada token.
+- **Ventana:** el período seleccionado, comparado con el anterior. La línea del indicador es el volumen por intervalo.
+- **No incluye:**
+  - depósitos desde wallets externas;
+  - fills de Polymarket (es otra cifra, en Ingresos);
+  - fondeo y retiro de Polymarket;
+  - operaciones sin precio en USD.
 
-### Tokens más usados
+### Transacciones
 
-Operaciones y volumen por token y red en el período. Una transferencia cuenta en el token enviado; un swap cuenta en el token del que parte, con todo su volumen y su comisión.
+- **Qué muestra:** cantidad de operaciones contadas del período.
+- **Cálculo:** transferencias completadas + swaps completos. Un swap cuenta una vez aunque tenga dos filas.
+- **Ventana:** el período seleccionado, comparado con el anterior.
+- **No incluye:** operaciones no completadas, depósitos externos ni operaciones de Polymarket.
 
-### Comisiones por producto, por red y por activo
+### Comisiones totales
 
-- Por producto: comisiones de transferencias, de swaps y de Polymarket. Polymarket muestra 0: ChatterPay envía las órdenes sin builder code y no cobra comisión. La comisión que cobra Polymarket la paga el usuario a Polymarket y no está incluida.
-- Por red: comisiones de transferencias + comisiones de swaps de la red, con su volumen. Participación = comisiones de la red / comisiones totales.
-- Por activo: volumen y comisiones por token y red.
-
-## Polymarket
-
-| Dato | Cálculo |
-|---|---|
-| Cuentas de Polymarket | Usuarios con cuenta de Polymarket vinculada y dirección de Polygon válida. Cada usuario cuenta una vez. El filtro de red no aplica |
-| Volumen de Polymarket | pUSD pagados en fills de compra + pUSD recibidos en fills de venta, a 1 pUSD = 1 USD. Cada fill cuenta una vez |
-
-Los fills se leen de los eventos `OrderFilled` de los exchanges CLOB V2 de Polymarket en Polygon cuyo maker es la cuenta de Polymarket del usuario. No se usan las filas B2C de órdenes: el backend las marca como completadas cuando el order book las acepta y guarda el monto pedido, no el ejecutado. Sin fills en el período, el sitio muestra la fecha del último fill.
-
-## Usuarios
+- **Qué muestra:** comisiones en USD registradas en las operaciones contadas del período.
+- **Cálculo:** campo `fee` de cada transferencia y del lado de entrada de cada swap, valuado en USD.
+- **Ventana:** el período seleccionado, comparado con el anterior.
+- **Límites:** es la comisión registrada, no un cobro conciliado. Las comisiones sin precio en USD quedan afuera.
 
 ### Usuarios activos
 
-Usuario activo: inició al menos una transferencia completada o un swap completo en la ventana. La actividad se atribuye a la wallet que envía (en un swap, la del lado de entrada).
+- **Qué muestra:** usuarios distintos que iniciaron una operación contada en el período (ver [Usuario activo](#usuario-activo)).
+- **Ventana:** el período seleccionado, comparado con el anterior.
 
-No vuelven activo a un usuario:
+### De dónde viene el volumen
 
-- recibir una transferencia o un depósito;
-- operar en Polymarket;
-- darse de alta sin operar.
+- **Qué muestra:** el volumen del período por producto (Transferencias, Swaps, Polymarket), con su participación.
+- **Cálculo:**
+  - Transferencias y Swaps son las dos partes de Volumen total.
+  - Polymarket es el volumen de sus fills (ver [Volumen de Polymarket](#volumen-de-polymarket)).
+  - Participación = volumen del producto / suma de los tres productos.
+- **Límites:** Polymarket aparece sólo con Todas las redes y no suma en Volumen total.
 
-| Dato | Ventana |
-|---|---|
-| DAU | Hoy desde las 00:00 UTC hasta la hora actual, comparado con las mismas horas de ayer |
-| MAU | Los 30 días hasta la hora actual, comparados con los 30 anteriores |
-| YAU | Los 365 días hasta la hora actual, comparados con los 365 anteriores |
-| Usuarios activos (Resumen) | El período seleccionado |
-| Stickiness | 100 × DAU / MAU |
+### Países principales
 
-Una persona cuenta una vez aunque opere en varias redes. En el desglose por red cuenta en cada red donde operó, así que las filas pueden sumar más que el total.
+- **Qué muestra:** los 5 países con más usuarios que tienen wallet en las redes seleccionadas, con su participación.
+- **Cálculo:**
+  - El país sale del código telefónico del número del usuario.
+  - Un código que comparten varios países cuenta como Desconocido.
+  - El número se lee durante la actualización y no se guarda.
+- **Ventana:** la última actualización de datos. El período seleccionado no aplica.
 
-### Altas y totales
+### Saldos por token
 
-| Dato | Cálculo |
-|---|---|
-| Usuarios totales | Usuarios B2C con wallet en las redes seleccionadas, cada uno una vez, incluidos los que nunca operaron y los que no tienen fecha de alta |
-| Usuarios nuevos | Usuarios con fecha de alta (`createdAt`) en los últimos 30 días, comparados con los 30 anteriores |
-| Wallets nuevas | Wallets (red + dirección) en su primera aparición verificable: la anterior entre su primera operación completada (como origen o destino) y la primera actualización de datos que la vio cuando la anterior no la había visto. Una wallet sin ninguna de las dos no se cuenta |
+- **Qué muestra:** unidades y valor en USD de cada token en las wallets de usuarios, con su participación.
+- **Cálculo:** el mismo snapshot que Valor total bloqueado.
+- **Ventana:** el último snapshot. El período seleccionado no aplica.
+- **Límites:** un token sin precio muestra sus unidades y "Sin valor en USD", y queda fuera de los porcentajes.
 
-### Retención
+### Tokens más usados
 
-Cohortes mensuales por mes de alta (UTC). Retención al mes N = usuarios de la cohorte activos (misma definición de usuario activo) en el mes N después del alta. El resumen de 1, 3 y 6 meses promedia las últimas 12 cohortes que ya cumplieron N meses completos, ponderado por tamaño. Los usuarios sin fecha de alta no pertenecen a ninguna cohorte.
+- **Qué muestra:** los 8 tokens con más operaciones del período, por token y red, con su volumen en USD y su cantidad de operaciones.
+- **Cálculo:**
+  - Una transferencia cuenta en el token enviado.
+  - Un swap cuenta en el token del que parte, con todo su volumen y su comisión.
+- **Ventana:** el período seleccionado.
+- **Límites:**
+  - El volumen está en USD sólo si todas las operaciones del token tienen precio.
+  - El mismo símbolo en dos redes son dos filas.
+  - Son flujos del período, no saldos.
 
-### Países
+## Usuarios
 
-Usuarios con wallet en las redes seleccionadas, por país del código telefónico de su número. Un código compartido por varios países cuenta como Desconocido. El número se lee durante la actualización y no se guarda; el período seleccionado no aplica.
+El selector Diario / Mensual / Anual define la cifra principal, el gráfico y el desglose por red.
 
-## Saldos
+| Selección | Cifra principal | Gráfico | Ventana del desglose por red |
+|---|---|---|---|
+| Diario | Usuarios activos diarios | Usuarios activos por día, últimos 30 días | Hoy |
+| Mensual | Usuarios activos mensuales | Usuarios activos por mes calendario, últimos 12 meses | Últimos 30 días |
+| Anual | Usuarios activos anuales | Usuarios activos por año, desde el inicio de los datos | Últimos 365 días |
 
-| Dato | Cálculo |
-|---|---|
-| TVL | Valor en USD de los saldos de las wallets de usuarios, del último snapshot de saldos. Cada serie toma el último snapshot de cada intervalo. No incluye las master wallets |
-| Saldos por token | Unidades y valor en USD por token, del mismo snapshot que el TVL |
-| Master wallets | Saldos de las direcciones configuradas en `MASTER_WALLETS`, del último snapshot. No son comisiones ni ingresos. Un saldo sin precio se lista en unidades y queda fuera del total, que pasa a ser un subtotal valuado |
+### Usuarios activos diarios, mensuales y anuales
 
-Saldos leídos: en EVM, los tokens ERC-20 de la lista B2C y la moneda nativa cuando la lista la incluye o una master wallet de la red declara `nativeSymbol`; en Cardano, ADA y los activos nativos listados. Una wallet cuenta en el snapshot sólo si se leyeron todos sus saldos. Una red que no se pudo leer no cuenta como cero: el dato pasa a ser parcial.
+- **Qué muestra:** usuarios distintos que iniciaron una operación contada en la ventana (ver [Usuario activo](#usuario-activo)). La ventana elegida va como cifra principal y las otras dos como indicadores.
+- **Ventanas:**
+
+  | Dato | Ventana | Comparado con |
+  |---|---|---|
+  | Usuarios activos diarios (DAU) | Hoy desde las 00:00 UTC hasta la hora actual | Las mismas horas de ayer |
+  | Usuarios activos mensuales (MAU) | Los 30 días hasta la hora actual | Los 30 días anteriores |
+  | Usuarios activos anuales | Los 365 días hasta la hora actual | Los 365 días anteriores |
+
+- **Gráfico:** en Mensual, el gráfico va por mes calendario y el MAU por los últimos 30 días móviles, así que el último punto del gráfico y el MAU pueden diferir.
+
+### Total de usuarios
+
+- **Qué muestra:** personas con cuenta en ChatterPay y wallet en las redes seleccionadas, cada una contada una vez.
+- **Incluye:** usuarios que nunca operaron y usuarios sin fecha de alta.
+- **Ventana:** todas las altas hasta ahora. No es una cifra de usuarios activos.
+
+### Wallets nuevas (30 días)
+
+- **Qué muestra:** wallets (red + dirección de un usuario) que aparecieron por primera vez en los últimos 30 días, comparadas con los 30 anteriores.
+- **Cálculo:** una wallet cuenta una vez, en su primera aparición verificable. Es la anterior de estas dos fechas:
+  - su primera operación completada, como origen o destino;
+  - la primera actualización de datos que la vio cuando la anterior no la había visto.
+- **Límites:**
+  - Una wallet sin ninguna de las dos fechas no se cuenta.
+  - La fecha de alta del usuario no se usa como fecha de la wallet.
+  - Con wallets sin verificar, la cifra es un mínimo y no tiene comparación.
+
+### Recurrencia (DAU/MAU)
+
+- **Qué muestra:** proporción de los usuarios activos del mes que también estuvieron activos hoy.
+- **Cálculo:** 100 × DAU / MAU.
+- **Comparación:** variación en puntos porcentuales respecto del mismo cociente de las ventanas anteriores.
+- **Límites:** sin MAU no hay cociente y el indicador muestra —.
+
+### Cuántos vuelven
+
+- **Qué muestra:** porcentaje de usuarios activos otra vez 1, 3 y 6 meses después del mes de alta.
+- **Cálculo:**
+  - Cohortes mensuales por mes de alta, en UTC. "Activo" sigue la definición de [Usuario activo](#usuario-activo).
+  - Para cada mes N se promedian las últimas 12 cohortes que ya tienen N meses completos después del suyo, ponderadas por tamaño.
+- **Límites:** los usuarios sin fecha de alta no pertenecen a ninguna cohorte.
+- **Ver tabla de cohortes (Retención por cohorte mensual):** las últimas 6 cohortes completas. Cada fila muestra el mes de alta, la cantidad de usuarios y el porcentaje activo en cada mes posterior.
+
+### Wallets nuevas por red
+
+- **Qué muestra:** wallets nuevas de cada red en la ventana de la selección, con su participación.
+- **Cálculo:** la misma definición que Wallets nuevas (30 días). Debajo de cada red: wallets verificadas / wallets totales de la red.
+
+### Usuarios por red
+
+Está en Detalles.
+
+- **Qué muestra:** usuarios activos de cada red en la ventana del desglose, con su participación y su total de usuarios.
+- **Límites:** cada red cuenta sus propios usuarios, así que una persona activa en dos redes aparece en las dos filas y las filas pueden sumar más que el total.
+
+## Ingresos
+
+### Comisiones totales
+
+- **Qué muestra:** comisiones en USD registradas en las operaciones contadas del período, como en Resumen.
+- **Cálculo:** campo `fee` de cada transferencia y del lado de entrada de cada swap, valuado en USD.
+- **Comisiones en el tiempo:** las barras muestran las comisiones de cada intervalo. Un intervalo cuyas operaciones no tienen precio no muestra barra.
+- **Límites:** es la comisión registrada, no un cobro conciliado.
+
+### Volumen total
+
+Es la misma cifra que en Resumen (ver [Volumen total](#volumen-total)).
+
+### Volumen de swaps
+
+- **Qué muestra:** la parte de Volumen total que corresponde a swaps.
+- **Cálculo:** valor en USD del token del que parte cada swap. El token que recibe no suma.
+- **Swap sin precio:** si el token de entrada no tiene precio y el de salida es una stablecoin, se usa el monto de la stablecoin.
+- **Ventana:** el período seleccionado, comparado con el anterior.
+
+### Volumen de Polymarket
+
+El indicador muestra Volumen de Polymarket cuando hay fills leídos. Si no hay, muestra Cuentas de Polymarket.
+
+- **Volumen de Polymarket:**
+  - **Cálculo:** pUSD pagados en fills de compra + pUSD recibidos en fills de venta, a 1 pUSD = 1 USD. Cada fill cuenta una vez.
+  - **Fuente:** los eventos `OrderFilled` de los exchanges CLOB V2 de Polymarket en Polygon cuyo maker es la cuenta de Polymarket del usuario.
+  - **Filas B2C:** no se usan, porque el backend marca una orden como completada cuando el order book la acepta y guarda el monto pedido, no el ejecutado.
+  - **Sin fills en el período:** se muestra la fecha del último fill.
+  - **Lectura incompleta:** si la lectura no llegó al final del período, se muestra hasta qué hora se leyó.
+- **Cuentas de Polymarket:** usuarios con cuenta de Polymarket vinculada y dirección de Polygon válida. Cada usuario cuenta una vez.
+- **Límites:**
+  - El filtro de red no aplica.
+  - No suma en Volumen total.
+  - ChatterPay no cobra comisión sobre estas órdenes.
+
+### Comisión promedio por transacción
+
+- **Qué muestra:** comisión promedio registrada por operación contada.
+- **Cálculo:** Comisiones totales / Transacciones, con hasta 4 decimales.
+- **Ventana:** el período seleccionado, comparado con el anterior.
+- **Límites:** sin operaciones no hay cifra.
+
+### Comisiones por producto
+
+- **Qué muestra:** comisiones del período de Transferencias, Swaps y Polymarket, con su participación.
+- **Participación:** comisiones del producto / comisiones totales.
+- **Tasa promedio (junto al título):** comisiones totales / volumen total. Sólo aparece cuando las dos cifras tienen todas sus operaciones valuadas.
+- **Polymarket:** muestra US$ 0,00, sólo con Todas las redes, porque ChatterPay envía las órdenes sin builder code. La comisión que cobra Polymarket en un fill la paga el usuario a Polymarket y no está incluida.
+
+### Comisiones por red
+
+- **Qué muestra:** comisiones del período por red. Debajo de cada red: comisiones de transferencias, comisiones de swaps y volumen.
+- **Cálculo:**
+  - Comisiones de la red = comisiones de transferencias + comisiones de swaps.
+  - Participación = comisiones de la red / comisiones totales.
+- **Ver comisiones por activo (Por activo):** tabla con volumen, comisiones y participación por token y red.
+- **Límites:** una red cuyas operaciones no tienen precio no muestra cifra.
+
+### Master wallets
+
+- **Qué muestra:** saldos de las direcciones de los firmantes configuradas en `MASTER_WALLETS`. Cada fila muestra la red, el rol, la dirección con link al explorador, el valor en USD, la participación y los saldos en unidades.
+- **Cálculo:**
+  - Toma el último snapshot y valúa con el precio del día.
+  - El total junto al título suma los saldos con precio.
+- **Saldos sin precio:** un saldo sin precio se lista en unidades con "Sin valor en USD" y queda fuera del total. El total pasa a llamarse Subtotal valuado y las participaciones son sobre ese subtotal.
+- **Límites:**
+  - No son comisiones ni ingresos.
+  - No suman en Valor total bloqueado.
+  - El período seleccionado no aplica.
 
 ## Diferencias con un conteo on-chain
 
-Un tablero que suma eventos de transferencia on-chain de las wallets (por ejemplo, en Dune) da un volumen mayor por estas reglas:
+Un tablero que suma los eventos de transferencia on-chain de las wallets (por ejemplo, en Dune) da un volumen mayor que Volumen total:
 
 | Caso | Conteo on-chain típico | ChatterPay Analytics |
 |---|---|---|
