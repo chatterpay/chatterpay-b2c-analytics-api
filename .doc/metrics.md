@@ -20,23 +20,41 @@ Cada actualización de datos toma de la base B2C las transacciones, los usuarios
 |---|---|---|
 | `transfer` | Envío desde una wallet de ChatterPay a otro usuario o a una wallet externa. Una transferencia entre dos usuarios de ChatterPay es una sola fila | Volumen, transacciones, comisiones, usuarios activos |
 | `swap` | Dos filas por swap: la wallet envía al router y el router le devuelve a la wallet | Volumen, transacciones, comisiones, usuarios activos |
-| `deposit` | Ingreso desde una wallet fuera de ChatterPay. El backend no la registra cuando el hash ya existe, así que una transferencia entre usuarios no genera un depósito | En ninguna |
-| `polymarket_bridge`, `polymarket_claim`, `polymarket_withdraw` | Movimientos de fondos hacia la cuenta de Polymarket o desde ella | En ninguna |
+| `deposit` | Ingreso a una wallet de usuario desde otra wallet. El backend no la registra cuando el hash ya existe, así que una transferencia entre usuarios no genera un depósito | Depósitos externos, usuarios activos |
+| `polymarket_buy`, `polymarket_sell` | Órdenes de compra y venta en Polymarket | Usuarios activos |
+| `polymarket_bridge`, `polymarket_claim`, `polymarket_withdraw` | Fondeo de la cuenta de Polymarket, cobro de posiciones ganadoras y retiro | Usuarios activos |
 
 ### Operación contada
 
 Es una transferencia con `status: completed` o un swap completo. Un swap está completo cuando sus dos filas (mismo hash, mismo par de direcciones, sentidos opuestos) están completadas. Un swap con una sola fila, con una fila pendiente o con filas de más no cuenta en ninguna cifra. Las filas de una red fuera del catálogo tampoco cuentan.
 
+### Depósito externo
+
+Es una fila `deposit` completada que entra a una wallet de un usuario de ChatterPay y cumple dos condiciones:
+
+- la wallet que la envía no es de un usuario de ChatterPay en esa red;
+- su hash no es el de una transferencia o un swap.
+
+Un depósito que no cumple alguna de las dos es una operación de ChatterPay que ya cuenta como transferencia o swap. Los depósitos externos se valúan como las transferencias y no suman en Volumen total.
+
 ### Usuario activo
 
-Es un usuario que inició al menos una operación contada en la ventana. La actividad es de la wallet que envía; en un swap, la del lado de entrada. Una persona cuenta una vez, aunque opere en varias redes.
+Es un usuario que hizo al menos una de estas acciones en la ventana:
 
-Estas acciones no vuelven activo a un usuario:
+- envió una transferencia completada o un swap completo;
+- recibió una transferencia completada en una de sus wallets;
+- recibió un depósito completado en una de sus wallets;
+- tuvo una fila de Polymarket aceptada: una orden de compra o venta, un cobro, un fondeo o un retiro.
 
-- recibir una transferencia;
-- recibir un depósito;
-- operar en Polymarket;
-- darse de alta sin operar.
+Una orden de Polymarket cuenta cuando el order book la aceptó: estado `completed`, `partial` o `cancelled`. Una orden `submitted`, `in_progress` o `failed` no cuenta.
+
+Cada acción cuenta en la red de la wallet del usuario que interviene:
+
+- en un envío, la wallet que envía (en un swap, la del lado de entrada);
+- en una recepción, la wallet que recibe;
+- en Polymarket, la wallet de ChatterPay que figura en la fila, en cada red donde esa dirección es una wallet del usuario.
+
+Una persona cuenta una vez, aunque tenga actividad en varias redes. Darse de alta sin ninguna de estas acciones no vuelve activo a un usuario. La retención usa la misma definición.
 
 ### Valuación en USD
 
@@ -93,8 +111,8 @@ La variación es (actual − anterior) / anterior × 100. Sin valor anterior, o 
   - Un swap cuenta una vez, no una por cada token.
 - **Ventana:** el período seleccionado, comparado con el anterior. La línea del indicador es el volumen por intervalo.
 - **No incluye:**
-  - depósitos desde wallets externas;
-  - fills de Polymarket (es otra cifra, en Ingresos);
+  - depósitos externos (línea aparte en De dónde viene el volumen);
+  - fills de Polymarket (línea aparte en De dónde viene el volumen y cifra propia en Ingresos);
   - fondeo y retiro de Polymarket;
   - operaciones sin precio en USD.
 
@@ -114,17 +132,22 @@ La variación es (actual − anterior) / anterior × 100. Sin valor anterior, o 
 
 ### Usuarios activos
 
-- **Qué muestra:** usuarios distintos que iniciaron una operación contada en el período (ver [Usuario activo](#usuario-activo)).
+- **Qué muestra:** usuarios distintos activos en el período (ver [Usuario activo](#usuario-activo)).
 - **Ventana:** el período seleccionado, comparado con el anterior.
 
 ### De dónde viene el volumen
 
-- **Qué muestra:** el volumen del período por producto (Transferencias, Swaps, Polymarket), con su participación.
+- **Qué muestra:** el volumen del período por línea (Transferencias, Swaps, Depósitos externos, Polymarket), con su participación y su cantidad de operaciones.
 - **Cálculo:**
   - Transferencias y Swaps son las dos partes de Volumen total.
+  - Depósitos externos es el valor en USD de los depósitos externos del período (ver [Depósito externo](#depósito-externo)).
   - Polymarket es el volumen de sus fills (ver [Volumen de Polymarket](#volumen-de-polymarket)).
-  - Participación = volumen del producto / suma de los tres productos.
-- **Límites:** Polymarket aparece sólo con Todas las redes y no suma en Volumen total.
+  - Participación = volumen de la línea / suma de las líneas listadas.
+- **Cada movimiento cuenta una vez:** un depósito externo no es una transferencia y un fill de Polymarket no es un fondeo ni un retiro, así que ningún monto aparece en dos líneas.
+- **Límites:**
+  - Depósitos externos y Polymarket no suman en Volumen total.
+  - Polymarket aparece sólo con Todas las redes.
+  - Los depósitos sin precio en USD quedan afuera de su línea, que pasa a ser un subtotal.
 
 ### Países principales
 
@@ -166,7 +189,7 @@ El selector Diario / Mensual / Anual define la cifra principal, el gráfico y el
 
 ### Usuarios activos diarios, mensuales y anuales
 
-- **Qué muestra:** usuarios distintos que iniciaron una operación contada en la ventana (ver [Usuario activo](#usuario-activo)). La ventana elegida va como cifra principal y las otras dos como indicadores.
+- **Qué muestra:** usuarios distintos activos en la ventana (ver [Usuario activo](#usuario-activo)). La ventana elegida va como cifra principal y las otras dos como indicadores.
 - **Ventanas:**
 
   | Dato | Ventana | Comparado con |
@@ -283,10 +306,11 @@ El indicador muestra Volumen de Polymarket cuando hay fills leídos. Si no hay, 
 
 ### Master wallets
 
-- **Qué muestra:** saldos de las direcciones de los firmantes de ChatterPay. Cada fila muestra la red, el rol, la dirección con link al explorador, el valor en USD, la participación y los saldos en unidades.
+- **Qué muestra:** saldos de las direcciones de los firmantes de ChatterPay y del paymaster de cada red EVM. Cada fila muestra la red, el rol, la dirección con link al explorador, el valor en USD, la participación y los saldos en unidades.
 - **Cálculo:**
   - Toma el último snapshot y valúa con el precio del día.
   - El total junto al título suma los saldos con precio.
+- **Paymaster:** es el contrato que la red declara en su configuración de B2C. Paga el gas de las operaciones de los usuarios con su depósito en el EntryPoint, así que su saldo en la moneda nativa es su saldo propio + su depósito en el EntryPoint. Si el depósito no se pudo leer, la fila queda como no leída. Cardano no tiene paymaster.
 - **Saldos sin precio:** un saldo sin precio se lista en unidades con "Sin valor en USD" y queda fuera del total. El total pasa a llamarse Subtotal valuado y las participaciones son sobre ese subtotal.
 - **Límites:**
   - No son comisiones ni ingresos.
@@ -301,7 +325,7 @@ Un conteo que suma los eventos de transferencia on-chain de las wallets da un vo
 |---|---|---|
 | Transferencia entre dos usuarios de ChatterPay | Salida de una wallet + entrada en la otra: 2 veces | 1 vez |
 | Swap | Token que sale + token que entra: 2 veces | 1 vez, por el token de entrada |
-| Depósito desde una wallet externa | Se cuenta | No se cuenta |
+| Depósito desde una wallet externa | Se cuenta | Línea aparte, fuera de Volumen total |
 | Fondeo y retiro de Polymarket | Se cuentan como transferencias | No se cuentan |
 | Fills de Polymarket | Según la consulta | Cifra aparte, fuera de Volumen total |
 | Tokens sin precio (por ejemplo SCR) | Según la tabla de precios de la plataforma | Fuera de la cifra en USD |
