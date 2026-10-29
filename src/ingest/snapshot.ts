@@ -156,6 +156,21 @@ function configuredNative(masters: readonly MasterWalletConfig[]): Asset | null 
     : { symbol, stable: false, decimals: EVM_NATIVE_DECIMALS, key: null };
 }
 
+/** Role shown with the paymaster of a network. */
+export const PAYMASTER_ROLE = 'Paymaster';
+
+/**
+ * Paymaster of an EVM chain and the EntryPoint that holds its deposit, from the contracts of the B2C
+ * `blockchains` document. `null` when the document names no valid paymaster address.
+ */
+function chainPaymaster(chain: ChainInfo): { address: string; entryPoint: string | null } | null {
+  const address = chain.contracts.paymasterAddress ?? '';
+  const entryPoint = chain.contracts.entryPoint ?? '';
+  return chain.family === 'cardano' || !evmAddress(address)
+    ? null
+    : { address, entryPoint: evmAddress(entryPoint) ? entryPoint : null };
+}
+
 /** ADA plus the native assets of a Cardano chain listed in the B2C token list. */
 function cardanoAssets(tokens: readonly TokenInfo[], chainId: string): Asset[] {
   const listed = tokens.filter((token) => token.chainId === chainId);
@@ -308,7 +323,10 @@ async function readCardano(
  * (ERC-20 tokens with a contract on EVM, plus the native coin when the list carries it or, failing
  * that, when a master wallet of the network states its `nativeSymbol`; ADA and the listed native
  * assets on Cardano); master wallets always hold the native coin, and their balances never count
- * in the user totals. Every address is read once, a master wallet that is also a user wallet
+ * in the user totals. The paymaster that the B2C document of an EVM network names is a master
+ * wallet of the network (role {@link PAYMASTER_ROLE}) without being configured; its native balance
+ * adds its deposit in the EntryPoint (`balanceOf(paymaster)`), the funds that pay the gas of the
+ * user operations. A paymaster whose deposit could not be read is `failed`. Every address is read once, a master wallet that is also a user wallet
  * included, and the native coin once per address. A network row records whether its user wallets
  * were read with the native coin (`native`). A wallet is counted only when all its balances were
  * read, so a failed batch or an exhausted budget lowers the coverage instead of understating a
@@ -351,7 +369,18 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
         )
       )
     ];
-    const masters = input.masterWallets.filter((wallet) => wallet.network === chain.network);
+    const paymaster = chainPaymaster(chain);
+    const configuredMasters = input.masterWallets.filter(
+      (wallet) => wallet.network === chain.network
+    );
+    const masters =
+      paymaster === null ||
+      configuredMasters.some((wallet) => normalize(wallet.address) === normalize(paymaster.address))
+        ? configuredMasters
+        : [
+            ...configuredMasters,
+            { network: chain.network, address: paymaster.address, role: PAYMASTER_ROLE }
+          ];
     const listed = input.b2cEnabled.has(chain.chainId);
     const b2cEnabled = input.b2cEnabled.get(chain.chainId) ?? null;
     const collectBalances = input.uncollected?.has(chain.chainId) !== true;
@@ -375,6 +404,17 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
     const nativeCoverage: NativeCoverage =
       chain.family === 'cardano' || native !== null ? 'included' : 'not_listed';
     const masterAddresses = masters.map((wallet) => normalize(wallet.address));
+    const depositAsset: Asset | null =
+      paymaster?.entryPoint == null
+        ? null
+        : {
+            symbol: native?.symbol ?? 'ETH',
+            stable: false,
+            decimals: EVM_NATIVE_DECIMALS,
+            key: paymaster.entryPoint
+          };
+    /** EntryPoint deposit of the paymaster, in wei; `null` when not read. */
+    let paymasterDeposit: bigint | null = null;
 
     let balances: WalletBalances = new Map();
     let plannedCalls = 0;
@@ -402,6 +442,21 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
           withNative,
           input.budget
         );
+        if (paymaster !== null && depositAsset !== null) {
+          // EntryPoint `balanceOf(address)` shares the ERC-20 selector, so the deposit reads as a
+          // token balance of the paymaster.
+          plannedCalls += 1;
+          const address = normalize(paymaster.address);
+          const deposit = await readEvm(
+            input.reader,
+            endpoint.url,
+            [address],
+            [depositAsset],
+            new Set(),
+            input.budget
+          );
+          paymasterDeposit = deposit.get(address)?.[0] ?? null;
+        }
       }
     }
 
@@ -461,7 +516,18 @@ export async function takeBalanceSnapshot(input: SnapshotInput): Promise<Snapsho
     });
 
     masters.forEach((wallet, position) => {
-      const values = balances.get(masterAddresses[position] ?? '');
+      const address = masterAddresses[position] ?? '';
+      const isPaymaster = paymaster !== null && address === normalize(paymaster.address);
+      const own = balances.get(address);
+      // The native coin is the last asset of an EVM reading; the paymaster adds its deposit to it.
+      const values =
+        own === undefined || !isPaymaster || paymaster.entryPoint === null
+          ? own
+          : paymasterDeposit === null
+            ? undefined
+            : own.map((value, index) =>
+                index === own.length - 1 ? value + paymasterDeposit : value
+              );
       const configured: Asset = {
         symbol: wallet.nativeSymbol ?? 'ETH',
         stable: false,
