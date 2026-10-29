@@ -385,6 +385,20 @@ export interface UnpricedOperations {
   swapFees: Record<string, number>;
 }
 
+/**
+ * Completed deposits from wallets outside ChatterPay into user wallets, per asset. A deposit sent
+ * from a wallet of a known user, or sharing its hash with a transfer or swap row, is a ChatterPay
+ * operation already counted and is left out.
+ */
+export interface DepositFacts {
+  /** USD cents of the valued deposits. */
+  volume: Record<string, number>;
+  /** Deposits without a USD value, left out of `volume`. */
+  unpriced: Record<string, number>;
+  /** Every counted deposit, valued or not. */
+  count: Record<string, number>;
+}
+
 /** Additive activity of one network in one UTC hour. Money in USD cents per asset. */
 export interface HourlyFacts {
   network: string;
@@ -410,9 +424,15 @@ export interface HourlyFacts {
    */
   transfersByAsset?: Record<string, number>;
   swapsByAsset?: Record<string, number>;
+  /** External deposits of the hour. Absent in builds stored before deposits were recorded. */
+  deposits?: DepositFacts;
 }
 
-/** Hours in which a user started a counted operation on a network, ascending. */
+/**
+ * Hours in which a user was active on a network, ascending: sent a counted transfer or swap,
+ * received a completed transfer or deposit, or had a Polymarket order, claim, bridge or
+ * withdrawal accepted.
+ */
 export interface UserActivity {
   network: string;
   /** B2C user id, or `address:<address>` for a sender that is not a known user. */
