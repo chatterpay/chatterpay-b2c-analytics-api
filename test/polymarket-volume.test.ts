@@ -195,6 +195,7 @@ describe('Polymarket executed volume', () => {
     expect(overview.volumeByProduct.items).toEqual([
       expect.objectContaining({ product: 'transfer', volumeUsd: '10.00', share: '0.5714' }),
       expect.objectContaining({ product: 'swap', volumeUsd: '0.00', share: '0.0000' }),
+      expect.objectContaining({ product: 'deposit', volumeUsd: '0.00', share: '0.0000' }),
       {
         product: 'polymarket',
         availability: 'available',
@@ -224,7 +225,8 @@ describe('Polymarket executed volume', () => {
     const overview = buildOverview('base-sepolia', 'month', NOW);
     expect(overview.volumeByProduct.items.map((item) => item.product)).toEqual([
       'transfer',
-      'swap'
+      'swap',
+      'deposit'
     ]);
     expect(overview.volumeByProduct.items[0]?.share).toBe('1.0000');
     expect(
