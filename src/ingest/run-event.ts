@@ -128,6 +128,8 @@ export function ingestRunEvent(report: IngestionReport, readbackMs: number | nul
             unpricedFees: stats.unpricedFees,
             unverifiedSwaps: stats.unverifiedSwaps,
             outsideCatalog: stats.outsideCatalog,
+            deposits: stats.deposits,
+            unpricedDeposits: stats.unpricedDeposits,
             users: stats.users,
             undatedUsers: stats.undatedUsers,
             wallets: stats.wallets,
