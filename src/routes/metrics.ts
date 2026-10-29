@@ -4,6 +4,7 @@ import { ApiError } from '../errors/api-error.js';
 import { NETWORK_ID_PATTERN, type NetworkFilter, type NetworkId } from '../metrics/catalog.js';
 import { buildOverview } from '../metrics/overview.js';
 import { buildRevenue } from '../metrics/revenue.js';
+import { tokenLogos } from '../metrics/sources.js';
 import type { HiddenAssets } from '../metrics/token-scope.js';
 import type { MetricsRange, UsersGranularity } from '../metrics/types.js';
 import { buildUsers } from '../metrics/users.js';
@@ -469,7 +470,20 @@ const networksResponse = object({
       label: { type: 'string' },
       family: { type: 'string', enum: ['evm', 'cardano'] }
     })
-  )
+  ),
+  tokenLogos: {
+    ...arrayOf(
+      object({
+        symbol: { type: 'string' },
+        logo: {
+          type: 'string',
+          description: 'The image as a `data:` URI (SVG, PNG, WebP, JPEG or GIF), at most 64 KiB.'
+        }
+      })
+    ),
+    description:
+      'Logo of each token symbol, downloaded by the ingestion from the `logo` of the B2C token list. A symbol without a downloaded logo is not listed; the list is empty while the dataset is synthetic.'
+  }
 });
 
 const revenueResponse = object({
@@ -576,7 +590,8 @@ export async function metricsRoutes(
       }
     },
     async (request) => ({
-      networks: scopeOf(request).networks.map(({ id, label, family }) => ({ id, label, family }))
+      networks: scopeOf(request).networks.map(({ id, label, family }) => ({ id, label, family })),
+      tokenLogos: tokenLogos()
     })
   );
 
