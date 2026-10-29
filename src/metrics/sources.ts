@@ -18,7 +18,7 @@ import { EMPTY_LIVE_SNAPSHOTS, MOCK_SNAPSHOTS, type SnapshotSource } from './sna
 import type { IngestRunStatus, UsdValuation } from './types.js';
 
 /** Version of the live dataset; changing how B2C rows become metrics requires a new value. */
-export const LIVE_DATASET_VERSION = 'live-v3';
+export const LIVE_DATASET_VERSION = 'live-v4';
 
 /** Where the values of a response come from. */
 export type DataStatus = 'mock' | 'mixed' | 'live';
