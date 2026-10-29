@@ -1,4 +1,4 @@
-import type { UnpricedOperations } from '../ingest/types.js';
+import type { DepositFacts, UnpricedOperations } from '../ingest/types.js';
 import { allocateInteger } from './allocate.js';
 import type { DayHour, TimeWindow } from './calendar.js';
 import { dayNumberFromIso, daysTouched } from './calendar.js';
@@ -35,6 +35,11 @@ export interface Facts {
    */
   transfersByAsset?: Record<string, number>;
   swapsByAsset?: Record<string, number>;
+  /**
+   * External deposits, apart from the volume. Absent when some hour of the span was built without
+   * them.
+   */
+  deposits?: DepositFacts;
 }
 
 type CountKey = 'newUsers' | 'newWallets' | 'activeUserDays' | 'transfers' | 'swaps';
@@ -86,8 +91,18 @@ export function emptyFacts(network: NetworkId): Facts {
     swapVolume: zeros(),
     transferFees: zeros(),
     swapFees: zeros(),
-    unpriced: emptyUnpriced()
+    unpriced: emptyUnpriced(),
+    deposits: { volume: zeros(), unpriced: {}, count: zeros() }
   };
+}
+
+/**
+ * Deposits without any entry.
+ *
+ * @returns Empty deposit records.
+ */
+export function emptyDeposits(): DepositFacts {
+  return { volume: {}, unpriced: {}, count: {} };
 }
 
 /**
@@ -103,6 +118,25 @@ function addRecord(target: Record<string, number>, item: Readonly<Record<string,
   for (const [asset, value] of Object.entries(item)) {
     target[asset] = (target[asset] ?? 0) + value;
   }
+}
+
+/**
+ * Adds the deposits of `item` to `target`. A span with one part built without deposits has none.
+ *
+ * @param target - Facts being added up.
+ * @param item - Facts to add.
+ */
+export function addDeposits(target: Facts, item: Facts): void {
+  if (item.deposits === undefined) {
+    delete target.deposits;
+    return;
+  }
+  if (target.deposits === undefined) {
+    return;
+  }
+  addRecord(target.deposits.volume, item.deposits.volume);
+  addRecord(target.deposits.unpriced, item.deposits.unpriced);
+  addRecord(target.deposits.count, item.deposits.count);
 }
 
 function noise(network: NetworkId, day: number, key: string): number {
@@ -138,6 +172,13 @@ function generateDay(network: NetworkId, day: number): Facts {
   );
   const transferParts = allocateInteger(transferVolume, weights);
   const swapParts = allocateInteger(swapVolume, weights);
+  // Deposits come with new users and, less often, from active ones topping up.
+  const deposits = Math.round((facts.newUsers * 0.9 + facts.activeUserDays * 0.05) * n('deposits'));
+  const depositParts = allocateInteger(
+    deposits * Math.round(profile.averageTransferCents * 1.8 * n('avg-deposit')),
+    weights
+  );
+  const depositCounts = allocateInteger(deposits, weights);
 
   profile.assets.forEach((asset, index) => {
     const transfer = transferParts[index] ?? 0;
@@ -146,6 +187,10 @@ function generateDay(network: NetworkId, day: number): Facts {
     facts.swapVolume[asset.symbol] = swap;
     facts.transferFees[asset.symbol] = Math.floor((transfer * profile.transferFeeBps) / 10_000);
     facts.swapFees[asset.symbol] = Math.floor((swap * profile.swapFeeBps) / 10_000);
+    if (facts.deposits !== undefined) {
+      facts.deposits.volume[asset.symbol] = depositParts[index] ?? 0;
+      facts.deposits.count[asset.symbol] = depositCounts[index] ?? 0;
+    }
   });
   return facts;
 }
@@ -179,6 +224,13 @@ function hoursOfDay(network: NetworkId, day: number, firstHour: number, lastHour
       facts[key][asset] = portion(value);
     }
   }
+  if (full.deposits !== undefined && facts.deposits !== undefined) {
+    for (const record of ['volume', 'count'] as const) {
+      for (const [asset, value] of Object.entries(full.deposits[record])) {
+        facts.deposits[record][asset] = portion(value);
+      }
+    }
+  }
   return facts;
 }
 
@@ -199,6 +251,7 @@ export function sumFacts(network: NetworkId, items: readonly Facts[]): Facts {
       addRecord(total[key], item[key]);
       addRecord(total.unpriced[key], item.unpriced[key]);
     }
+    addDeposits(total, item);
   }
   return total;
 }
