@@ -1,4 +1,4 @@
-import type { PolymarketCoverage } from '../ingest/types.js';
+import type { PolymarketCoverage, TokenLogo } from '../ingest/types.js';
 import {
   addMonths,
   type DayHour,
@@ -217,6 +217,7 @@ interface LiveState {
   /** End of the ingestion run the dataset was built from. */
   asOf: Date;
   ingest: IngestRunStatus | null;
+  tokenLogos: readonly TokenLogo[];
 }
 
 /** Parts of a live dataset besides the aggregates. */
@@ -225,6 +226,8 @@ export interface LiveExtras {
   snapshots?: SnapshotSource;
   /** Per-source status of the run that built the dataset. */
   ingest?: IngestRunStatus | null;
+  /** Token logos the run downloaded; none when omitted. */
+  tokenLogos?: readonly TokenLogo[];
 }
 
 let live: LiveState | null = null;
@@ -248,8 +251,20 @@ export function setLiveSource(
           source,
           snapshots: extras.snapshots ?? EMPTY_LIVE_SNAPSHOTS,
           asOf,
-          ingest: extras.ingest ?? null
+          ingest: extras.ingest ?? null,
+          tokenLogos: extras.tokenLogos ?? []
         };
+}
+
+/**
+ * Logos of the token symbols of the live dataset, for the marks of the site.
+ *
+ * @returns Symbol and `data:` URI of each downloaded logo; none while the dataset is synthetic.
+ */
+export function tokenLogos(): Array<{ symbol: string; logo: string }> {
+  return (live?.tokenLogos ?? []).flatMap(({ symbol, logo }) =>
+    logo === null ? [] : [{ symbol, logo }]
+  );
 }
 
 /**
