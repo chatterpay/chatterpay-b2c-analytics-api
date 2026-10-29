@@ -132,7 +132,8 @@ describe('network catalog', () => {
       networks: [
         { id: 'base', label: 'Base', family: 'evm' },
         { id: 'cardano', label: 'Cardano', family: 'cardano' }
-      ]
+      ],
+      tokenLogos: []
     });
   });
 
