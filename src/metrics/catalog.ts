@@ -42,7 +42,7 @@ export interface NetworkDefinition {
 }
 
 /** Version of the synthetic dataset; changing the generator requires a new value. */
-export const DATASET_VERSION = 'mock-v2';
+export const DATASET_VERSION = 'mock-v3';
 
 /** First day with synthetic activity (UTC). Earlier days have no activity. */
 export const DATASET_START_DAY = '2025-01-01';
