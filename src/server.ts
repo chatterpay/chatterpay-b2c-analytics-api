@@ -8,6 +8,7 @@ import { refreshLiveMetrics } from './ingest/live-loader.js';
 import { polygonFillReader } from './ingest/polymarket-fills.js';
 import { type IngestionReport, runIngestion } from './ingest/run.js';
 import { failedRunEvent, type IngestRunEvent, ingestRunEvent } from './ingest/run-event.js';
+import { httpLogoFetcher } from './ingest/token-logos.js';
 import { listNetworks, type NetworkDefinition, setNetworks } from './metrics/catalog.js';
 import { resetFactsCaches } from './metrics/facts.js';
 import { setTokens } from './metrics/tokens.js';
@@ -92,6 +93,7 @@ function ingestionHandle(
               ? null
               : polygonFillReader(env.POLYMARKET_POLYGON_RPC_URL),
           masterWallets: env.MASTER_WALLETS,
+          logos: httpLogoFetcher(fetch),
           valuation: env.USD_VALUATION,
           clock: () => new Date(),
           options: {
