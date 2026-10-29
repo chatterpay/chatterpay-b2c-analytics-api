@@ -16,6 +16,7 @@ import type {
   RunSnapshot,
   StoredAggregates,
   TokenInfo,
+  TokenLogo,
   UserActivity,
   UserSignup,
   WalletObservation
@@ -67,6 +68,7 @@ interface StateDoc {
   run?: IngestRunStatus | null;
   wallets?: NetworkWallets[];
   polymarket?: PolymarketAggregates;
+  tokenLogos?: TokenLogo[];
 }
 
 type TransactionDoc = Omit<IngestedTransaction, 'id'> & { _id: string };
@@ -483,7 +485,8 @@ export class MongoIngestRepository implements IngestRepository {
           builtAt,
           run,
           wallets: aggregates.wallets,
-          polymarket: aggregates.polymarket ?? { hours: [], coverage: null }
+          polymarket: aggregates.polymarket ?? { hours: [], coverage: null },
+          tokenLogos: aggregates.tokenLogos ?? []
         }
       },
       { upsert: true }
@@ -495,6 +498,10 @@ export class MongoIngestRepository implements IngestRepository {
 
   async aggregatesBuiltAt(): Promise<Date | null> {
     return (await this.state.findOne({ _id: AGGREGATES_ID }))?.builtAt ?? null;
+  }
+
+  async tokenLogos(): Promise<TokenLogo[]> {
+    return (await this.state.findOne({ _id: AGGREGATES_ID }))?.tokenLogos ?? [];
   }
 
   async loadAggregates(): Promise<StoredAggregates | null> {
@@ -524,7 +531,8 @@ export class MongoIngestRepository implements IngestRepository {
       activity: await read<UserActivity>(INGEST_COLLECTIONS.activity),
       signups: await read<UserSignup>(INGEST_COLLECTIONS.signups),
       wallets: state?.wallets ?? [],
-      ...(state?.polymarket === undefined ? {} : { polymarket: state.polymarket })
+      ...(state?.polymarket === undefined ? {} : { polymarket: state.polymarket }),
+      ...(state?.tokenLogos === undefined ? {} : { tokenLogos: state.tokenLogos })
     };
   }
 
