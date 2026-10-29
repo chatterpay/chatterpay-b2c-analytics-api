@@ -58,6 +58,8 @@ const REPORT: IngestionReport = {
     unpricedFees: 0,
     unverifiedSwaps: 0,
     outsideCatalog: 0,
+    deposits: 0,
+    unpricedDeposits: 0,
     users: 2,
     undatedUsers: 0,
     wallets: 2,
@@ -219,7 +221,7 @@ describe('metrics with live aggregates', () => {
       expect(response.headers['x-data-status']).toBe('live');
       const body = response.json();
       expect(body.meta.dataStatus).toBe('live');
-      expect(body.meta.datasetVersion).toBe('live-v3');
+      expect(body.meta.datasetVersion).toBe('live-v4');
       expect(body.meta.lastUpdatedAt).toBe(builtAt.toISOString());
       if (view === 'overview') {
         expect(body.tiles.transactions.value).toBe(1);
