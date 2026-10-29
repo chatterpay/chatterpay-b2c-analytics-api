@@ -136,6 +136,8 @@ describe('aggregateActivity', () => {
       unpricedFees: 0,
       unverifiedSwaps: 0,
       outsideCatalog: 1,
+      deposits: 0,
+      unpricedDeposits: 0,
       users: 3,
       undatedUsers: 1,
       // Four wallets; the two that sent a completed operation have a verifiable first appearance.
@@ -241,6 +243,119 @@ describe('aggregateActivity', () => {
 
   it('gives the same aggregates for the same input', () => {
     expect(build().aggregates).toEqual(build().aggregates);
+  });
+});
+
+describe('activity beyond sending', () => {
+  const at = (hour: number) => new Date(`2026-10-14T${String(hour).padStart(2, '0')}:10:00.000Z`);
+  const day = dayNumberFromIso('2026-10-14');
+
+  function activeAt(rows: Parameters<typeof transaction>[1][]) {
+    const source = liveSourceFrom(
+      aggregateActivity({
+        transactions: rows.map((fields, index) => transaction(100 + index, fields)),
+        users: USERS,
+        tokens: TOKENS,
+        chains: CHAIN_MAP,
+        prices: []
+      }).aggregates
+    );
+    return source.activeUsers('base-sepolia', dayWindow(day, day));
+  }
+
+  it('makes the recipient of a completed transfer active, and not of a failed one', () => {
+    expect(activeAt([{ from: '0xUser1', to: '0xUSER3', date: at(9) }])).toBe(2);
+    expect(activeAt([{ from: '0xUser1', to: '0xUser3', status: 'failed', date: at(9) }])).toBe(0);
+  });
+
+  it('makes the recipient of a completed deposit active', () => {
+    expect(activeAt([{ type: 'deposit', from: '0xOutside', to: '0xUser2', date: at(9) }])).toBe(1);
+    expect(
+      activeAt([
+        { type: 'deposit', from: '0xOutside', to: '0xUser2', status: 'pending', date: at(9) }
+      ])
+    ).toBe(0);
+  });
+
+  it('makes a user active by an accepted Polymarket row on the network of the wallet it names', () => {
+    const order = { type: 'polymarket_buy', from: '0xUser3', to: 'polymarket', chainId: '137' };
+    expect(activeAt([{ ...order, date: at(9) }])).toBe(1);
+    expect(activeAt([{ ...order, status: 'cancelled', date: at(9) }])).toBe(1);
+    expect(
+      activeAt([
+        { type: 'polymarket_claim', from: 'polymarket', to: '0xUser2', chainId: '137', date: at(9) }
+      ])
+    ).toBe(1);
+    for (const status of ['submitted', 'in_progress', 'failed']) {
+      expect(activeAt([{ ...order, status, date: at(9) }])).toBe(0);
+    }
+  });
+});
+
+describe('external deposits', () => {
+  const day = dayNumberFromIso('2026-10-14');
+  const date = new Date('2026-10-14T09:00:00.000Z');
+
+  function deposits(rows: Parameters<typeof transaction>[1][], prices = []) {
+    const { aggregates, stats } = aggregateActivity({
+      transactions: rows.map((fields, index) => transaction(200 + index, { date, ...fields })),
+      users: USERS,
+      tokens: TOKENS,
+      chains: CHAIN_MAP,
+      prices
+    });
+    return {
+      stats,
+      facts: liveSourceFrom(aggregates).facts('base-sepolia', dayWindow(day, day))
+    };
+  }
+
+  it('values deposits from outside wallets apart from the volume', () => {
+    const { facts, stats } = deposits([
+      { type: 'deposit', from: '0xOutside', to: '0xUser2', token: 'USDC', amount: 50, fee: 0 },
+      { type: 'deposit', from: '0xOutside', to: '0xUser1', token: 'WBTC', amount: 0.001, fee: 0 }
+    ]);
+
+    expect(facts.deposits).toEqual({
+      volume: { USDC: 5000 },
+      unpriced: { WBTC: 1 },
+      count: { USDC: 1, WBTC: 1 }
+    });
+    expect(facts.transferVolume).toEqual({});
+    expect(stats).toMatchObject({ deposits: 2, unpricedDeposits: 1 });
+  });
+
+  it('leaves out deposits sent by a user wallet, sharing a transfer hash or to a stranger', () => {
+    const { facts, stats } = deposits([
+      { type: 'deposit', from: '0xUser1', to: '0xUser2', fee: 0 },
+      { hash: '0xshared', from: '0xUser1', to: '0xOther' },
+      { type: 'deposit', hash: '0xSHARED', from: '0xOutside', to: '0xUser2', fee: 0 },
+      { type: 'deposit', from: '0xOutside', to: '0xNobody', fee: 0 }
+    ]);
+
+    expect(facts.deposits?.count ?? {}).toEqual({});
+    expect(stats.deposits).toBe(0);
+  });
+
+  it('has no deposits for a build stored before they were recorded', () => {
+    const { aggregates } = aggregateActivity({
+      transactions: [transaction(300, { date })],
+      users: USERS,
+      tokens: TOKENS,
+      chains: CHAIN_MAP,
+      prices: []
+    });
+    const older = {
+      ...aggregates,
+      hourly: aggregates.hourly.map(({ deposits: _omitted, ...hour }) => hour)
+    };
+
+    expect(
+      liveSourceFrom(older).facts('base-sepolia', dayWindow(day, day)).deposits
+    ).toBeUndefined();
+    expect(
+      liveSourceFrom(older).facts('base-sepolia', dayWindow(day + 5, day + 5)).deposits
+    ).toBeUndefined();
   });
 });
 
