@@ -293,3 +293,78 @@ describe('takeBalanceSnapshot', () => {
     ]);
   });
 });
+
+describe('paymaster of a network', () => {
+  const PAYMASTER = '0x7777777777777777777777777777777777777777';
+  const ENTRY_POINT = '0x0000000071727de22e5e9d8baf0edac6f37da032';
+  const chains = CHAINS.map((chain) =>
+    chain.chainId === '84532'
+      ? { ...chain, contracts: { paymasterAddress: PAYMASTER, entryPoint: ENTRY_POINT } }
+      : chain
+  );
+  const balances = {
+    ...EVM_BALANCES,
+    [`${PAYMASTER}|native`]: 100_000_000_000_000_000n,
+    [`${PAYMASTER}|${ENTRY_POINT}`]: 400_000_000_000_000_000n
+  };
+
+  it('lists the paymaster with its own balance plus its deposit in the EntryPoint', async () => {
+    const { snapshot } = await takeBalanceSnapshot(
+      input({ chains, reader: new FakeBalanceReader(balances, CARDANO_BALANCES) })
+    );
+
+    expect(snapshot.masterWallets).toEqual([
+      {
+        network: 'base-sepolia',
+        role: 'Paymaster',
+        address: PAYMASTER,
+        explorerUrl: `https://sepolia.basescan.org/address/${PAYMASTER}`,
+        status: 'complete',
+        balances: [{ asset: 'ETH', amount: '0.5', valueCents: 150_000 }]
+      }
+    ]);
+    // The paymaster never counts in the user totals.
+    expect(snapshot.networks[0]?.wallets).toBe(2);
+  });
+
+  it('marks the paymaster failed when its deposit is not read', async () => {
+    const { snapshot } = await takeBalanceSnapshot(
+      input({
+        chains,
+        reader: new FakeBalanceReader(balances, CARDANO_BALANCES),
+        // One request reads the wallets; none is left for the deposit.
+        budget: budget(1)
+      })
+    );
+
+    expect(snapshot.masterWallets.map((wallet) => [wallet.role, wallet.status])).toEqual([
+      ['Paymaster', 'failed']
+    ]);
+  });
+
+  it('keeps a configured wallet at the paymaster address under its own role, once', async () => {
+    const { snapshot } = await takeBalanceSnapshot(
+      input({
+        chains,
+        reader: new FakeBalanceReader(balances, CARDANO_BALANCES),
+        masterWallets: [
+          {
+            network: 'base-sepolia',
+            address: PAYMASTER.toUpperCase().replace('0X', '0x'),
+            role: 'Gas'
+          }
+        ]
+      })
+    );
+
+    expect(snapshot.masterWallets.map((wallet) => [wallet.role, wallet.balances])).toEqual([
+      ['Gas', [{ asset: 'ETH', amount: '0.5', valueCents: 150_000 }]]
+    ]);
+  });
+
+  it('adds no paymaster on a network whose document names none', async () => {
+    const { snapshot } = await takeBalanceSnapshot(input());
+
+    expect(snapshot.masterWallets).toEqual([]);
+  });
+});
