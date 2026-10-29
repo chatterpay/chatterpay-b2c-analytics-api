@@ -41,6 +41,8 @@ export interface ActivityTotals {
   unpricedSwapVolume: number;
   unpricedTransferFees: number;
   unpricedSwapFees: number;
+  /** External deposits; `null` when some network or hour was built before they were recorded. */
+  deposits: { cents: number; operations: number; unpriced: number } | null;
 }
 
 /**
@@ -60,7 +62,8 @@ export function activityTotals(items: readonly Facts[]): ActivityTotals {
     unpricedTransferVolume: 0,
     unpricedSwapVolume: 0,
     unpricedTransferFees: 0,
-    unpricedSwapFees: 0
+    unpricedSwapFees: 0,
+    deposits: { cents: 0, operations: 0, unpriced: 0 }
   };
   for (const facts of items) {
     totals.transfers += facts.transfers;
@@ -73,6 +76,13 @@ export function activityTotals(items: readonly Facts[]): ActivityTotals {
     totals.unpricedSwapVolume += sumAssets(facts.unpriced.swapVolume);
     totals.unpricedTransferFees += sumAssets(facts.unpriced.transferFees);
     totals.unpricedSwapFees += sumAssets(facts.unpriced.swapFees);
+    if (facts.deposits === undefined) {
+      totals.deposits = null;
+    } else if (totals.deposits !== null) {
+      totals.deposits.cents += sumAssets(facts.deposits.volume);
+      totals.deposits.operations += sumAssets(facts.deposits.count);
+      totals.deposits.unpriced += sumAssets(facts.deposits.unpriced);
+    }
   }
   return totals;
 }
@@ -160,10 +170,12 @@ function itemsStatus(
  * `transfer`; transfers and swaps add up to the total volume of the range. A product with
  * operations without a USD value is `partial` with the subtotal of the valued ones, or
  * `unavailable` when none has one; `transactions` counts them all and shares are of the subtotals.
- * `polymarket` is the executed volume of the fills of the Polymarket accounts, read on Polygon,
- * outside the networks of the catalog: it is listed only for every network, it is not in the total
- * volume of the range and `transactions` counts its fills. The block is `available` when every
- * item is.
+ * `deposit` is the value of the external deposits into user wallets, a separate line that is not in
+ * the total volume; it is `unavailable` (`not_recorded`) for builds stored before deposits were
+ * recorded. `polymarket` is the executed volume of the fills of the Polymarket accounts, read on
+ * Polygon, outside the networks of the catalog: it is listed only for every network, it is not in
+ * the total volume of the range and `transactions` counts its fills. Shares are over every line
+ * listed. The block is `available` when every item is.
  *
  * @param totals - Activity of the range.
  * @param polymarket - Polymarket fills of the range; `null` when a single network is selected.
@@ -177,7 +189,14 @@ export function buildVolumeByProduct(
     polymarket === null || polymarket.availability === 'unavailable'
       ? 0
       : polymarketCents(polymarket);
-  const total = totals.transferVolumeCents + totals.swapVolumeCents + polymarketVolume;
+  const deposits = totals.deposits;
+  const deposit =
+    deposits === null
+      ? null
+      : productFigure(deposits.cents, deposits.operations, deposits.unpriced);
+  const depositCents = deposit === null || deposit.usd === null ? 0 : (deposits?.cents ?? 0);
+  const total =
+    totals.transferVolumeCents + totals.swapVolumeCents + depositCents + polymarketVolume;
   const transfer = productFigure(
     totals.transferVolumeCents,
     totals.transfers,
@@ -200,7 +219,24 @@ export function buildVolumeByProduct(
       volumeUsd: swap.usd,
       transactions: totals.swaps,
       share: swap.usd === null ? null : shareOf(totals.swapVolumeCents, total)
-    }
+    },
+    deposit === null
+      ? {
+          product: 'deposit',
+          availability: 'unavailable',
+          reason: 'not_recorded',
+          volumeUsd: null,
+          transactions: null,
+          share: null
+        }
+      : {
+          product: 'deposit',
+          availability: deposit.availability,
+          reason: deposit.reason,
+          volumeUsd: deposit.usd,
+          transactions: deposits?.operations ?? 0,
+          share: deposit.usd === null ? null : shareOf(depositCents, total)
+        }
   ];
   if (polymarket !== null) {
     const served = polymarket.availability !== 'unavailable';
