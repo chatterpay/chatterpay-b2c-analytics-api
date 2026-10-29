@@ -67,6 +67,13 @@ export function scopeFacts(facts: Facts, hidden: ReadonlySet<string> | undefined
   if (facts.swapsByAsset !== undefined) {
     scoped.swapsByAsset = keep(facts.swapsByAsset, hidden);
   }
+  if (facts.deposits !== undefined) {
+    scoped.deposits = {
+      volume: keep(facts.deposits.volume, hidden),
+      unpriced: keep(facts.deposits.unpriced, hidden),
+      count: keep(facts.deposits.count, hidden)
+    };
+  }
   return scoped;
 }
 
