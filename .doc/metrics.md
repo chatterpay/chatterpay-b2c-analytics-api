@@ -1,6 +1,6 @@
 # Métricas de ChatterPay Analytics
 
-Definición y cálculo de cada dato de las pantallas Resumen, Usuarios e Ingresos. La especificación de los bloques de la API está en el [README](../README.md#metric-blocks).
+Definición y cálculo de cada dato de las pantallas Resumen, Usuarios e Ingresos.
 
 - [Reglas comunes](#reglas-comunes)
 - [Resumen](#resumen)
