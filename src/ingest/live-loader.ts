@@ -25,7 +25,8 @@ export async function refreshLiveMetrics(
   }
   setLiveSource(liveSourceFrom(stored, stored.walletsTrackingSince), stored.builtAt, {
     snapshots: liveSnapshots(stored.snapshots, stored.run?.sources.balances ?? null),
-    ingest: stored.run
+    ingest: stored.run,
+    tokenLogos: stored.tokenLogos ?? []
   });
   return stored.builtAt;
 }
