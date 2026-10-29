@@ -21,6 +21,7 @@ import type {
   RunSnapshot,
   StoredAggregates,
   TokenInfo,
+  TokenLogo,
   TransactionCursor,
   WalletObservation
 } from '../src/ingest/types.js';
@@ -337,6 +338,10 @@ export class MemoryIngestRepository implements IngestRepository {
 
   async aggregatesBuiltAt(): Promise<Date | null> {
     return this.stored?.builtAt ?? null;
+  }
+
+  async tokenLogos(): Promise<TokenLogo[]> {
+    return this.stored?.tokenLogos ?? [];
   }
 
   async loadAggregates(): Promise<StoredAggregates | null> {
