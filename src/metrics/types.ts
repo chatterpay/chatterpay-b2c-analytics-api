@@ -364,9 +364,12 @@ export interface TopCountriesBlock extends BlockStatus {
 /** Product of a completed operation. */
 export type Product = 'transfer' | 'swap' | 'polymarket';
 
+/** Line of the volume per product: a product, or the external deposits listed apart. */
+export type VolumeProduct = Product | 'deposit';
+
 /** Volume of one product in the range. */
 export interface ProductVolume {
-  product: Product;
+  product: VolumeProduct;
   availability: Availability;
   reason: UnavailableReason | null;
   volumeUsd: string | null;
@@ -375,7 +378,10 @@ export interface ProductVolume {
   share: string | null;
 }
 
-/** Volume of completed operations per product; each operation counts in one product only. */
+/**
+ * Volume of completed operations per product; each operation counts in one product only. External
+ * deposits are a line of their own, outside the total volume.
+ */
 export interface VolumeByProductBlock extends BlockStatus {
   items: ProductVolume[];
 }
