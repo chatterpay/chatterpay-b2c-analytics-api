@@ -2850,7 +2850,11 @@ paths:
                               enum:
                                 - transfer
                                 - swap
+                                - deposit
                                 - polymarket
+                              description: Line of the volume per product. `deposit` is the value of the
+                                external deposits into user wallets, outside the
+                                total volume.
                             availability:
                               type: string
                               enum:
@@ -5731,6 +5735,8 @@ paths:
                           - unpricedFees
                           - unverifiedSwaps
                           - outsideCatalog
+                          - deposits
+                          - unpricedDeposits
                           - users
                           - undatedUsers
                           - wallets
@@ -5753,6 +5759,12 @@ paths:
                             type: integer
                             minimum: 0
                           outsideCatalog:
+                            type: integer
+                            minimum: 0
+                          deposits:
+                            type: integer
+                            minimum: 0
+                          unpricedDeposits:
                             type: integer
                             minimum: 0
                           users:
