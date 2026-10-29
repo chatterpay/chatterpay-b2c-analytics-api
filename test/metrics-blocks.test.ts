@@ -35,7 +35,10 @@ describe('synthetic blocks', () => {
     const revenue = buildRevenue('all', 'month', NOW);
     const products = overview.volumeByProduct.items;
 
-    const counted = products.filter((item) => item.product !== 'polymarket');
+    // External deposits and Polymarket are lines of their own, outside the volume tile.
+    const counted = products.filter(
+      (item) => item.product !== 'polymarket' && item.product !== 'deposit'
+    );
     expect(counted.reduce((sum, item) => sum + cents(item.volumeUsd), 0)).toBe(
       cents(overview.tiles.volumeUsd.value)
     );
