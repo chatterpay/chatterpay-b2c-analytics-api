@@ -1,5 +1,6 @@
 import type {
   DailyPrice,
+  DepositFacts,
   HourlyFacts,
   IngestedTransaction,
   IngestedUser,
@@ -17,7 +18,7 @@ import type {
 } from '../ingest/types.js';
 import { addMonths, type DayHour, isoDayOf, type TimeWindow } from './calendar.js';
 import type { NetworkId } from './catalog.js';
-import { emptyUnpriced, type Facts, MONEY_KEYS } from './facts.js';
+import { addDeposits, emptyDeposits, emptyUnpriced, type Facts, MONEY_KEYS } from './facts.js';
 import { impliedSwapPrices, PriceBook, type StableSwap } from './pricing.js';
 import type { MetricsSource, PolymarketFigures, WalletCoverage } from './sources.js';
 import type { UsdValuation } from './types.js';
@@ -25,6 +26,16 @@ import type { UsdValuation } from './types.js';
 const HOUR_MS = 3_600_000;
 /** Status of a row that moved funds. Other statuses (`failed`, `submitted`, ...) are not counted. */
 const COMPLETED = 'completed';
+/** Type prefix of the B2C rows of Polymarket: orders, claims, bridges and withdrawals. */
+const POLYMARKET_PREFIX = 'polymarket_';
+/**
+ * Statuses of a Polymarket row the order book or the chain accepted. An order is `completed` when
+ * placed and later `partial` or `cancelled`; `submitted`, `in_progress` and `failed` were never
+ * accepted.
+ */
+const POLYMARKET_ACCEPTED: ReadonlySet<string> = new Set([COMPLETED, 'partial', 'cancelled']);
+/** Counterparty B2C writes on the Polymarket side of its rows. */
+const POLYMARKET_COUNTERPARTY = 'polymarket';
 
 /** Inputs of {@link aggregateActivity}, all read from the copies in the analytics database. */
 export interface AggregationInput {
@@ -56,6 +67,10 @@ export interface AggregationStats {
   unverifiedSwaps: number;
   /** Completed transfers and swaps on chains outside the catalog. */
   outsideCatalog: number;
+  /** Counted external deposits into user wallets. */
+  deposits: number;
+  /** Of those, deposits without a USD value; left out of the deposit volume. */
+  unpricedDeposits: number;
   users: number;
   /** Users with a wallet on a catalog network and without `creationDate`. */
   undatedUsers: number;
@@ -91,6 +106,7 @@ type BuiltHour = HourlyFacts & {
   unpriced: UnpricedOperations;
   transfersByAsset: Record<string, number>;
   swapsByAsset: Record<string, number>;
+  deposits: DepositFacts;
 };
 
 function blankFacts(): Facts {
@@ -106,7 +122,8 @@ function blankFacts(): Facts {
     swapFees: {},
     unpriced: emptyUnpriced(),
     transfersByAsset: {},
-    swapsByAsset: {}
+    swapsByAsset: {},
+    deposits: emptyDeposits()
   };
 }
 
@@ -139,6 +156,7 @@ function addFacts(target: Facts, item: Facts): void {
       addRecord(target[key], counts);
     }
   }
+  addDeposits(target, item);
 }
 
 /** First index whose value is at least `value`, in an ascending array. */
@@ -341,6 +359,15 @@ function firstOperations(rows: readonly IngestedTransaction[]): Map<string, numb
  * nothing is valued. Money is rounded to cents per operation. The output depends only on the input
  * and not on the order of its rows, so rebuilding the same copies gives the same aggregates.
  *
+ * External deposits are completed `deposit` rows into a user wallet whose sender is not a wallet
+ * of a known user on the chain and whose hash no transfer or swap row uses; they are valued like
+ * transfers and kept apart from the volume, in `deposits`.
+ *
+ * A user is active in an hour on a network when, there, they sent a counted transfer or swap,
+ * received a completed transfer or deposit, or had a Polymarket row accepted (see
+ * {@link POLYMARKET_ACCEPTED}). Polymarket rows carry the ChatterPay wallet of the user, so they
+ * count on every catalog network where that address is a wallet of the user.
+ *
  * The first verifiable appearance of a user wallet on its network is the earliest of two pieces of
  * evidence: the first completed B2C operation that sent from or paid to it, and the first
  * ingestion run that saw it after an earlier run had not (`bounded` observations). A wallet with
@@ -360,6 +387,8 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
   }
   const userOf = (chainId: string, address: string): string =>
     owners.get(`${chainId}|${address.toLowerCase()}`) ?? `address:${address.toLowerCase()}`;
+  const ownerOf = (chainId: string, address: string): string | undefined =>
+    owners.get(`${chainId}|${address.toLowerCase()}`);
   const valued = (input.valuation ?? 'market') === 'market';
 
   const stats: AggregationStats = {
@@ -369,6 +398,8 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
     unpricedFees: 0,
     unverifiedSwaps: 0,
     outsideCatalog: 0,
+    deposits: 0,
+    unpricedDeposits: 0,
     users: input.users.length,
     undatedUsers: 0,
     wallets: 0,
@@ -377,18 +408,39 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
   const operations: Operation[] = [];
   const stableSwaps: StableSwap[] = [];
   const swapRows: IngestedTransaction[] = [];
+  const depositRows: IngestedTransaction[] = [];
+  const polymarketRows: IngestedTransaction[] = [];
+  /** Recipients of completed transfers that are wallets of known users. */
+  const receipts: { network: NetworkId; user: string; hour: number }[] = [];
+  /** Chain and hash of every transfer and swap row, of any status. */
+  const operationHashes = new Set<string>();
   // The copies come in any order; walking them by B2C id makes every sum and list of the build
   // independent of it.
   const rows = [...input.transactions].sort((left, right) => left.id.localeCompare(right.id));
 
   for (const row of rows) {
-    if (row.type !== 'transfer' && row.type !== 'swap') {
+    if (row.type.startsWith(POLYMARKET_PREFIX)) {
+      if (POLYMARKET_ACCEPTED.has(row.status)) {
+        polymarketRows.push(row);
+      }
+      continue;
+    }
+    if (row.type !== 'transfer' && row.type !== 'swap' && row.type !== 'deposit') {
       continue;
     }
     const network = input.chains.get(row.chainId);
     if (network === undefined) {
-      stats.outsideCatalog += row.status === COMPLETED ? 1 : 0;
+      stats.outsideCatalog += row.type !== 'deposit' && row.status === COMPLETED ? 1 : 0;
       continue;
+    }
+    if (row.type === 'deposit') {
+      if (row.status === COMPLETED) {
+        depositRows.push(row);
+      }
+      continue;
+    }
+    if (row.hash !== '') {
+      operationHashes.add(`${row.chainId}|${row.hash.toLowerCase()}`);
     }
     // Swap rows of every status are paired, so a leg not completed yet keeps its swap unverified.
     if (row.type === 'swap') {
@@ -397,6 +449,10 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
     }
     if (row.status !== COMPLETED) {
       continue;
+    }
+    const recipient = ownerOf(row.chainId, row.to);
+    if (recipient !== undefined) {
+      receipts.push({ network, user: recipient, hour: hourIndex(row.date) });
     }
     const token = resolve(row.chainId, row.token);
     operations.push({
@@ -483,13 +539,20 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
         swapFees: {},
         unpriced: emptyUnpriced(),
         transfersByAsset: {},
-        swapsByAsset: {}
+        swapsByAsset: {},
+        deposits: emptyDeposits()
       };
       hourly.set(key, facts);
     }
     return facts;
   };
   const activity = new Map<string, { network: NetworkId; user: string; hours: Set<number> }>();
+  const markActive = (network: NetworkId, user: string, hour: number): void => {
+    const key = `${network}|${user}`;
+    const entry = activity.get(key) ?? { network, user, hours: new Set<number>() };
+    entry.hours.add(hour);
+    activity.set(key, entry);
+  };
 
   for (const operation of operations) {
     const needsPrice =
@@ -528,14 +591,68 @@ export function aggregateActivity(input: AggregationInput): Aggregation {
     } else {
       addTo(facts[feesKey], operation.asset, Math.round(feeUsd * 100));
     }
-    const key = `${operation.network}|${operation.user}`;
-    const entry = activity.get(key) ?? {
-      network: operation.network,
-      user: operation.user,
-      hours: new Set<number>()
-    };
-    entry.hours.add(operation.hour);
-    activity.set(key, entry);
+    markActive(operation.network, operation.user, operation.hour);
+  }
+  for (const receipt of receipts) {
+    markActive(receipt.network, receipt.user, receipt.hour);
+  }
+
+  for (const row of depositRows) {
+    const network = input.chains.get(row.chainId);
+    const recipient = ownerOf(row.chainId, row.to);
+    if (network === undefined || recipient === undefined) {
+      continue;
+    }
+    const hour = hourIndex(row.date);
+    markActive(network, recipient, hour);
+    const internal =
+      ownerOf(row.chainId, row.from) !== undefined ||
+      (row.hash !== '' && operationHashes.has(`${row.chainId}|${row.hash.toLowerCase()}`));
+    if (internal) {
+      continue;
+    }
+    const token = resolve(row.chainId, row.token);
+    const price = !valued
+      ? null
+      : token.stable
+        ? 1
+        : prices.usd(token.symbol, Math.floor(hour / 24));
+    const deposits = factsAt(network, hour).deposits;
+    stats.deposits += 1;
+    addTo(deposits.count, token.symbol, 1);
+    if (price === null) {
+      stats.unpricedDeposits += 1;
+      addTo(deposits.unpriced, token.symbol, 1);
+    } else {
+      addTo(deposits.volume, token.symbol, Math.round(row.amount * price * 100));
+    }
+  }
+
+  // Polymarket rows are on Polygon or name the wallet of the user on another chain; the address
+  // alone finds the user.
+  const walletsByAddress = new Map<string, { network: NetworkId; user: string }[]>();
+  for (const user of input.users) {
+    for (const wallet of user.wallets) {
+      const network = input.chains.get(wallet.chainId);
+      if (network === undefined) {
+        continue;
+      }
+      const address = wallet.address.toLowerCase();
+      const list = walletsByAddress.get(address) ?? [];
+      list.push({ network, user: user.id });
+      walletsByAddress.set(address, list);
+    }
+  }
+  for (const row of polymarketRows) {
+    const hour = hourIndex(row.date);
+    for (const address of [row.from, row.to]) {
+      if (address === '' || address === POLYMARKET_COUNTERPARTY) {
+        continue;
+      }
+      for (const wallet of walletsByAddress.get(address.toLowerCase()) ?? []) {
+        markActive(wallet.network, wallet.user, hour);
+      }
+    }
   }
 
   const signups: UserSignup[] = [];
@@ -681,6 +798,8 @@ class LiveSource implements MetricsSource {
   private readonly wallets = new Map<NetworkId, WalletCoverage>();
   /** `false` when some stored hour was built without the counts per asset. */
   private countedByAsset = true;
+  /** `false` when some stored hour was built before deposits were recorded. */
+  private depositsRecorded = true;
   /** Polymarket fills per hour; `null` for builds without them or before any block was read. */
   private readonly polymarketHours: PolymarketHour[] | null;
   private readonly polymarketCoverage: PolymarketCoverage | null;
@@ -723,10 +842,22 @@ class LiveSource implements MetricsSource {
           : {
               transfersByAsset: { ...item.transfersByAsset },
               swapsByAsset: { ...item.swapsByAsset }
+            }),
+        ...(item.deposits === undefined
+          ? {}
+          : {
+              deposits: {
+                volume: { ...item.deposits.volume },
+                unpriced: { ...item.deposits.unpriced },
+                count: { ...item.deposits.count }
+              }
             })
       });
       if (item.transfersByAsset === undefined || item.swapsByAsset === undefined) {
         this.countedByAsset = false;
+      }
+      if (item.deposits === undefined) {
+        this.depositsRecorded = false;
       }
       this.hourly.set(item.network, series);
     }
@@ -787,6 +918,10 @@ class LiveSource implements MetricsSource {
 
   facts(network: NetworkId, window: TimeWindow): Facts {
     const total = blankFacts();
+    // A window without stored hours would read as no deposits in a build that never recorded them.
+    if (!this.depositsRecorded) {
+      delete total.deposits;
+    }
     const series = this.hourly.get(network);
     if (series === undefined) {
       return total;
