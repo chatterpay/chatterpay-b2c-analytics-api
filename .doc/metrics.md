@@ -1,6 +1,6 @@
 # Métricas de ChatterPay Analytics
 
-Cálculo de cada dato del sitio, por pantalla y en el orden en que aparece. Los nombres son los de la versión en español del sitio. La definición técnica de cada bloque de la API está en el [README](../README.md#metric-blocks).
+Definición y cálculo de cada dato de las pantallas Resumen, Usuarios e Ingresos. La especificación de los bloques de la API está en el [README](../README.md#metric-blocks).
 
 - [Reglas comunes](#reglas-comunes)
 - [Resumen](#resumen)
@@ -295,7 +295,7 @@ El indicador muestra Volumen de Polymarket cuando hay fills leídos. Si no hay, 
 
 ## Diferencias con un conteo on-chain
 
-Un tablero que suma los eventos de transferencia on-chain de las wallets (por ejemplo, en Dune) da un volumen mayor que Volumen total:
+Un conteo que suma los eventos de transferencia on-chain de las wallets da un volumen mayor que Volumen total:
 
 | Caso | Conteo on-chain típico | ChatterPay Analytics |
 |---|---|---|
