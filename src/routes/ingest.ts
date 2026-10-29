@@ -155,6 +155,8 @@ const reportSchema = object({
         unpricedFees: count,
         unverifiedSwaps: count,
         outsideCatalog: count,
+        deposits: count,
+        unpricedDeposits: count,
         users: count,
         undatedUsers: count,
         wallets: count,
