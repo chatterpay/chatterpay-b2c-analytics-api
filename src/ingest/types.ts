@@ -171,6 +171,16 @@ export interface TokenInfo {
    * history. Set by the analytics copy only.
    */
   sourcePresent?: boolean;
+  /** `logo` of the B2C document when it is an `https` URL; `null` or absent otherwise. */
+  logoUrl?: string | null;
+}
+
+/** Logo of a token symbol, downloaded by the ingestion from the `logo` URL of the B2C token list. */
+export interface TokenLogo {
+  symbol: string;
+  url: string;
+  /** The image as a `data:` URI; `null` while it could not be downloaded. */
+  logo: string | null;
 }
 
 /**
@@ -463,6 +473,8 @@ export interface LiveAggregates {
   wallets: NetworkWallets[];
   /** Absent in builds stored before the Polymarket fills were read. */
   polymarket?: PolymarketAggregates;
+  /** Absent in builds stored before the token logos were read. */
+  tokenLogos?: TokenLogo[];
 }
 
 /** Aggregates with the instant they were built and what the endpoints read with them. */
@@ -549,6 +561,8 @@ export interface IngestRepository {
   saveAggregates(aggregates: LiveAggregates, builtAt: Date, run: IngestRunStatus): Promise<void>;
   /** Instant of the last aggregate build; `null` when none was built. */
   aggregatesBuiltAt(): Promise<Date | null>;
+  /** Token logos of the last build; empty when none was built or it read none. */
+  tokenLogos(): Promise<TokenLogo[]>;
   /** The last built aggregates; `null` when none were built. */
   loadAggregates(): Promise<StoredAggregates | null>;
 }
