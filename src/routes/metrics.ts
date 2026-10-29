@@ -116,6 +116,12 @@ const networkReadReason = {
   ]
 } as const;
 const product = { type: 'string', enum: ['transfer', 'swap', 'polymarket'] } as const;
+const volumeProduct = {
+  type: 'string',
+  enum: ['transfer', 'swap', 'deposit', 'polymarket'],
+  description:
+    'Line of the volume per product. `deposit` is the value of the external deposits into user wallets, outside the total volume.'
+} as const;
 const retentionMonth = { type: 'integer', enum: [1, 3, 6] } as const;
 const count = { type: 'integer', minimum: 0 } as const;
 
@@ -223,7 +229,7 @@ const topCountriesBlock = block({
 const volumeByProductBlock = block({
   items: arrayOf(
     object({
-      product,
+      product: volumeProduct,
       availability,
       reason,
       volumeUsd: nullableDecimal,
